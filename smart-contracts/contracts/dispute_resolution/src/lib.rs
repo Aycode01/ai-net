@@ -6,13 +6,14 @@
 //! and resolution enforcement.
 
 mod errors;
+pub mod gas;
 mod types;
 
 pub use errors::Error;
 pub use types::*;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, Symbol, Val, Vec,
 };
 
 /// Evidence submission phase: 3 days (259,200 seconds).
@@ -64,6 +65,20 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
 
 #[contractimpl]
 impl DisputeResolutionContract {
+    /// Estimate CPU instructions for a dispute operation. For `dispute`, count
+    /// is the number of jurors (capped at the contract's juror limit).
+    pub fn estimate_gas(env: Env, operation: Symbol, count: u32) -> u64 {
+        let _ = env;
+        gas::estimate(operation, count)
+    }
+
+    /// Shared estimator interface. The parameter map contains one entry per
+    /// juror when estimating a dispute filing.
+    pub fn estimate(env: Env, operation: Symbol, params: Map<Symbol, Val>) -> u64 {
+        let _ = env;
+        <DisputeResolutionContract as gas_interface::GasEstimator>::estimate(operation, params)
+    }
+
     /// Initialize the dispute resolution contract.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -393,6 +408,12 @@ impl DisputeResolutionContract {
     pub fn get_evidence_count(env: Env, dispute_id: Symbol) -> u32 {
         let count_key = DataKey::Evidence(dispute_id, 0);
         env.storage().persistent().get(&count_key).unwrap_or(0)
+    }
+}
+
+impl gas_interface::GasEstimator for DisputeResolutionContract {
+    fn estimate(operation: Symbol, params: Map<Symbol, Val>) -> u64 {
+        gas::estimate(operation, params.len())
     }
 }
 

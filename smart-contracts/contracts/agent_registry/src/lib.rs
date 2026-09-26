@@ -31,6 +31,7 @@ pub mod audit;
 pub mod bridge;
 mod errors;
 mod events;
+pub mod gas;
 pub mod shared_exit_codes;
 mod types;
 mod upgrade;
@@ -70,25 +71,11 @@ const MAX_TOTAL_AGENT_STORAGE: u32 = 4096;
 
 // ─── Gas budget constants ────────────────────────────────────────────────────
 
-/// Fixed overhead charged once per transaction invocation.
-pub const GAS_TX_OVERHEAD: u64 = 40_000;
-/// Full cost of a single `register_agent` (includes overhead).
-pub const GAS_REGISTER_AGENT: u64 = 82_000;
-/// Marginal cost of each additional agent in a batch after the first.
-/// Reflects cached capability-index writes in `register_agents`.
-pub const GAS_REGISTER_AGENT_MARGINAL: u64 = 42_500;
-/// Full cost of a single error resolution (includes overhead).
-pub const GAS_RESOLVE_ERROR: u64 = 42_000;
-/// Marginal cost of each additional error resolution in a batch.
-pub const GAS_RESOLVE_ERROR_MARGINAL: u64 = 22_000;
-/// Full cost of a single `slash_bond` operation (admin, includes overhead).
-pub const GAS_SLASH_BOND: u64 = 52_000;
-/// Full cost of a `deregister_agent` that also returns a bond.
-pub const GAS_DEREGISTER_WITH_BOND: u64 = 68_000;
-/// Full cost of checking/removing a single expired error (includes overhead).
-pub const GAS_CLEANUP_ERROR: u64 = 16_000;
-/// Marginal cost of each additional error checked in a cleanup batch.
-pub const GAS_CLEANUP_ERROR_MARGINAL: u64 = 8_000;
+pub use gas::{
+    GAS_CLEANUP_ERROR, GAS_CLEANUP_ERROR_MARGINAL, GAS_DEREGISTER_WITH_BOND, GAS_REGISTER_AGENT,
+    GAS_REGISTER_AGENT_MARGINAL, GAS_RESOLVE_ERROR, GAS_RESOLVE_ERROR_MARGINAL, GAS_SLASH_BOND,
+    GAS_TX_OVERHEAD,
+};
 
 /// Default minimum bond required to register an agent, in stroops.
 /// 10 XLM = 100_000_000 stroops.  Admin can override via `set_min_bond`.
@@ -1957,42 +1944,13 @@ impl AgentRegistryContract {
     /// - `"slash_bond"` — flat cost per invocation, `count` is ignored beyond 1
     /// - `"deregister_with_bond"` — flat cost per invocation
     pub fn estimate_gas(env: Env, operation: String, count: u32) -> u64 {
-        if count == 0 {
-            return 0;
-        }
-
         let cfg = gas_config(&env);
+        gas::estimate(&env, operation, count, &cfg)
+    }
 
-        let register_agent = String::from_str(&env, "register_agent");
-        let register_agents = String::from_str(&env, "register_agents");
-        let resolve_error = String::from_str(&env, "resolve_error");
-        let resolve_errors = String::from_str(&env, "resolve_errors");
-        let slash_bond_op = String::from_str(&env, "slash_bond");
-        let deregister_bond_op = String::from_str(&env, "deregister_with_bond");
-        let cleanup_expired_errors = String::from_str(&env, "cleanup_expired_errors");
-
-        if operation == register_agent || operation == register_agents {
-            cfg.register_agent
-                + cfg
-                    .register_agent_marginal
-                    .saturating_mul((count - 1) as u64)
-        } else if operation == resolve_error || operation == resolve_errors {
-            cfg.resolve_error
-                + cfg
-                    .resolve_error_marginal
-                    .saturating_mul((count - 1) as u64)
-        } else if operation == cleanup_expired_errors {
-            cfg.cleanup_error
-                + cfg
-                    .cleanup_error_marginal
-                    .saturating_mul((count - 1) as u64)
-        } else if operation == slash_bond_op {
-            cfg.slash_bond.saturating_mul(count as u64)
-        } else if operation == deregister_bond_op {
-            cfg.deregister_with_bond.saturating_mul(count as u64)
-        } else {
-            0
-        }
+    pub fn estimate(env: Env, operation: Symbol, params: Map<Symbol, Val>) -> u64 {
+        let _ = env;
+        <AgentRegistryContract as gas_interface::GasEstimator>::estimate(operation, params)
     }
 
     /// Override empirical gas parameters stored in instance config.
@@ -2598,6 +2556,12 @@ impl AgentRegistryContract {
     /// ```
     pub fn error_mapper(_env: Env, raw_code: u32) -> Option<CommonExitCode> {
         shared_exit_codes::CommonExitCode::from_raw(raw_code)
+    }
+}
+
+impl gas_interface::GasEstimator for AgentRegistryContract {
+    fn estimate(operation: Symbol, params: Map<Symbol, Val>) -> u64 {
+        gas::estimate_shared(operation, params.len())
     }
 }
 
