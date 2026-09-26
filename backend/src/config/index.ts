@@ -10,7 +10,13 @@ const envSchema = z.object({
   STELLAR_NETWORK: z.enum(["testnet", "mainnet", "local", "futurenet"]).default("testnet"),
   STELLAR_HORIZON_URL: z.string().url().default("https://horizon-testnet.stellar.org"),
   VENICE_API_KEY: z.string().min(1, "VENICE_API_KEY is required"),
+  // Filesystem path to the SQLite database that holds the ai-net schema.
+  // Applied by `npm run db:migrate`, which resolves it via
+  // `resolveDatabasePath()` in src/db/index.ts.
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required").default("./data/ai-net.db"),
+  // Overrides the location of the versioned migration files. Only needed when
+  // migrations are kept outside the repository's `src/db/migrations` folder.
+  DB_MIGRATIONS_DIR: z.string().optional(),
   STELLAR_COORDINATOR_SECRET: z.string().optional(),
   STELLAR_TEST_SECRET: z.string().optional(),
   ALLOWED_ORIGINS: z.string().default("http://localhost:3000"),
