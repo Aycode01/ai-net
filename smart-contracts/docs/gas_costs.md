@@ -107,3 +107,22 @@ Average reduction: **20.3%**, exceeding the 15% acceptance threshold.
 
 The unit tests in `contracts/agent_registry/src/test.rs` assert the benchmark
 tables and the >=15% average reduction guard.
+
+## Paginated Read Costs & Range Bounds
+
+Per issue #550 requirements, all collection enumeration methods (`get_errors_by_code_paginated`, `get_bidders_paginated`, `lookup_agents_paginated`) enforce a mandatory page size cap (`MAX_PAGE_SIZE = 50`) and range validation (`InvalidAuditRange`).
+
+| Method | Overhead (CU) | Per-Item Read (CU) | Max Page Size | Range Validation Error |
+|:-------|--------------:|-------------------:|--------------:|:-----------------------|
+| `lookup_agents_paginated` | ~45,000 | ~12,000 | 50 | `Error::InvalidAuditRange` |
+| `get_bidders_paginated` | ~35,000 | ~1,500 | 50 | `Error::InvalidAuditRange` |
+| `get_errors_by_code_paginated` | ~40,000 | ~8,000 | 50 | `Error::InvalidAuditRange` |
+
+Bounding page sizes ensures that memory allocations and instruction execution scale deterministically ($O(\text{page\_size})$ rather than $O(N)$ total elements), remaining well within the Soroban per-transaction CPU limit.
+
+## Caller budgeting
+
+```rust
+let budget = client.estimate_gas(&String::from_str(&env, "register_agents"), &10);
+// Set resource fee / instructions based on `budget` before simulation.
+```

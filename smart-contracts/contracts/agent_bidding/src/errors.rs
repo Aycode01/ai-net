@@ -50,7 +50,6 @@ pub enum Error {
     WinnerNotDetermined = 16,
     /// The escrow for this auction has already been created.
     EscrowAlreadyCreated = 17,
-
     // ── Added by the front-running / commit-reveal hardening pass (#350) ────
     /// The reveal window has closed; this bid can no longer be revealed.
     RevealPeriodEnded = 18,
@@ -74,4 +73,8 @@ pub enum Error {
     AuctionNotAbortable = 25,
     /// An arithmetic operation overflowed while scoring bids.
     ArithmeticOverflow = 26,
+    /// Maximum bidders limit reached for this auction.
+    MaxBiddersReached = 27,
+    /// Range parameter (offset/limit) is invalid.
+    InvalidAuditRange = 28,
 }

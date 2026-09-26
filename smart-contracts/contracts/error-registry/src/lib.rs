@@ -56,11 +56,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map,
-<<<<<<< HEAD
-    Symbol, Vec,
-=======
     String, Symbol, Vec,
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
 };
 
 /// Maximum allowed TTL for a single record: **90 days** (in seconds).
@@ -82,6 +78,17 @@ pub const MAX_CLEANUP_BATCH: u32 = 100;
 /// giving a sensible default for the common "just clean up" call.
 pub const DEFAULT_CLEANUP_BATCH: u32 = 50;
 pub const CONTRACT_VERSION: &str = "1.0.0";
+
+/// Maximum number of records allowed under a single code index.
+pub const MAX_CODE_INDEX_SIZE: u32 = 500;
+
+/// Maximum page size for paginated queries.
+pub const MAX_PAGE_SIZE: u32 = 50;
+
+/// Default TTL threshold (ledgers remaining) below which we extend.
+pub const TTL_THRESHOLD: u32 = 100_000;
+/// Target TTL after extension (~31 days at 5s ledgers).
+pub const TTL_EXTEND_TO: u32 = 535_680;
 
 /// A single error report stored on-chain.
 ///
@@ -118,17 +125,12 @@ pub struct CleanupStats {
 /// Storage keys. All entries live in `persistent` storage.
 #[contracttype]
 pub enum DataKey {
-<<<<<<< HEAD
-    /// Contract admin address (instance storage).
-    Admin,
-    /// Whether the contract is paused (instance storage).
-    Paused,
-=======
     /// Admin address allowed to upgrade this contract.
     Admin,
     /// Current semantic contract version.
     Version,
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
+    /// Whether the contract is paused (instance storage).
+    Paused,
     /// Primary storage: `error_id` -> [`ErrorRecord`].
     Record(BytesN<32>),
     /// Secondary lookup index: `error_code` -> `Vec<error_id>`.
@@ -146,19 +148,20 @@ pub enum Error {
     InvalidTtl = 2,
     /// `created_at + ttl_seconds` would overflow `u64`.
     TtlOverflow = 3,
-<<<<<<< HEAD
     /// The contract is paused and cannot accept mutations.
     ContractPaused = 4,
-=======
+    /// Secondary index capacity reached for error code.
+    MaxCapacityReached = 5,
+    /// Range parameter (offset/limit) is invalid.
+    InvalidAuditRange = 6,
     /// Contract instance has already been initialized.
-    AlreadyInitialized = 4,
+    AlreadyInitialized = 7,
     /// Contract instance has not been initialized with an admin.
-    NotInitialized = 5,
+    NotInitialized = 8,
     /// Caller is not authorized for the requested admin action.
-    Unauthorized = 6,
+    Unauthorized = 9,
     /// Requested upgrade could not be applied.
-    UpgradeFailed = 7,
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
+    UpgradeFailed = 10,
 }
 
 #[contract]
@@ -188,14 +191,17 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
 
 #[contractimpl]
 impl ErrorRegistryContract {
-<<<<<<< HEAD
     /// Initialise the contract with an admin. Can only be called once.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyExists);
+            return Err(Error::AlreadyInitialized);
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
 
         env.events()
             .publish((symbol_short!("errreg"), symbol_short!("init")), admin);
@@ -205,43 +211,6 @@ impl ErrorRegistryContract {
     /// Return the current admin address, if set.
     pub fn get_admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
-    }
-
-    /// Pause the contract. Only admin can call this.
-    pub fn pause(env: Env) -> Result<(), Error> {
-        require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((symbol_short!("errreg"), symbol_short!("paused")), ());
-        Ok(())
-    }
-
-    /// Unpause the contract. Only admin can call this.
-    pub fn unpause(env: Env) -> Result<(), Error> {
-        require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((symbol_short!("errreg"), symbol_short!("unpaused")), ());
-        Ok(())
-    }
-
-    /// Returns whether the contract is currently paused.
-    pub fn is_paused(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-=======
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
-        Ok(())
     }
 
     pub fn admin(env: Env) -> Option<Address> {
@@ -274,7 +243,33 @@ impl ErrorRegistryContract {
             ),
         );
         Ok(())
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
+    }
+
+    /// Pause the contract. Only admin can call this.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("errreg"), symbol_short!("paused")), ());
+        Ok(())
+    }
+
+    /// Unpause the contract. Only admin can call this.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("errreg"), symbol_short!("unpaused")), ());
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
     }
 
     /// Submit a new error report with an explicit TTL.
@@ -326,8 +321,14 @@ impl ErrorRegistryContract {
             .persistent()
             .get(&code_key)
             .unwrap_or_else(|| Vec::new(&env));
+        if code_ids.len() >= MAX_CODE_INDEX_SIZE {
+            return Err(Error::MaxCapacityReached);
+        }
         code_ids.push_back(error_id.clone());
         env.storage().persistent().set(&code_key, &code_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&code_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         // Enumeration index used by cleanup.
         let mut all_ids: Vec<BytesN<32>> = env
@@ -339,9 +340,15 @@ impl ErrorRegistryContract {
         env.storage()
             .persistent()
             .set(&DataKey::AllErrorIds, &all_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::AllErrorIds, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         // Primary storage.
         env.storage().persistent().set(&error_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&error_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         env.events().publish(
             (symbol_short!("errreg"), symbol_short!("submitted")),
@@ -355,9 +362,15 @@ impl ErrorRegistryContract {
     /// expired. Expired records are treated exactly as if absent.
     pub fn get_error(env: Env, error_id: BytesN<32>) -> Option<ErrorRecord> {
         let now = env.ledger().timestamp();
+        let key = DataKey::Record(error_id);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
         env.storage()
             .persistent()
-            .get::<DataKey, ErrorRecord>(&DataKey::Record(error_id))
+            .get::<DataKey, ErrorRecord>(&key)
             .filter(|record| is_active(now, record))
     }
 
@@ -380,6 +393,42 @@ impl ErrorRegistryContract {
             }
         }
         records
+    }
+
+    /// Cursor-paginated read for records with range validation (InvalidAuditRange).
+    pub fn get_errors_by_code_paginated(
+        env: Env,
+        error_code: u32,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ErrorRecord>, Error> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(Error::InvalidAuditRange);
+        }
+
+        let all_active = Self::get_errors_by_code(env.clone(), error_code);
+        let total = all_active.len();
+
+        if total == 0 {
+            if offset != 0 {
+                return Err(Error::InvalidAuditRange);
+            }
+            return Ok(Vec::new(&env));
+        }
+
+        if offset >= total {
+            return Err(Error::InvalidAuditRange);
+        }
+
+        let mut page = Vec::new(&env);
+        let end = (offset + limit).min(total);
+        for i in offset..end {
+            if let Some(record) = all_active.get(i) {
+                page.push_back(record);
+            }
+        }
+
+        Ok(page)
     }
 
     /// Count active (non-expired) records carrying `error_code`.
