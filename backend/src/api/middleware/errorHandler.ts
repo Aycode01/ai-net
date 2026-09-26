@@ -1,22 +1,90 @@
 import type { Request, Response, NextFunction } from "express";
 import { createLogger } from "../../utils/logger";
 import { AppError } from "../../errors";
+import { getConfig } from "../../config";
+import { HTTP_STATUS_FOR_CODE } from "../../errors/ErrorCode";
 
-const log = createLogger();
+const isProduction = process.env.NODE_ENV === "production";
 
-const isDevelopment = process.env.NODE_ENV === "development";
+/**
+ * Build the canonical error envelope for every API response.
+ *
+ * Schema: { error: { code, message, details?, path, correlationId, timestamp? } }
+ */
+function buildErrorEnvelope({
+  code,
+  message,
+  statusCode,
+  path,
+  correlationId,
+  details,
+  includeTimestamp = true,
+}: {
+  code: string;
+  message: string;
+  statusCode: number;
+  path: string;
+  correlationId: string;
+  details?: unknown;
+  includeTimestamp?: boolean;
+}): Record<string, unknown> {
+  const envelope: Record<string, unknown> = {
+    error: {
+      code,
+      message,
+      path,
+      correlationId,
+    },
+  };
+
+  if (details !== undefined) {
+    (envelope.error as Record<string, unknown>).details = details;
+  }
+
+  if (includeTimestamp) {
+    (envelope.error as Record<string, unknown>).timestamp = new Date().toISOString();
+  }
+
+  // Legacy top-level fields kept for backward compatibility with older clients/tests
+  return {
+    ...envelope,
+    statusCode,
+    path,
+    requestId: correlationId,
+  };
+}
+
+/**
+ * Resolve the HTTP status for an unknown error that may carry a code/status.
+ */
+function resolveStatusCode(err: unknown): number {
+  if (err instanceof AppError) return err.statusCode;
+  return (
+    (err as any)?.statusCode ??
+    (err as any)?.status ??
+    HTTP_STATUS_FOR_CODE[(err as any)?.code] ??
+    500
+  );
+}
+
+/**
+ * Resolve the machine-readable error code for an unknown error.
+ */
+function resolveErrorCode(err: unknown, isDevelopment: boolean): string {
+  if (err instanceof AppError) return err.code;
+  return isDevelopment ? ((err as any)?.code ?? "INTERNAL_ERROR") : "INTERNAL_ERROR";
+}
 
 /**
  * Central Express error-handling middleware.
  *
- * Behaviour:
- *  - AppError instances are serialized with their structured fields.
- *  - Unknown errors are treated as 500 and their internals are hidden in
- *    production.
- *  - Every response carries the correlationId (from AppError or from
- *    res.locals) so clients can correlate API errors with backend traces.
- *  - Unhandled (non-AppError) errors are always logged with a full stack
- *    trace so they can be investigated server-side.
+ * Every response conforms to the canonical envelope:
+ *   { error: { code, message, details?, path, correlationId, timestamp } }
+ *
+ * AppError instances preserve their structured fields. Unknown errors are
+ * treated as 500 INTERNAL_ERROR and their internals are hidden in production.
+ * Every response carries the correlationId so clients can correlate API errors
+ * with backend traces.
  */
 export function errorHandler(
   err: unknown,
@@ -24,32 +92,57 @@ export function errorHandler(
   res: Response,
   _next: NextFunction,
 ): void {
-  // Resolve the correlationId from the error (preferred) or from the request.
+  const config = getConfig();
+  const isDevelopment = config.NODE_ENV === "development";
+
   const correlationId: string =
-    err instanceof AppError
+    (err instanceof AppError
       ? err.correlationId
-      : (res.locals.correlationId as string | undefined) ??
-        (res.locals.requestId as string | undefined) ??
-        "unknown";
+      : (res.locals.traceId as string | undefined) ??
+        (res.locals.correlationId as string | undefined)) ??
+    "unknown";
+
+  const requestId = (res.locals.requestId as string | undefined) ?? "unknown";
+  const path = req.path;
+
+  const log = createLogger({
+    ...(res.locals.logContext as Record<string, unknown> | undefined),
+    requestId,
+    traceId: correlationId,
+    route: req.route?.path ? `${req.baseUrl}${req.route.path}` : path,
+  });
+
+  const statusCode = resolveStatusCode(err);
+  const errorCode = resolveErrorCode(err, isDevelopment);
 
   if (err instanceof AppError) {
-    // ── Structured AppError ──────────────────────────────────────────────────
-    log.error(
-      {
-        err,
-        code: err.code,
-        statusCode: err.statusCode,
-        correlationId,
-        requestId: res.locals.requestId,
-        path: req.path,
-        method: req.method,
-      },
-      `AppError: ${err.code}`,
-    );
+    const logPayload: Record<string, unknown> = {
+      err,
+      error: err.message,
+      code: err.code,
+      statusCode: err.statusCode,
+      method: req.method,
+      path,
+      requestId,
+      correlationId,
+    };
 
-    const serialized = err.serialize(isDevelopment);
+    if (!err.isOperational) {
+      log.error({ ...logPayload, stack: err.stack }, "non-operational error");
+    } else {
+      log.warn(logPayload, "operational error");
+    }
 
-    res.status(err.statusCode).json({ error: serialized });
+    const body = buildErrorEnvelope({
+      code: err.code,
+      message: err.message,
+      statusCode: err.statusCode,
+      path,
+      correlationId,
+      details: err.details,
+    });
+
+    res.status(err.statusCode).json(body);
     return;
   }
 
@@ -57,39 +150,34 @@ export function errorHandler(
   // Always log the full stack so it can be investigated.
   log.error(
     {
+      event: "http.error",
       err,
+      code: errorCode,
+      statusCode,
       correlationId,
-      requestId: res.locals.requestId,
-      path: req.path,
+      requestId,
+      path,
       method: req.method,
+      payload: req.body,
       stack: err instanceof Error ? err.stack : undefined,
     },
     "unhandled error",
   );
 
-  const statusCode =
-    (err as any)?.statusCode ?? (err as any)?.status ?? 500;
+  const message = isProduction
+    ? "Internal server error"
+    : err instanceof Error
+      ? err.message || "Internal server error"
+      : "An unexpected error occurred";
 
-  const response: Record<string, unknown> = {
-    error: {
-      code:
-        isDevelopment
-          ? (err as any)?.code ?? "INTERNAL_SERVER_ERROR"
-          : "INTERNAL_SERVER_ERROR",
-      message: isDevelopment
-        ? (err instanceof Error ? err.message : "An unexpected error occurred")
-        : "An unexpected error occurred. Please try again later.",
-      correlationId,
-      timestamp: new Date().toISOString(),
-      ...(isDevelopment && err instanceof Error
-        ? { stack: err.stack }
-        : {}),
-    },
-    // Legacy fields kept for backward-compatibility with existing tests
+  const body = buildErrorEnvelope({
+    code: errorCode,
+    message,
     statusCode,
-    path: req.path,
-    requestId: res.locals.requestId,
-  };
+    path,
+    correlationId,
+    details: isDevelopment && err instanceof Error ? { stack: err.stack } : undefined,
+  });
 
-  res.status(statusCode).json(response);
+  res.status(statusCode).json(body);
 }
