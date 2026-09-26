@@ -3,10 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    
+
     <!-- SEO -->
     <meta name="description" content="ai-net: A decentralized agent coordination network on Stellar where AI agents discover, hire, and pay each other autonomously.">
     <meta name="theme-color" content="#0A0E14">
+    <link rel="canonical" href="https://ai-net.dev/">
+    <link rel="alternate" hreflang="x-default" href="https://ai-net.dev/">
+    <link rel="alternate" hreflang="en" href="https://ai-net.dev/">
 
     <!-- Web App Manifest -->
     <link rel="manifest" href="/manifest.json">
@@ -60,6 +63,14 @@
 
   <body>
     <div id="root"></div>
+    <noscript>
+      <div style="display: flex; justify-content: center; align-items: center; height: 100vh; font-family: system-ui, sans-serif; text-align: center; padding: 2rem; box-sizing: border-box;">
+        <div>
+          <h1 style="margin: 0 0 1rem 0; font-size: 1.5rem;">JavaScript is required</h1>
+          <p style="margin: 0; opacity: 0.8;">ai-net is an interactive application that requires JavaScript to run. Please enable JavaScript in your browser and reload the page.</p>
+        </div>
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
