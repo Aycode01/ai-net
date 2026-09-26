@@ -411,5 +411,44 @@
   "agentWatchdog.sinceHeartbeat": "Silent for",
   "agent.output.noMatch": "No output matching search filter \"{{query}}\".",
   "agent.research.tableOfContents": "Table of contents",
-  "agent.research.contentTitle": "Research Report Content"
+  "agent.research.contentTitle": "Research Report Content",
+  "task": {
+    "cost": {
+      "title": "Token cost",
+      "inProgress": "in progress",
+      "spent": "Spent",
+      "tokens": "Tokens",
+      "calls": "Calls",
+      "call": "call",
+      "remaining": "Remaining",
+      "budgetUsage": "Budget used",
+      "overBudget": "over budget",
+      "trimmed": "trimmed",
+      "trimmedHint": "Prompt was trimmed to fit the remaining budget",
+      "exhausted": "budget",
+      "noUsage": "No LLM calls recorded for this task yet."
+    }
+  },
+  "watchdog": {
+    "title": "Agent health",
+    "refresh": "Refresh",
+    "loading": "Loading…",
+    "allHealthy": "No agent health alerts.",
+    "quarantined": "Quarantined",
+    "silentSeconds": "silent {{seconds}}s",
+    "silentMinutes": "silent {{minutes}}m",
+    "silentHours": "silent {{hours}}h",
+    "type": {
+      "heartbeat_stale": "heartbeat stale",
+      "quarantined": "quarantined",
+      "evicted": "evicted",
+      "recovered": "recovered",
+      "eviction_failed": "eviction failed"
+    }
+  },
+  "page": {
+    "dashboard": {
+      "totalCost": "LLM spend"
+    }
+  }
 }

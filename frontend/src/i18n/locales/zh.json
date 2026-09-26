@@ -384,5 +384,44 @@
   "agentWatchdog.sinceHeartbeat": "静默时长",
   "agent.output.noMatch": "没有符合搜索条件“{{query}}”的输出。",
   "agent.research.tableOfContents": "目录",
-  "agent.research.contentTitle": "研究报告内容"
+  "agent.research.contentTitle": "研究报告内容",
+  "task": {
+    "cost": {
+      "title": "Token 花费",
+      "inProgress": "进行中",
+      "spent": "已花费",
+      "tokens": "Token 数",
+      "calls": "调用次数",
+      "call": "次调用",
+      "remaining": "剩余",
+      "budgetUsage": "预算使用量",
+      "overBudget": "超出预算",
+      "trimmed": "已裁剪",
+      "trimmedHint": "提示词为适配剩余预算已被裁剪",
+      "exhausted": "预算耗尽",
+      "noUsage": "该任务暂无 LLM 调用记录。"
+    }
+  },
+  "watchdog": {
+    "title": "Agent 健康状态",
+    "refresh": "刷新",
+    "loading": "加载中…",
+    "allHealthy": "暂无 Agent 健康告警。",
+    "quarantined": "已隔离",
+    "silentSeconds": "静默 {{seconds}} 秒",
+    "silentMinutes": "静默 {{minutes}} 分钟",
+    "silentHours": "静默 {{hours}} 小时",
+    "type": {
+      "heartbeat_stale": "心跳超时",
+      "quarantined": "已隔离",
+      "evicted": "已驱逐",
+      "recovered": "已恢复",
+      "eviction_failed": "驱逐失败"
+    }
+  },
+  "page": {
+    "dashboard": {
+      "totalCost": "LLM 花费"
+    }
+  }
 }

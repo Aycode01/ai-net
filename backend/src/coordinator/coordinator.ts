@@ -17,11 +17,29 @@ import { tracingService } from '../services/tracing';
 import type { Job } from '../queue/jobStore';
 import { selectFallbackAgent } from './dispatch';
 import {
+  BudgetExhaustedError,
+  budgetLimitsFromEnv,
+  estimateTokens,
+  ledgerFor,
+  persistNodeUsage,
+  settleTaskCost,
+  type BudgetLimits,
+  type LlmUsage,
+  type TaskBudgetLedger,
+} from '../services/budget';
+import {
   currentTraceId,
   currentSpanId,
   runWithTraceContext,
   childSpanContext,
 } from '../services/traceContext';
+
+/**
+ * The exact string budgeted agents return when they halt themselves. Kept in
+ * sync with `BaseAgent` / `ResearchAgent`; it is a wire value, so it lives here
+ * as a named constant rather than an inline literal.
+ */
+const BUDGET_EXHAUSTED_MARKER = 'BUDGET_EXHAUSTED';
 
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -52,6 +70,8 @@ export interface CoordinatorOptions {
   qualityScorer?: QualityScorer;
   /** Correlation ID propagated to downstream HTTP requests and used for tracing spans. */
   correlationId?: string;
+  /** Token budget limits; defaults to the TASK_TOKEN_BUDGET env config. */
+  budgetLimits?: Partial<BudgetLimits>;
 }
 
 class ConcurrencyLimiter {
@@ -104,8 +124,64 @@ function asErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : 'unknown';
 }
 
+/**
+ * Pull the agent's actual output out of its response envelope.
+ *
+ * A budget-aware agent returns `{ result, usage }`; a legacy one returns the
+ * result directly. Accepting both means the budget work does not require every
+ * agent to be redeployed in lockstep.
+ */
+function unwrapAgentResult(payload: unknown): unknown {
+  if (payload && typeof payload === 'object' && 'result' in (payload as Record<string, unknown>)) {
+    return (payload as Record<string, unknown>).result;
+  }
+  return payload;
+}
+
+/** Read the model an agent says it used, for accurate per-model pricing. */
+function readAgentModel(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const model = (payload as Record<string, unknown>).model;
+  return typeof model === 'string' && model.length > 0 ? model : undefined;
+}
+
+/** Read provider-reported usage off an agent response, if it sent any. */
+function readAgentUsage(payload: unknown): LlmUsage | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const usage = (payload as Record<string, unknown>).usage as Record<string, unknown> | undefined;
+  if (!usage || typeof usage !== 'object') return undefined;
+
+  const promptTokens = Number(usage.promptTokens ?? usage.prompt_tokens);
+  const completionTokens = Number(usage.completionTokens ?? usage.completion_tokens);
+  if (!Number.isFinite(promptTokens) || !Number.isFinite(completionTokens)) return undefined;
+
+  const total = Number(usage.totalTokens ?? usage.total_tokens);
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: Number.isFinite(total) ? total : promptTokens + completionTokens,
+  };
+}
+
 function isRetryable(err: unknown): boolean {
   return err instanceof RetryableAgentError;
+}
+
+/**
+ * Detect an agent-side budget halt.
+ *
+ * A budgeted agent cannot throw across the HTTP boundary, so when its budget
+ * runs out it returns `{ error: "BUDGET_EXHAUSTED" }` as an ordinary 200
+ * response. Without this check the coordinator would unwrap that into a
+ * "successful" node whose result is the string `BUDGET_EXHAUSTED` — the run
+ * would appear to succeed while producing no output, and downstream nodes would
+ * happily consume the error text as if it were a result.
+ */
+function isBudgetHalt(result: unknown): boolean {
+  if (typeof result === 'string') return result === BUDGET_EXHAUSTED_MARKER;
+  if (!result || typeof result !== 'object') return false;
+  const error = (result as Record<string, unknown>).error;
+  return typeof error === 'string' && error === BUDGET_EXHAUSTED_MARKER;
 }
 
 function sortByCost(agents: AgentRegistration[]): AgentRegistration[] {
@@ -123,6 +199,12 @@ export class Coordinator {
   private readonly qualityScorer: QualityScorer;
   private readonly log: pino.Logger;
   private correlationId: string;
+  /**
+   * Per-task token budget. Resolved lazily on first use so constructing a
+   * Coordinator in a test never needs a config module.
+   */
+  private readonly budgetLimits: BudgetLimits;
+  private readonly ledgers = new Map<string, TaskBudgetLedger>();
 
   constructor(options: CoordinatorOptions = {}) {
     this.bus = options.eventBus ?? eventBus;
@@ -134,8 +216,84 @@ export class Coordinator {
     this.paymentService = options.paymentService ?? { release: async () => 'mock-hash' };
     this.qualityScorer = options.qualityScorer ?? new QualityScorer();
     this.log = options.logger ?? createLogger();
+    this.budgetLimits = { ...budgetLimitsFromEnv(), ...options.budgetLimits };
     // Resolve correlationId: explicit option > AsyncLocalStorage > empty string
     this.correlationId = options.correlationId ?? currentTraceId() ?? '';
+  }
+
+  /**
+   * The token ledger for a task, created on first access.
+   *
+   * The owning wallet is read from the task row so the persisted cost snapshot
+   * records who was billed. Without it every `task_costs` row would carry an
+   * empty `walletPublicKey`, and an operator could not attribute spend to a
+   * payer from the database alone.
+   */
+  private ledgerForTask(taskId: string): TaskBudgetLedger {
+    let ledger = this.ledgers.get(taskId);
+    if (!ledger) {
+      let walletPublicKey = '';
+      try {
+        walletPublicKey = createTaskDb(getTaskDb()).findById(taskId)?.walletPublicKey ?? '';
+      } catch (err) {
+        // Accounting must not be the reason a task cannot start. A ledger with
+        // an unknown owner still enforces the cap correctly.
+        this.log.warn({ err, taskId }, 'could not resolve task owner for cost accounting');
+      }
+      ledger = ledgerFor(taskId, { walletPublicKey, limits: this.budgetLimits });
+      this.ledgers.set(taskId, ledger);
+    }
+    return ledger;
+  }
+
+  /**
+   * Tokens the given task's node may still spend.
+   *
+   * Falls back to the per-call ceiling when the task has no ledger (a
+   * standalone `dispatchNode` call), so the agent always receives a sane cap
+   * rather than an unbounded one.
+   */
+  private currentAllowance(taskId: string | undefined): number {
+    if (taskId === undefined) return this.budgetLimits.maxTokensPerCall;
+    return this.ledgerForTask(taskId).allowanceFor();
+  }
+
+  /**
+   * Fold a node's LLM spend into the task ledger and the database.
+   *
+   * Prefers the agent's own reported usage; falls back to estimating from the
+   * serialized result, so a legacy agent that reports nothing still shows up in
+   * the cost breakdown instead of costing nothing.
+   */
+  private recordNodeUsage(
+    node: DAGNode,
+    agentId: string,
+    payload: unknown,
+    result: unknown,
+    taskId: string
+  ): void {
+    const ledger = this.ledgerForTask(taskId);
+    const model = readAgentModel(payload) ?? node.type;
+
+    const reported = readAgentUsage(payload);
+    const promptText = typeof node.prompt === 'string' ? node.prompt : '';
+    const resultText = typeof result === 'string' ? result : JSON.stringify(result ?? '');
+
+    ledger.record(node.nodeId, {
+      agentId,
+      agentType: node.type,
+      model,
+      usage: reported,
+      prompt: promptText,
+      completion: resultText,
+    });
+
+    const entry = ledger
+      .agents()
+      .find(candidate => candidate.nodeId === node.nodeId);
+    if (!entry) return;
+
+    persistNodeUsage(taskId, node.nodeId, entry);
   }
 
   async executeDAG(
@@ -213,6 +371,12 @@ export class Coordinator {
 
         const status = failed.size === 0 ? 'completed' : 'failed';
         updateTaskIfPresent(taskId, { status, dag });
+
+        // Settle the billing snapshot before emitting task_completed/failed:
+        // a client that reacts to the event and immediately reads /cost should
+        // not race the write.
+        this.settleCost(taskId, status);
+
         if (status === 'completed') {
           onProgress?.(100);
         }
@@ -320,7 +484,19 @@ export class Coordinator {
     });
   }
 
-  async dispatchNode(node: DAGNode, context: string, agent?: AgentRegistration): Promise<unknown> {
+  /**
+   * Send a node to an agent over HTTP.
+   *
+   * `taskId` is optional so the method stays usable standalone (and in tests)
+   * without a budget context; when supplied, the agent is told its token
+   * allowance and the call's usage is folded into the task's ledger.
+   */
+  async dispatchNode(
+    node: DAGNode,
+    context: string,
+    agent?: AgentRegistration,
+    taskId?: string
+  ): Promise<unknown> {
     const target = agent ?? await this.cheapestAgentFor(node.type);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -339,11 +515,21 @@ export class Coordinator {
       }
     }
 
+    // Tell the agent how much it may spend, so it can cap max_tokens and trim
+    // its prompt before calling the provider. Omitted entirely when we have no
+    // task context, so an unbudgeted call looks exactly as it did before.
+    const budgeted = taskId !== undefined;
+    const allowance = this.currentAllowance(taskId);
+
     try {
       const response = await this.fetchImpl(`${target.endpoint.replace(/\/$/, '')}/execute`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ node, context }),
+        body: JSON.stringify({
+          node,
+          context,
+          ...(budgeted ? { budget: { maxTokens: allowance } } : {}),
+        }),
         signal: controller.signal,
       });
 
@@ -355,7 +541,16 @@ export class Coordinator {
       }
 
       const text = await response.text();
-      return text ? JSON.parse(text) : {};
+      const parsed = text ? JSON.parse(text) : {};
+
+      // An agent that understands budgets reports its own usage; one that does
+      // not returns a bare result, in which case we estimate from the payload
+      // rather than recording nothing.
+      const result = unwrapAgentResult(parsed);
+      if (budgeted) {
+        this.recordNodeUsage(node, target.id, parsed, result, taskId!);
+      }
+      return result;
     } catch (err) {
       if (err instanceof NonRetryableAgentError || err instanceof RetryableAgentError) {
         throw err;
@@ -403,8 +598,49 @@ export class Coordinator {
       'task.execution_trace'
     );
 
+    // Budget gate: refuse to start work we cannot pay for. Halting at the node
+    // boundary (rather than letting the request go out and overrun) is what
+    // makes the cap an actual cap.
+    const ledger = this.ledgerForTask(taskId);
+    try {
+      ledger.assertCanSpend();
+    } catch (err) {
+      if (err instanceof BudgetExhaustedError) {
+        this.failNodeForBudget(taskId, node, ledger, err, nodeSpan);
+        return 'failed';
+      }
+      throw err;
+    }
+
+    // Claim this node's share of the remaining budget *before* dispatching.
+    // Without the claim, every concurrently-running node would size itself
+    // against the same untouched remainder and the task could authorise several
+    // times its cap. `dispatchNode` settles the claim via `record()` when it
+    // sees provider usage.
+    ledger.reserve(node.nodeId, ledger.allowanceFor());
+
     try {
       const { agentId, result } = await this.dispatchWithRetry(taskId, node, this.contextFor(node, nodeById));
+
+      // Paths that dispatch without a parseable agent response (a
+      // `dispatchOverride`, or an agent that reports no usage) never settle the
+      // claim. Give it back, or the task silently loses budget it never spent.
+      if (ledger.usageCallsFor(node.nodeId) === 0) {
+        ledger.release(node.nodeId);
+      }
+
+      // An agent that ran out of budget reports it as a normal response. Fail
+      // the node so the DAG stops here, instead of storing the error marker as
+      // a result and paying for downstream work that consumes it.
+      if (isBudgetHalt(result)) {
+        const budgetError = new BudgetExhaustedError(
+          taskId,
+          ledger.usedTokens,
+          ledger.limits.maxTokensPerTask,
+        );
+        this.failNodeForBudget(taskId, node, ledger, budgetError, nodeSpan);
+        return 'failed';
+      }
 
       node.status = 'completed';
       node.result = result;
@@ -458,6 +694,12 @@ export class Coordinator {
 
       return 'completed';
     } catch (err) {
+      // The call never produced usage, so give the claim back rather than
+      // leaving the task permanently short of budget it never spent.
+      if (ledger.usageCallsFor(node.nodeId) === 0) {
+        ledger.release(node.nodeId);
+      }
+
       node.status = 'failed';
       node.error = asErrorMessage(err);
       updateNode(taskId, node.nodeId, { status: 'failed', error: node.error });
@@ -488,6 +730,86 @@ export class Coordinator {
       if (nodeSpan) tracingService.endSpan(nodeSpan.spanId, 'failed', { error: asErrorMessage(err) });
 
       return 'failed';
+    }
+  }
+
+  /**
+   * Persist a task's final cost snapshot and drop its in-memory ledger.
+   *
+   * Also releases the coordinator's own reference, so a long-lived process that
+   * runs many tasks does not retain a ledger per task for its lifetime.
+   */
+  private settleCost(taskId: string, status: 'completed' | 'failed'): void {    const ledger = this.ledgers.get(taskId);
+    try {
+      // A task that produced no LLM calls has no ledger, and therefore no cost
+      // to settle — not an error.
+      if (ledger) {
+        const snapshot = settleTaskCost(taskId);
+        if (snapshot) {
+          this.log.info(
+            {
+              taskId,
+              status,
+              usedTokens: snapshot.usedTokens,
+              budgetTokens: snapshot.budgetTokens,
+              costUsd: snapshot.costUsd,
+              exceeded: snapshot.exceeded,
+            },
+            'task cost settled',
+          );
+        }
+      }
+    } catch (err) {
+      this.log.warn({ err, taskId }, 'failed to settle task cost');
+    } finally {
+      this.ledgers.delete(taskId);
+    }
+  }
+
+  /**
+   * Fail a node because the task's token budget is spent.
+   *
+   * The node is marked failed with a stable `budget_exhausted` code rather than
+   * the raw error text, so clients and the UI can detect it without string
+   * matching on a message. The rest of the DAG then fails as
+   * `upstream_failed` through the normal blocked-node path, which is what makes
+   * the halt graceful: the task ends in a well-defined state with the spend
+   * that got it there, instead of throwing mid-flight.
+   */
+  private failNodeForBudget(
+    taskId: string,
+    node: DAGNode,
+    ledger: TaskBudgetLedger,
+    err: BudgetExhaustedError,
+    nodeSpan: { spanId: string } | null
+  ): void {
+    ledger.markExhausted(node.nodeId, 'unassigned', node.type);
+
+    node.status = 'failed';
+    node.error = 'budget_exhausted';
+    updateNode(taskId, node.nodeId, { status: 'failed', error: node.error });
+    this.bus.emit(taskId, {
+      type: 'node_failed',
+      taskId,
+      nodeId: node.nodeId,
+      timestamp: now(),
+      payload: { error: 'budget_exhausted', reason: err.message },
+    });
+
+    this.log.warn(
+      {
+        taskId,
+        nodeId: node.nodeId,
+        agentType: node.type,
+        usedTokens: ledger.usedTokens,
+        budgetTokens: ledger.limits.maxTokensPerTask,
+        costUsd: ledger.costUsd,
+      },
+      'node halted — task token budget exhausted',
+    );
+
+    if (nodeSpan) {
+      tracingService.endSpan(nodeSpan.spanId, 'failed', { error: 'budget_exhausted' });
     }
   }
 
@@ -587,7 +909,10 @@ export class Coordinator {
 
     for (let attempt = 1; attempt <= PRIMARY_ATTEMPTS; attempt += 1) {
       try {
-        return { agentId: primary.id, result: await this.dispatchNode(node, context, primary) };
+        return {
+          agentId: primary.id,
+          result: await this.dispatchNode(node, context, primary, taskId),
+        };
       } catch (err) {
         lastError = err;
         if (!isRetryable(err)) throw err;
@@ -616,7 +941,10 @@ export class Coordinator {
         },
       });
       try {
-        return { agentId: fallback.id, result: await this.dispatchNode(node, context, fallback) };
+        return {
+          agentId: fallback.id,
+          result: await this.dispatchNode(node, context, fallback, taskId),
+        };
       } catch (err) {
         lastError = err;
       }

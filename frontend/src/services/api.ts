@@ -1,4 +1,11 @@
-import { NetworkStats, TaskResponse, AgentRecord } from '../types/api';
+import {
+  NetworkStats,
+  TaskResponse,
+  AgentRecord,
+  TaskCost,
+  AgentWatchdogAlert,
+  QuarantinedAgent,
+} from '../types/api';
 import { progressStart, progressDone, progressError } from '../context/RouteProgressContext';
 import { readWalletSession } from './walletSession';
 
@@ -126,7 +133,41 @@ export const apiClient = {
 };
 
 export const getStats = async (): Promise<NetworkStats> => {
+  // The stats router is mounted at /api/stats and defines its own /stats route.
   return apiClient.get<NetworkStats>('/api/stats/stats');
+};
+
+/**
+ * Token budget and LLM spend for one task (Issue #390).
+ *
+ * The backend scopes this to the calling wallet, so the session's public key is
+ * attached via the shared auth header.
+ */
+export const getTaskCost = async (taskId: string): Promise<TaskCost> => {
+  return apiClient.get<TaskCost>(`/api/tasks/${taskId}/cost`);
+};
+
+/** Recent watchdog alerts, newest first (Issue #379). */
+export const getWatchdogAlerts = async (options: {
+  limit?: number;
+  unresolvedOnly?: boolean;
+} = {}): Promise<AgentWatchdogAlert[]> => {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.unresolvedOnly) params.set('unresolvedOnly', 'true');
+  const query = params.toString();
+  return apiClient.get<AgentWatchdogAlert[]>(
+    `/api/agent-watchdog/alerts${query ? `?${query}` : ''}`,
+  );
+};
+
+/** Agents currently inside their heartbeat grace period (Issue #379). */
+export const getQuarantinedAgents = async (): Promise<QuarantinedAgent[]> => {
+  return apiClient.get<QuarantinedAgent[]>('/api/agent-watchdog/quarantine');
+};
+
+export const getRecentTasks = async (walletAddress: string): Promise<TaskResponse[]> => {
+  return apiClient.get<TaskResponse[]>(`/api/wallets/${walletAddress}/tasks?limit=5`);
 };
 
 export const getAgents = async (): Promise<AgentRecord[]> => {
