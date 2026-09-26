@@ -65,3 +65,72 @@ Emitted when an agent is deregistered and removed from the contract index.
       pub agent_id: Symbol,       // Unique ID of the removed agent
   }
   ```
+
+---
+
+# Dispute Resolution Contract Events
+
+This section details Soroban events emitted by the `dispute_resolution` smart contract.
+
+## Event Topics
+
+All dispute resolution events share the first topic (`dispute`) to group dispute-related operations. The second topic indicates the specific operation type.
+
+---
+
+### 1. Dispute Filed
+
+Emitted when a dispute is filed.
+
+- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
+- **Topic 2**: `Symbol::new(env, "filed")`
+- **Data (Structure)**: `DisputeFiledEvent`
+
+---
+
+### 2. Evidence Submitted
+
+Emitted when evidence is submitted for a dispute.
+
+- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
+- **Topic 2**: `Symbol::new(env, "evidence")`
+- **Data (Structure)**: `EvidenceSubmittedEvent`
+
+---
+
+### 3. Vote Cast
+
+Emitted when an assigned juror casts a vote on a dispute.
+
+- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
+- **Topic 2**: `Symbol::new(env, "vote_cast")`
+- **Data (Structure)**: `VoteCastEvent`
+  ```rust
+  pub struct VoteCastEvent {
+      pub dispute_id: Symbol,     // Identifier of the dispute
+      pub juror: Address,         // Address of voting juror
+      pub side: VoteSide,         // Side voted for (0 = Client, 1 = Agent)
+      pub timestamp: u64,         // Ledger timestamp when vote was cast
+  }
+  ```
+
+---
+
+### 4. Dispute Resolved
+
+Emitted when a dispute is resolved after voting.
+
+- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
+- **Topic 2**: `Symbol::new(env, "resolved")`
+- **Data (Structure)**: `DisputeResolvedEvent`
+
+---
+
+### 5. Dispute Appealed
+
+Emitted when a resolved dispute is appealed.
+
+- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
+- **Topic 2**: `Symbol::new(env, "appealed")`
+- **Data (Structure)**: `DisputeAppealedEvent`
+

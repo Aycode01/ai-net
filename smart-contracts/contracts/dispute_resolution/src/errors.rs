@@ -18,6 +18,7 @@ pub enum Error {
     AppealWindowClosed = 10,
     NoJurorsAvailable = 11,
     InvalidEvidence = 12,
+    InvalidBond = 13,
 }
 
 impl Error {
@@ -35,6 +36,7 @@ impl Error {
             10 => Some(Error::AppealWindowClosed),
             11 => Some(Error::NoJurorsAvailable),
             12 => Some(Error::InvalidEvidence),
+            13 => Some(Error::InvalidBond),
             _ => None,
         }
     }

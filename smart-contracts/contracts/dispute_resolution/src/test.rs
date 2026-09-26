@@ -4,7 +4,7 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events, Ledger as _},
     Address, BytesN, Env, Symbol, Vec,
 };
 
@@ -61,12 +61,13 @@ fn file_dispute_success() {
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
 
-    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &100_000);
     let dispute = client.get_dispute(&dispute_id);
     assert!(dispute.is_some());
     let dispute = dispute.unwrap();
     assert_eq!(dispute.status, DisputeStatus::Filed);
     assert_eq!(dispute.agent_id, Symbol::new(&env, "agent1"));
+    assert_eq!(dispute.bond_amount, 100_000);
 }
 
 #[test]
@@ -80,9 +81,26 @@ fn file_dispute_no_jurors_fails() {
         client.try_file_dispute(
             &filer,
             &Symbol::new(&env, "agent1"),
-            &Symbol::new(&env, "disp_bad")
+            &Symbol::new(&env, "disp_bad"),
+            &0
         ),
         Err(Ok(Error::NoJurorsAvailable))
+    );
+}
+
+#[test]
+fn file_dispute_invalid_bond_fails() {
+    let (env, client, _admin, _jurors) = setup_with_jurors();
+    let filer = Address::generate(&env);
+
+    assert_eq!(
+        client.try_file_dispute(
+            &filer,
+            &Symbol::new(&env, "agent1"),
+            &Symbol::new(&env, "disp_bad_bond"),
+            &-100
+        ),
+        Err(Ok(Error::InvalidBond))
     );
 }
 
@@ -91,7 +109,7 @@ fn submit_evidence_success() {
     let (env, client, _admin, _jurors) = setup_with_jurors();
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
-    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
 
     let mut arr = [0u8; 32];
     arr[0] = 42;
@@ -103,17 +121,21 @@ fn submit_evidence_success() {
 }
 
 #[test]
-fn cast_vote_success() {
+fn cast_vote_success_and_emits_event() {
     let (env, client, _admin, jurors) = setup_with_jurors();
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
-    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id);
-
-    let juror = jurors.get(0).unwrap();
-    client.cast_vote(&dispute_id, &juror, &VoteSide::Client);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
 
     let dispute = client.get_dispute(&dispute_id).unwrap();
-    assert_eq!(dispute.status, DisputeStatus::Voting);
+    let juror = dispute.jurors.get(0).unwrap();
+    client.cast_vote(&dispute_id, &juror, &VoteSide::Client);
+
+    let updated_dispute = client.get_dispute(&dispute_id).unwrap();
+    assert_eq!(updated_dispute.status, DisputeStatus::Voting);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
 }
 
 #[test]
@@ -121,7 +143,7 @@ fn cast_vote_non_juror_fails() {
     let (env, client, _admin, _jurors) = setup_with_jurors();
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
-    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
 
     let outsider = Address::generate(&env);
     assert_eq!(
@@ -135,9 +157,10 @@ fn cast_vote_duplicate_fails() {
     let (env, client, _admin, jurors) = setup_with_jurors();
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
-    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
 
-    let juror = jurors.get(0).unwrap();
+    let dispute = client.get_dispute(&dispute_id).unwrap();
+    let juror = dispute.jurors.get(0).unwrap();
     client.cast_vote(&dispute_id, &juror, &VoteSide::Client);
 
     assert_eq!(
@@ -148,18 +171,21 @@ fn cast_vote_duplicate_fails() {
 
 #[test]
 fn resolve_dispute_after_voting() {
-    let (env, client, _admin, jurors) = setup_with_jurors();
+    let (env, client, _admin, _jurors) = setup_with_jurors();
 
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
-    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
+
+    let dispute = client.get_dispute(&dispute_id).unwrap();
+    let assigned_jurors = dispute.jurors;
 
     // Cast votes: 3 for client, 2 for agent
-    client.cast_vote(&dispute_id, &jurors.get(0).unwrap(), &VoteSide::Client);
-    client.cast_vote(&dispute_id, &jurors.get(1).unwrap(), &VoteSide::Client);
-    client.cast_vote(&dispute_id, &jurors.get(2).unwrap(), &VoteSide::Client);
-    client.cast_vote(&dispute_id, &jurors.get(3).unwrap(), &VoteSide::Agent);
-    client.cast_vote(&dispute_id, &jurors.get(4).unwrap(), &VoteSide::Agent);
+    client.cast_vote(&dispute_id, &assigned_jurors.get(0).unwrap(), &VoteSide::Client);
+    client.cast_vote(&dispute_id, &assigned_jurors.get(1).unwrap(), &VoteSide::Client);
+    client.cast_vote(&dispute_id, &assigned_jurors.get(2).unwrap(), &VoteSide::Client);
+    client.cast_vote(&dispute_id, &assigned_jurors.get(3).unwrap(), &VoteSide::Agent);
+    client.cast_vote(&dispute_id, &assigned_jurors.get(4).unwrap(), &VoteSide::Agent);
 
     // Advance past voting deadline
     env.ledger().with_mut(|l| {
@@ -174,14 +200,97 @@ fn resolve_dispute_after_voting() {
 }
 
 #[test]
+fn tie_breaking_defaults_to_agent() {
+    let (env, client, _admin, _jurors) = setup_with_jurors();
+
+    let filer = Address::generate(&env);
+    let dispute_id = Symbol::new(&env, "disp_tie");
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
+
+    let dispute = client.get_dispute(&dispute_id).unwrap();
+    let assigned_jurors = dispute.jurors;
+
+    // Cast equal votes: 2 for client, 2 for agent
+    client.cast_vote(&dispute_id, &assigned_jurors.get(0).unwrap(), &VoteSide::Client);
+    client.cast_vote(&dispute_id, &assigned_jurors.get(1).unwrap(), &VoteSide::Client);
+    client.cast_vote(&dispute_id, &assigned_jurors.get(2).unwrap(), &VoteSide::Agent);
+    client.cast_vote(&dispute_id, &assigned_jurors.get(3).unwrap(), &VoteSide::Agent);
+
+    // Advance past voting deadline
+    env.ledger().with_mut(|l| {
+        l.timestamp += EVIDENCE_PHASE + VOTING_PHASE + 1;
+    });
+
+    client.resolve_dispute(&dispute_id);
+
+    let dispute = client.get_dispute(&dispute_id).unwrap();
+    assert_eq!(dispute.status, DisputeStatus::Resolved);
+    assert_eq!(dispute.resolution, Some(1)); // Tie defaults to Agent (1)
+}
+
+#[test]
+fn randomized_juror_selection_divergence() {
+    let (env, client, admin) = setup_with_admin();
+    let pool = soroban_sdk::vec![
+        &env,
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+    ];
+    client.set_jurors(&pool);
+
+    let filer = Address::generate(&env);
+    let d1 = Symbol::new(&env, "disp1");
+    let d2 = Symbol::new(&env, "disp2");
+
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &d1, &0);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &d2, &0);
+
+    let disp1 = client.get_dispute(&d1).unwrap();
+    let disp2 = client.get_dispute(&d2).unwrap();
+
+    assert_eq!(disp1.jurors.len(), 5);
+    assert_eq!(disp2.jurors.len(), 5);
+    assert_ne!(disp1.jurors, disp2.jurors);
+}
+
+#[test]
+fn active_jurors_tracked_and_cleared_on_resolve() {
+    let (env, client, _admin, _jurors) = setup_with_jurors();
+    let filer = Address::generate(&env);
+    let dispute_id = Symbol::new(&env, "disp_active");
+
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
+    let active_before = client.get_active_jurors();
+    assert_eq!(active_before.len(), 5);
+
+    // Fast-forward and resolve
+    env.ledger().with_mut(|l| {
+        l.timestamp += EVIDENCE_PHASE + VOTING_PHASE + 1;
+    });
+    client.resolve_dispute(&dispute_id);
+
+    let active_after = client.get_active_jurors();
+    assert_eq!(active_after.len(), 0);
+}
+
+#[test]
 fn appeal_dispute_success() {
-    let (env, client, _admin, jurors) = setup_with_jurors();
+    let (env, client, _admin, _jurors) = setup_with_jurors();
 
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
-    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
 
-    client.cast_vote(&dispute_id, &jurors.get(0).unwrap(), &VoteSide::Agent);
+    let dispute = client.get_dispute(&dispute_id).unwrap();
+    client.cast_vote(&dispute_id, &dispute.jurors.get(0).unwrap(), &VoteSide::Agent);
 
     // Advance past voting deadline
     env.ledger().with_mut(|l| {
@@ -200,13 +309,14 @@ fn appeal_dispute_success() {
 
 #[test]
 fn appeal_after_window_fails() {
-    let (env, client, _admin, jurors) = setup_with_jurors();
+    let (env, client, _admin, _jurors) = setup_with_jurors();
 
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
-    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id);
+    client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
 
-    client.cast_vote(&dispute_id, &jurors.get(0).unwrap(), &VoteSide::Agent);
+    let dispute = client.get_dispute(&dispute_id).unwrap();
+    client.cast_vote(&dispute_id, &dispute.jurors.get(0).unwrap(), &VoteSide::Agent);
 
     // Advance past appeal deadline
     env.ledger().with_mut(|l| {
@@ -231,7 +341,8 @@ fn pause_blocks_filing() {
         client.try_file_dispute(
             &filer,
             &Symbol::new(&env, "agent1"),
-            &Symbol::new(&env, "disp_pause")
+            &Symbol::new(&env, "disp_pause"),
+            &0
         ),
         Err(Ok(Error::ContractPaused))
     );
@@ -248,6 +359,7 @@ fn unpause_allows_filing() {
         &filer,
         &Symbol::new(&env, "agent1"),
         &Symbol::new(&env, "disp_unpause"),
+        &0,
     );
     assert!(client
         .get_dispute(&Symbol::new(&env, "disp_unpause"))
@@ -284,6 +396,7 @@ fn get_dispute_still_works_when_paused() {
         &filer,
         &Symbol::new(&env, "agent1"),
         &Symbol::new(&env, "disp_read"),
+        &0,
     );
 
     client.pause();

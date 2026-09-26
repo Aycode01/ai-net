@@ -11,8 +11,9 @@ mod types;
 pub use errors::Error;
 pub use types::*;
 
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
 
 /// Evidence submission phase: 3 days (259,200 seconds).
@@ -35,6 +36,7 @@ pub enum DataKey {
     Evidence(Symbol, u32),
     JurorVote(Symbol, Address),
     ActiveJurors,
+    JurorPool,
 }
 
 #[contract]
@@ -100,25 +102,56 @@ impl DisputeResolutionContract {
             .unwrap_or(false)
     }
 
-    /// Admin: set the active juror pool.
+    /// Admin: set the available juror pool.
     pub fn set_jurors(env: Env, jurors: Vec<Address>) -> Result<(), Error> {
         require_not_paused(&env)?;
         require_admin(&env)?;
         env.storage()
             .instance()
-            .set(&DataKey::ActiveJurors, &jurors);
+            .set(&DataKey::JurorPool, &jurors);
+        if !env.storage().instance().has(&DataKey::ActiveJurors) {
+            env.storage()
+                .instance()
+                .set(&DataKey::ActiveJurors, &Vec::<Address>::new(&env));
+        }
         Ok(())
     }
 
+    /// Return the list of available jurors in the candidate pool.
+    pub fn get_juror_pool(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::JurorPool)
+            .or_else(|| env.storage().instance().get(&DataKey::ActiveJurors))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return the list of jurors currently assigned to active disputes.
+    pub fn get_active_jurors(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ActiveJurors)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// File a dispute against an agent.
+    ///
+    /// Selects a pseudo-randomized subset of `JUROR_COUNT` jurors from `JurorPool`
+    /// derived from `dispute_id`, `filed_at`, and the ledger sequence number.
+    /// Updates `ActiveJurors` in instance storage to track jurors assigned to active disputes.
     pub fn file_dispute(
         env: Env,
         filer: Address,
         agent_id: Symbol,
         dispute_id: Symbol,
+        bond_amount: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         filer.require_auth();
+
+        if bond_amount < 0 {
+            return Err(Error::InvalidBond);
+        }
 
         let now = env.ledger().timestamp();
 
@@ -128,22 +161,42 @@ impl DisputeResolutionContract {
             return Err(Error::AlreadyExists);
         }
 
-        // Select jurors from active pool
-        let jurors: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ActiveJurors)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        if jurors.is_empty() {
+        let pool = Self::get_juror_pool(env.clone());
+        if pool.is_empty() {
             return Err(Error::NoJurorsAvailable);
         }
 
+        // Pseudo-random selection mechanism: seed = sha256(dispute_id || now || sequence)
+        let mut available_pool = pool.clone();
         let mut selected_jurors = Vec::new(&env);
-        let count = jurors.len().min(JUROR_COUNT);
+        let count = available_pool.len().min(JUROR_COUNT);
+
+        let mut seed_preimage = Bytes::new(&env);
+        seed_preimage.append(&dispute_id.to_xdr(&env));
+        seed_preimage.append(&now.to_xdr(&env));
+        seed_preimage.append(&env.ledger().sequence().to_xdr(&env));
+        let hash: BytesN<32> = env.crypto().sha256(&seed_preimage).into();
+        let bytes = hash.to_array();
+
         for i in 0..count {
-            selected_jurors.push_back(jurors.get(i).unwrap());
+            let byte_val = bytes[i as usize] as u32;
+            let idx = byte_val % available_pool.len();
+            let juror = available_pool.get(idx).unwrap();
+            selected_jurors.push_back(juror.clone());
+            available_pool.remove(idx);
         }
+
+        // Update ActiveJurors instance storage to reflect currently assigned active jurors
+        let mut active_jurors = Self::get_active_jurors(env.clone());
+        for i in 0..selected_jurors.len() {
+            let j = selected_jurors.get(i).unwrap();
+            if !active_jurors.contains(&j) {
+                active_jurors.push_back(j);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveJurors, &active_jurors);
 
         let dispute = Dispute {
             dispute_id: dispute_id.clone(),
@@ -157,10 +210,9 @@ impl DisputeResolutionContract {
             jurors: selected_jurors,
             appealed: false,
             resolution: None,
-            bond_amount: 0,
+            bond_amount,
         };
 
-        let key = DataKey::Dispute(dispute_id.clone());
         env.storage().persistent().set(&key, &dispute);
 
         env.events().publish(
@@ -287,10 +339,23 @@ impl DisputeResolutionContract {
             env.storage().persistent().set(&key, &dispute);
         }
 
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("vote_cast")),
+            VoteCastEvent {
+                dispute_id: dispute_id.clone(),
+                juror: juror.clone(),
+                side: side.clone(),
+                timestamp: now,
+            },
+        );
+
         Ok(())
     }
 
     /// Resolve a dispute after voting period ends (admin or automated).
+    ///
+    /// Tie-breaking behavior: If client_votes > agent_votes, resolution is 0 (Client wins).
+    /// Otherwise (including when client_votes == agent_votes), resolution defaults to 1 (Agent wins).
     pub fn resolve_dispute(env: Env, dispute_id: Symbol) -> Result<(), Error> {
         require_not_paused(&env)?;
 
@@ -329,6 +394,19 @@ impl DisputeResolutionContract {
         dispute.status = DisputeStatus::Resolved;
         dispute.resolution = Some(resolution);
         env.storage().persistent().set(&key, &dispute);
+
+        // Update ActiveJurors to remove resolved dispute's jurors
+        let active_jurors = Self::get_active_jurors(env.clone());
+        let mut new_active = Vec::new(&env);
+        for i in 0..active_jurors.len() {
+            let j = active_jurors.get(i).unwrap();
+            if !dispute.jurors.contains(&j) {
+                new_active.push_back(j);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveJurors, &new_active);
 
         env.events().publish(
             (symbol_short!("dispute"), symbol_short!("resolved")),
