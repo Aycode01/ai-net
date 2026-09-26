@@ -1146,7 +1146,7 @@ fn slash_bond_reduces_bond_amount() {
     let owner = Address::generate(&env);
     client.register_agent(&make_record(&env, "slashme", "research", owner));
 
-    client.slash_bond(&Symbol::new(&env, "slashme"), &10_000_000_i128);
+    client.slash_bond_amount(&Symbol::new(&env, "slashme"), &10_000_000_i128);
 
     let agents = client.lookup_agents(&Symbol::new(&env, "research"));
     let remaining = agents.get(0).unwrap().bond_amount;
@@ -1159,7 +1159,7 @@ fn slash_bond_floors_at_zero() {
     let owner = Address::generate(&env);
     client.register_agent(&make_record(&env, "floor_agent", "research", owner));
 
-    client.slash_bond(
+    client.slash_bond_amount(
         &Symbol::new(&env, "floor_agent"),
         &(DEFAULT_MIN_BOND_STROOPS + 999_i128),
     );
@@ -1174,11 +1174,11 @@ fn double_slash_does_not_go_negative() {
     let owner = Address::generate(&env);
     client.register_agent(&make_record(&env, "double_slash", "research", owner));
 
-    client.slash_bond(
+    client.slash_bond_amount(
         &Symbol::new(&env, "double_slash"),
         &(DEFAULT_MIN_BOND_STROOPS + 1_i128),
     );
-    client.slash_bond(&Symbol::new(&env, "double_slash"), &1_000_000_i128);
+    client.slash_bond_amount(&Symbol::new(&env, "double_slash"), &1_000_000_i128);
 
     let agents = client.lookup_agents(&Symbol::new(&env, "research"));
     assert_eq!(agents.get(0).unwrap().bond_amount, 0);
@@ -1188,7 +1188,7 @@ fn double_slash_does_not_go_negative() {
 fn slash_bond_on_missing_agent_returns_not_found() {
     let (_env, client, _admin) = setup_with_admin();
     assert_eq!(
-        client.try_slash_bond(&Symbol::new(&_env, "ghost"), &1_000_i128),
+        client.try_slash_bond_amount(&Symbol::new(&_env, "ghost"), &1_000_i128),
         Err(Ok(Error::NotFound))
     );
 }
@@ -1206,7 +1206,7 @@ fn slash_bond_requires_admin() {
     client.register_agent(&make_record(&env, "protected", "research", owner));
 
     env.mock_auths(&[]);
-    let result = client.try_slash_bond(&Symbol::new(&env, "protected"), &1_000_i128);
+    let result = client.try_slash_bond_amount(&Symbol::new(&env, "protected"), &1_000_i128);
     assert!(result.is_err());
 }
 
