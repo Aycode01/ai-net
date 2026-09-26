@@ -26,10 +26,14 @@
 
 mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use types::{
     DataKey, Error, OracleManagerSetEvent, TaskCreatedEvent, TaskFinalizedEvent, TaskMetadata,
-    TaskStatus, TaskUpdatedEvent, DEFAULT_TTL_DAYS, LEDGERS_PER_DAY, MAX_COMPRESSED_DAG_BYTES,
-    MAX_TTL_DAYS, TASK_LIFECYCLE_EVENT_VERSION,
+    TaskPage, TaskStatus, TaskUpdatedEvent, TaskVersionRecord, DEFAULT_TTL_DAYS, LEDGERS_PER_DAY,
+    MAX_COMPRESSED_DAG_BYTES, MAX_HISTORY_RECORDS, MAX_TASKS_PAGE_SIZE,
+    MAX_TRACKED_TASKS_PER_CREATOR, MAX_TTL_DAYS, TASK_LIFECYCLE_EVENT_VERSION,
 };
 
 use soroban_sdk::{
@@ -39,16 +43,6 @@ use soroban_sdk::{
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const CONTRACT_VERSION: &str = "1.0.0";
-
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin: Address = env
-        .storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotFound)?;
-    admin.require_auth();
-    Ok(admin)
-}
 
 fn require_not_paused(env: &Env) -> Result<(), Error> {
     let paused: bool = env
@@ -94,6 +88,91 @@ fn has_duplicate_agents(agents: &Vec<Address>) -> bool {
         }
     }
     false
+}
+
+/// Ledgers remaining before `expires_at`, used to keep the auxiliary
+/// version-history keys alive exactly as long as the task record itself.
+fn remaining_ledgers(env: &Env, expires_at: u64) -> u32 {
+    let seconds_left = expires_at.saturating_sub(env.ledger().timestamp());
+    let days_left = (seconds_left / SECONDS_PER_DAY) as u32;
+    days_left.saturating_mul(LEDGERS_PER_DAY)
+}
+
+fn read_history(env: &Env, task_id: &BytesN<32>) -> Vec<TaskVersionRecord> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TaskHistory(task_id.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Append one record to a task's append-only version history.
+///
+/// This is the only writer of [`DataKey::TaskHistory`]. No entry is ever
+/// overwritten or removed, so the history is an immutable audit trail of the
+/// status transitions the contract accepted.
+fn append_version(
+    env: &Env,
+    task_id: &BytesN<32>,
+    status: TaskStatus,
+    updater: &Address,
+    expires_at: u64,
+) {
+    let history_key = DataKey::TaskHistory(task_id.clone());
+    let mut history = read_history(env, task_id);
+    if history.len() >= MAX_HISTORY_RECORDS {
+        return;
+    }
+
+    let count_key = DataKey::TaskVersionCount(task_id.clone());
+    let seq: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+    let next_seq = seq.saturating_add(1);
+
+    history.push_back(TaskVersionRecord {
+        seq: next_seq,
+        status,
+        timestamp: env.ledger().timestamp(),
+        ledger_sequence: env.ledger().sequence(),
+        updater: updater.clone(),
+    });
+
+    let ledgers = remaining_ledgers(env, expires_at);
+    env.storage().persistent().set(&history_key, &history);
+    env.storage().persistent().set(&count_key, &next_seq);
+    for key in [history_key, count_key] {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, ledgers.saturating_sub(1), ledgers);
+    }
+}
+
+/// Record the creator of a task and add it to that creator's task index.
+///
+/// The index is a persistent vector, so it is capped at
+/// [`MAX_TRACKED_TASKS_PER_CREATOR`] with oldest-first eviction rather than
+/// growing without limit.
+fn index_creator_task(env: &Env, creator: &Address, task_id: &BytesN<32>, expires_at: u64) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::TaskCreator(task_id.clone()), creator);
+
+    let key = DataKey::CreatorTasks(creator.clone());
+    let mut ids: Vec<BytesN<32>> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    if ids.len() >= MAX_TRACKED_TASKS_PER_CREATOR {
+        ids.remove(0);
+    }
+    ids.push_back(task_id.clone());
+    env.storage().persistent().set(&key, &ids);
+
+    let ledgers = remaining_ledgers(env, expires_at);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, ledgers.saturating_sub(1), ledgers);
 }
 
 fn can_transition(from: TaskStatus, to: TaskStatus) -> bool {
@@ -160,14 +239,17 @@ pub struct TaskStoreContract;
 
 #[contractimpl]
 impl TaskStoreContract {
-<<<<<<< HEAD
     /// Initialise the contract with an admin. Can only be called once.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyExists);
+            return Err(Error::AlreadyInitialized);
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
         Ok(())
     }
 
@@ -200,19 +282,12 @@ impl TaskStoreContract {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
-=======
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
-        Ok(())
     }
 
+    /// Return the current admin address, if set.
+    ///
+    /// Alias of [`Self::get_admin`]; both spellings exist elsewhere in the
+    /// workspace, so both are kept for client compatibility.
     pub fn admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
     }
@@ -260,7 +335,6 @@ impl TaskStoreContract {
             ),
         );
         Ok(())
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
     }
 
     pub fn store_task_metadata(
@@ -337,6 +411,11 @@ impl TaskStoreContract {
             .persistent()
             .extend_ttl(&key, ledgers.saturating_sub(1), ledgers);
 
+        // Seed the append-only version history and the creator's task index.
+        // A task always begins with exactly one record, at `Pending`.
+        index_creator_task(&env, &submitter, &task_id, expires_at);
+        append_version(&env, &task_id, TaskStatus::Pending, &submitter, expires_at);
+
         env.events().publish(
             (symbol_short!("task_meta"), symbol_short!("created")),
             TaskCreatedEvent {
@@ -383,6 +462,11 @@ impl TaskStoreContract {
         metadata.status = new_status;
         env.storage().persistent().set(&key, &metadata);
 
+        // Record the transition in the append-only version history. Written
+        // after the state update and only on the success path, so a rejected
+        // transition leaves no record behind.
+        append_version(&env, &task_id, new_status, &agent, metadata.expires_at);
+
         // Every successful transition emits exactly one lifecycle event:
         // terminal transitions (-> Completed / -> Failed) emit `finalized`,
         // everything else emits `updated` — never both.
@@ -414,6 +498,73 @@ impl TaskStoreContract {
         }
 
         Ok(())
+    }
+
+    // ── Version history & creator index ───────────────────────────────────────
+
+    /// Returns the append-only version history for `task_id`, oldest record
+    /// first.
+    ///
+    /// The first record is always the one written at creation
+    /// (`status: Pending`, `updater: the submitter`); every accepted
+    /// `update_task_status` call appends exactly one further record. Records
+    /// are never modified or deleted, so this is the task's audit trail.
+    ///
+    /// No transaction hash is included, because a Soroban contract cannot read
+    /// the hash of its own invoking transaction. See [`TaskVersionRecord`] for
+    /// how indexers are expected to recover it.
+    ///
+    /// Returns `Error::NotFound` for an unknown task and `Error::Expired` once
+    /// the task's retention window has passed, matching `get_task_metadata`.
+    pub fn get_history(env: Env, task_id: BytesN<32>) -> Result<Vec<TaskVersionRecord>, Error> {
+        read_metadata(&env, &task_id)?;
+        Ok(read_history(&env, &task_id))
+    }
+
+    /// Returns the address that created `task_id`, or `None` if the task is
+    /// unknown or predates the creator index.
+    pub fn get_task_creator(env: Env, task_id: BytesN<32>) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TaskCreator(task_id))
+    }
+
+    /// Returns one page of the task ids created by `creator`, oldest first.
+    ///
+    /// The per-creator index is a persistent vector, so it is paginated rather
+    /// than returned whole. Start with `cursor: 0`; pass the `next_cursor` from
+    /// the previous page to continue, and stop when `next_cursor` is `None`.
+    /// `limit` is clamped to [`MAX_TASKS_PAGE_SIZE`], and a `limit` of `0`
+    /// returns an empty page that still reports `total` (useful for counting).
+    ///
+    /// Only the most recent [`MAX_TRACKED_TASKS_PER_CREATOR`] task ids are
+    /// retained per creator; older ids are evicted from the index.
+    pub fn get_tasks_by_creator(env: Env, creator: Address, cursor: u32, limit: u32) -> TaskPage {
+        let ids: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CreatorTasks(creator))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = ids.len();
+        let page_size = limit.min(MAX_TASKS_PAGE_SIZE);
+        let start = cursor.min(total);
+        let end = start.saturating_add(page_size).min(total);
+
+        let mut task_ids = Vec::new(&env);
+        let mut index = start;
+        while index < end {
+            if let Some(id) = ids.get(index) {
+                task_ids.push_back(id);
+            }
+            index += 1;
+        }
+
+        TaskPage {
+            task_ids,
+            total,
+            next_cursor: if end < total { Some(end) } else { None },
+        }
     }
 }
 
@@ -652,7 +803,8 @@ mod test {
         assert_eq!(fixture.env.events().all().len(), 0);
     }
 
-<<<<<<< HEAD
+    // ── Pause / emergency stop ────────────────────────────────────────────────
+
     #[test]
     fn initialize_sets_unpaused() {
         let fixture = fixture();
@@ -667,22 +819,70 @@ mod test {
 
         fixture.client.pause();
 
-=======
+        let result = fixture.client.try_store_task_metadata(
+            &fixture.submitter,
+            &fixture.task_id,
+            &fixture.prompt_hash,
+            &agents,
+            &dag,
+            &1,
+            &None,
+        );
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
+    }
+
+    #[test]
+    fn unpause_allows_store_task_metadata() {
+        let fixture = fixture();
+        fixture.client.pause();
+        fixture.client.unpause();
+
+        store(&fixture, 1);
+        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
+        assert_eq!(metadata.task_id, fixture.task_id);
+    }
+
+    #[test]
+    fn pause_blocks_update_task_status() {
+        let fixture = fixture();
+        store(&fixture, 1);
+
+        fixture.client.pause();
+
+        let result = fixture.client.try_update_task_status(
+            &fixture.task_id,
+            &fixture.agent,
+            &TaskStatus::Running,
+        );
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
+    }
+
+    #[test]
+    fn get_task_metadata_still_works_when_paused() {
+        let fixture = fixture();
+        store(&fixture, 1);
+
+        fixture.client.pause();
+
+        // Reads should still work when paused.
+        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
+        assert_eq!(metadata.task_id, fixture.task_id);
+    }
+
     // ── Admin / set_oracle_manager ────────────────────────────────────────────
 
     #[test]
     fn initialize_sets_admin() {
+        // `fixture()` already ran `initialize`; the admin is retrievable.
         let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
-        // no panic → admin stored; further calls would check auth
+        assert!(fixture.client.get_admin().is_some());
+        assert!(fixture.client.admin().is_some());
     }
 
     #[test]
     fn double_initialize_is_rejected() {
         let fixture = fixture();
         let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
         assert_eq!(
             fixture.client.try_initialize(&admin),
             Err(Ok(Error::AlreadyInitialized))
@@ -692,8 +892,6 @@ mod test {
     #[test]
     fn set_oracle_manager_stores_address() {
         let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
         let mgr = Address::generate(&fixture.env);
         fixture.client.set_oracle_manager(&Some(mgr.clone()));
         assert_eq!(fixture.client.get_oracle_manager(), Some(mgr));
@@ -702,8 +900,6 @@ mod test {
     #[test]
     fn set_oracle_manager_none_clears_address() {
         let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
         let mgr = Address::generate(&fixture.env);
         fixture.client.set_oracle_manager(&Some(mgr));
         fixture.client.set_oracle_manager(&None);
@@ -713,8 +909,6 @@ mod test {
     #[test]
     fn set_oracle_manager_emits_event() {
         let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
         let mgr = Address::generate(&fixture.env);
         fixture.client.set_oracle_manager(&Some(mgr));
 
@@ -777,8 +971,7 @@ mod test {
         mgr_client.set_oracle(&Some(oracle_id));
 
         // Initialise TaskStore and point it at the OracleManager.
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
+        // `fixture()` already ran `initialize`; just wire up the oracle.
         fixture.client.set_oracle_manager(&Some(mgr_id));
 
         // store_task_metadata with a price_pair — should stamp the oracle price.
@@ -825,62 +1018,17 @@ mod test {
         mgr_client.set_oracle(&Some(oracle_id));
         // No fallback set → NoPriceAvailable from oracle_manager.
 
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
+        // `fixture()` already ran `initialize`; just wire up the oracle.
         fixture.client.set_oracle_manager(&Some(mgr_id));
 
         let agents = Vec::from_array(&fixture.env, [fixture.agent.clone()]);
         let dag = Bytes::from_slice(&fixture.env, &[0x78, 0x9c, 0x03, 0x00]);
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
         let result = fixture.client.try_store_task_metadata(
             &fixture.submitter,
             &fixture.task_id,
             &fixture.prompt_hash,
             &agents,
             &dag,
-<<<<<<< HEAD
-            &1,
-        );
-        assert_eq!(result, Err(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn unpause_allows_store_task_metadata() {
-        let fixture = fixture();
-        fixture.client.pause();
-        fixture.client.unpause();
-
-        store(&fixture, 1);
-        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
-        assert_eq!(metadata.task_id, fixture.task_id);
-    }
-
-    #[test]
-    fn pause_blocks_update_task_status() {
-        let fixture = fixture();
-        store(&fixture, 1);
-
-        fixture.client.pause();
-
-        let result = fixture.client.try_update_task_status(
-            &fixture.task_id,
-            &fixture.agent,
-            &TaskStatus::Running,
-        );
-        assert_eq!(result, Err(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn get_task_metadata_still_works_when_paused() {
-        let fixture = fixture();
-        store(&fixture, 1);
-
-        fixture.client.pause();
-
-        // Reads should still work when paused.
-        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
-        assert_eq!(metadata.task_id, fixture.task_id);
-=======
             &1u32,
             &Some(pair),
         );
@@ -916,8 +1064,7 @@ mod test {
         // Set a fallback price for this pair.
         mgr_client.set_fallback_price(&pair, &8_000_000i128);
 
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
+        // `fixture()` already ran `initialize`; just wire up the oracle.
         fixture.client.set_oracle_manager(&Some(mgr_id));
 
         let agents = Vec::from_array(&fixture.env, [fixture.agent.clone()]);
@@ -943,8 +1090,6 @@ mod test {
 
         // A dummy OracleManager address is enough (the error happens before
         // we call out to it).
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
         let mgr = Address::generate(&fixture.env);
         fixture.client.set_oracle_manager(&Some(mgr));
 
@@ -994,9 +1139,6 @@ mod test {
         mgr_b_client.initialize(&Address::generate(&fixture.env));
         mgr_b_client.set_oracle(&Some(oracle_b));
 
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
-
         // ── First task uses mgr_a ────────────────────────────────────────────
         fixture.client.set_oracle_manager(&Some(mgr_a));
 
@@ -1040,6 +1182,5 @@ mod test {
                 .quoted_price_stroops,
             Some(20_000_000i128)
         );
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
     }
 }
