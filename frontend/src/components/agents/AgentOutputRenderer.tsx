@@ -1,4 +1,4 @@
-import React, { Suspense } from 'react';
+import React, { Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Capability, AgentResult, ResearchReportResult, CodingResult, RiskResult, DesignResult } from '../../types/agent';
 import RiskMatrix from './RiskMatrix';
@@ -32,8 +32,21 @@ const LoadingFallback: React.FC = () => {
   );
 };
 
-const AgentOutputRenderer: React.FC<Props> = ({ agentType, result }) => {
+const AgentOutputRenderer: React.FC<Props> = ({
+  agentType,
+  result,
+  agentName,
+  executionTimeMs,
+  tokenCount,
+}) => {
   const { t } = useTranslation();
+  // Filter query and full-screen mode are owned here and threaded down to the
+  // individual renderers as a prop — they are all search against, and lifting
+  // them keeps the header controls in one place.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isFullScreen, setIsFullScreen] = useState(false);
+
+  const displayName = agentName ?? agentType;
   // All renderers handle null/undefined result with an empty-state placeholder
   if (result === null || result === undefined) {
     return (

@@ -1,7 +1,7 @@
 import React from 'react'
 import { useLocation } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { useWallet } from '../../context/WalletContext'
+import { useWallet, NETWORK_LABELS } from '../../context/WalletContext'
 import { NotificationBell } from '../notifications/NotificationBell'
 import { SUPPORTED_LANGUAGES } from '../../i18n/options'
 import { NAV_ITEMS } from './navigation'
@@ -40,7 +40,7 @@ const TopNav: React.FC<TopNavProps> = ({
   isMobile,
   isDrawerOpen = false,
 }) => {
-  const { publicKey, connected, ready, connectionMethod, disconnect } = useWallet()
+  const { publicKey, connected, connecting, ready, connectionMethod, network, networkMismatch, disconnect } = useWallet()
   const { t, i18n } = useTranslation()
   const location = useLocation()
   const { mode, setMode } = useTheme()
@@ -61,10 +61,14 @@ const TopNav: React.FC<TopNavProps> = ({
     return t('nav.dashboard')
   }
 
+  // `GABC…XYZ` — four leading and three trailing characters. Anything shorter
+  // is shown in full rather than truncated into something unreadable.
   const truncateKey = (key: string) => {
-    if (key.length <= 8) return key
+    if (key.length <= 10) return key
     return `${key.slice(0, 4)}...${key.slice(-3)}`
   }
+
+  const networkLabel = network ? (NETWORK_LABELS[network] ?? network) : null
 
   return (
     <header className="top-nav" role="banner">
@@ -148,11 +152,35 @@ const TopNav: React.FC<TopNavProps> = ({
         {connected && publicKey ? (
           ready ? (
             <>
-              <span className="wallet-chip connected" id="wallet-pubkey-display">
+              <span
+                className="wallet-chip connected"
+                id="wallet-pubkey-display"
+                title={publicKey}
+                data-testid="wallet-pubkey"
+              >
                 {truncateKey(publicKey)}
               </span>
+              {networkLabel && (
+                <span
+                  className={`wallet-chip ${networkMismatch ? 'network-mismatch' : 'connected'}`}
+                  id="wallet-network-badge"
+                  data-testid="wallet-network-badge"
+                  style={{ fontSize: '10px', padding: '2px 6px' }}
+                  title={
+                    networkMismatch
+                      ? t('wallet.networkMismatchTitle')
+                      : t('wallet.networkLabel', { network: networkLabel })
+                  }
+                >
+                  {networkLabel}
+                </span>
+              )}
               {connectionMethod && (
-                <span className="wallet-chip connected" style={{ fontSize: '10px', padding: '2px 6px' }}>
+                <span
+                  className="wallet-chip connected"
+                  style={{ fontSize: '10px', padding: '2px 6px' }}
+                  data-testid="wallet-connection-method"
+                >
                   {connectionMethod === 'freighter' ? t('wallet.freighter') : t('wallet.secretKey')}
                 </span>
               )}
@@ -176,7 +204,7 @@ const TopNav: React.FC<TopNavProps> = ({
           )
         ) : (
           <span className="wallet-chip disconnected" id="wallet-pubkey-display">
-            {t('wallet.notConnected')}
+            {connecting ? t('common.connecting') : t('wallet.notConnected')}
           </span>
         )}
       </div>

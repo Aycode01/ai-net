@@ -1,5 +1,6 @@
 import { NetworkStats, TaskResponse, AgentRecord } from '../types/api';
 import { progressStart, progressDone, progressError } from '../context/RouteProgressContext';
+import { readWalletSession } from './walletSession';
 
 export class ApiError extends Error {
   statusCode: number;
@@ -20,8 +21,10 @@ const notifyToast = (message: string, type: 'success' | 'error' | 'warning' | 'i
   window.dispatchEvent(new CustomEvent('app-toast', { detail: { message, type, duration } }));
 };
 
+// Reads through the same session layer as WalletContext (#477), so a session
+// restored on page load authenticates requests without a second storage key.
 const getAuthHeader = (): Record<string, string> => {
-  const pubKey = localStorage.getItem('wallet_pubkey') || localStorage.getItem('walletAddress');
+  const pubKey = readWalletSession()?.publicKey;
   return pubKey ? { 'Authorization': `Bearer ${pubKey}` } : {};
 };
 
