@@ -112,6 +112,12 @@ const envSchema = z.object({
     .transform((v) => v === "true")
     .default("true"),
 
+  // ── Idempotency store (Issue #657) ───────────────────────────────────────────
+  /** How long idempotency keys are retained before they can be replayed. Default: 24 h. */
+  IDEMPOTENCY_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
+  IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
+
   WS_MAX_CONNECTIONS_PER_CLIENT: z.coerce.number().int().positive().default(5),
   WS_MAX_MESSAGES_PER_MINUTE: z.coerce.number().int().positive().default(100),
   WS_INACTIVITY_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
