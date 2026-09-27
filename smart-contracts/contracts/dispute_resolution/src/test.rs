@@ -30,7 +30,7 @@ fn setup_with_jurors() -> (
     Env,
     DisputeResolutionContractClient<'static>,
     Address,
-    Vec<'static, Address>,
+    Vec<Address>,
 ) {
     let (env, client, admin) = setup_with_admin();
     let jurors = soroban_sdk::vec![
@@ -122,7 +122,7 @@ fn submit_evidence_success() {
 
 #[test]
 fn cast_vote_success_and_emits_event() {
-    let (env, client, _admin, jurors) = setup_with_jurors();
+    let (env, client, _admin, _jurors) = setup_with_jurors();
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
     client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
@@ -131,11 +131,11 @@ fn cast_vote_success_and_emits_event() {
     let juror = dispute.jurors.get(0).unwrap();
     client.cast_vote(&dispute_id, &juror, &VoteSide::Client);
 
-    let updated_dispute = client.get_dispute(&dispute_id).unwrap();
-    assert_eq!(updated_dispute.status, DisputeStatus::Voting);
-
     let events = env.events().all();
     assert!(!events.is_empty());
+
+    let updated_dispute = client.get_dispute(&dispute_id).unwrap();
+    assert_eq!(updated_dispute.status, DisputeStatus::Voting);
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn cast_vote_non_juror_fails() {
 
 #[test]
 fn cast_vote_duplicate_fails() {
-    let (env, client, _admin, jurors) = setup_with_jurors();
+    let (env, client, _admin, _jurors) = setup_with_jurors();
     let filer = Address::generate(&env);
     let dispute_id = Symbol::new(&env, "disp1");
     client.file_dispute(&filer, &Symbol::new(&env, "agent1"), &dispute_id, &0);
@@ -230,7 +230,7 @@ fn tie_breaking_defaults_to_agent() {
 
 #[test]
 fn randomized_juror_selection_divergence() {
-    let (env, client, admin) = setup_with_admin();
+    let (env, client, _admin) = setup_with_admin();
     let pool = soroban_sdk::vec![
         &env,
         Address::generate(&env),
