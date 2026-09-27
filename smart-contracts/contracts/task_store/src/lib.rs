@@ -701,17 +701,19 @@ mod test {
 
     #[test]
     fn initialize_sets_admin() {
-        let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
-        // no panic → admin stored; further calls would check auth
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(TaskStoreContract, ());
+        let client = TaskStoreContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.get_admin(), Some(admin));
     }
 
     #[test]
     fn double_initialize_is_rejected() {
         let fixture = fixture();
         let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
         assert_eq!(
             fixture.client.try_initialize(&admin),
             Err(Ok(Error::AlreadyInitialized))
@@ -721,8 +723,6 @@ mod test {
     #[test]
     fn set_oracle_manager_stores_address() {
         let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
         let mgr = Address::generate(&fixture.env);
         fixture.client.set_oracle_manager(&Some(mgr.clone()));
         assert_eq!(fixture.client.get_oracle_manager(), Some(mgr));
@@ -731,8 +731,6 @@ mod test {
     #[test]
     fn set_oracle_manager_none_clears_address() {
         let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
         let mgr = Address::generate(&fixture.env);
         fixture.client.set_oracle_manager(&Some(mgr));
         fixture.client.set_oracle_manager(&None);
@@ -742,8 +740,6 @@ mod test {
     #[test]
     fn set_oracle_manager_emits_event() {
         let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
         let mgr = Address::generate(&fixture.env);
         fixture.client.set_oracle_manager(&Some(mgr));
 
@@ -805,9 +801,7 @@ mod test {
         mgr_client.initialize(&admin_mgr);
         mgr_client.set_oracle(&Some(oracle_id));
 
-        // Initialise TaskStore and point it at the OracleManager.
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
+        // Point TaskStore at the OracleManager.
         fixture.client.set_oracle_manager(&Some(mgr_id));
 
         // store_task_metadata with a price_pair — should stamp the oracle price.
