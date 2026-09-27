@@ -23,8 +23,6 @@ const logger = createLogger({ component: "payment-db" });
 /** Database used when nothing is configured — matches config's DATABASE_URL default. */
 export const DEFAULT_DB_PATH = "./data/ai-net.db";
 
-let _db: Database.Database | null = null;
-
 /** `true` for `:memory:` / `file::memory:` style URIs, which need no directory. */
 export function isInMemoryPath(dbPath: string): boolean {
   const value = dbPath.trim();
@@ -81,8 +79,6 @@ export function openDatabase(dbPath: string): Database.Database {
   return db;
 }
 
-export function getDb(dbPath?: string): Database.Database {
-  if (!_db) {
 let _pool: SqlitePool | null = null;
 
 /** Create the payments schema. Runs once, on the pool's writer connection. */

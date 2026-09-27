@@ -132,8 +132,6 @@ export function createApp(opts: AppOptions = {}): {
   const releasePayment: PaymentReleaseFn =
     opts.releasePayment ?? createPaymentReleaseFn(tryLoadStellarRelease());
 
-  const eventStore = opts.eventStore ?? getEventStore();
-
   const jobQueue = opts.queue ?? getGlobalJobQueue();
   const jobWorker =
     opts.jobWorker ??
@@ -192,12 +190,9 @@ export function createApp(opts: AppOptions = {}): {
     return v2TasksRouter(req, res, next);
   });
 
-  // ── Prometheus metrics endpoint ──────────────────────────────────────
-  app.use("/metrics", metricsRouter);
-
   // ── Admin Queue routes ─────────────────────────────────────────────────────
   app.use("/api/admin/queue", adminLimiter.middleware, createAdminQueueRouter(jobQueue));
-  app.use("/api/admin", adminLimiter.middleware, createAdminQueueRouter(jobQueue));
+  app.use("/api/admin", adminLimiter.middleware, createAdminRouter({ queue: jobQueue, reconciliation: opts.reconciliation }));
 
   // ── Feature-flag admin routes (#425) ───────────────────────────────────────
   app.use("/api/admin/flags", createFlagsRouter());
