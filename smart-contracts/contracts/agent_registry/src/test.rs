@@ -274,6 +274,18 @@ fn set_admin_changes_admin() {
 }
 
 #[test]
+fn clear_multisig_config_negative_auth() {
+    let (env, client, admin) = setup_with_admin();
+    let admins = soroban_sdk::vec![&env, admin.clone()];
+    client.set_multisig_config(&admin, &admins, &1, &0);
+    assert!(client.get_multisig_config().is_some());
+
+    let intruder = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert!(client.try_clear_multisig_config(&intruder).is_err());
+}
+
+#[test]
 fn set_admin_requires_admin_auth() {
     let env = Env::default();
     let contract_id = env.register(AgentRegistryContract, ());

@@ -578,7 +578,7 @@ impl AgentRegistryContract {
 
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::MultisigConfig) {
-            return Err(Error::Unauthorized);
+            return Err(Error::MultisigAlreadyConfigured);
         }
         let old_admin = require_admin(&env)?;
         env.storage().instance().set(&DataKey::Admin, &new_admin);
@@ -625,6 +625,15 @@ impl AgentRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::MultisigConfig, &config);
+        Ok(())
+    }
+
+    pub fn clear_multisig_config(env: Env, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_admin(&env, &caller) {
+            return Err(Error::NotAdmin);
+        }
+        env.storage().instance().remove(&DataKey::MultisigConfig);
         Ok(())
     }
 

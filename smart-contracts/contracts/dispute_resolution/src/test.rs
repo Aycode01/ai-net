@@ -293,3 +293,11 @@ fn get_dispute_still_works_when_paused() {
         .get_dispute(&Symbol::new(&env, "disp_read"))
         .is_some());
 }
+
+#[test]
+fn negative_auth_set_admin() {
+    let (env, client, _admin) = setup_with_admin();
+    let intruder = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert!(client.try_set_admin(&intruder).is_err());
+}
