@@ -243,7 +243,7 @@ export interface TaskStreamDeps extends TaskStreamOptions {
  *   4. receives a chronological replay of past events from the store — all of
  *      them by default, or only those with seq > N when the handshake URL
  *      carries an optional `?lastEventId=N` cursor;
- *   4. then streams live events as the Coordinator emits them.
+ *   5. then streams live events as the Coordinator emits them.
  *
  * Every event sent to the client carries a per-task monotonic `seq`, so the
  * client can persist the last seq it saw and resume from it on reconnect.

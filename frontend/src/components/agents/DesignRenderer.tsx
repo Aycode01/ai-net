@@ -123,7 +123,7 @@ const DesignRenderer: React.FC<Props> = ({ result, searchQuery }) => {
   return (
     <div className="design-renderer" id="design-output">
       {/* Design Outputs & Wireframes Gallery */}
-      {details.images.length > 0 && (
+      {filteredImages.length > 0 && (
         <div style={{ marginBottom: '32px' }} data-testid="design-images-gallery">
           <h4 style={{ marginBottom: '14px', color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 600 }}>
             {t('agent.design.outputsTitle', { total: details.images.length })}
@@ -135,10 +135,10 @@ const DesignRenderer: React.FC<Props> = ({ result, searchQuery }) => {
               gap: '16px',
             }}
           >
-            {details.images.map((img, idx) => (
+            {filteredImages.map((img, idx) => (
               <div
                 key={`design-img-${idx}`}
-                onClick={() => lightbox.openLightbox(details.images, idx)}
+                onClick={() => lightbox.openLightbox(filteredImages, idx)}
                 style={{
                   position: 'relative',
                   backgroundColor: 'var(--surface-hover-subtle)',
