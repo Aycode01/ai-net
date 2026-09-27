@@ -38,7 +38,6 @@ import { metricsRouter } from "./routes/metrics";
 import { createStatsRouter } from "./routes/stats";
 import { createReconciliationRouter, type ReconciliationRouterOptions } from "./routes/reconciliation";
 import { rateLimitMiddleware, registerRateLimitMiddleware, publicLimiter, authedLimiter, adminLimiter } from "./middleware/rateLimit";
-import { authMiddleware } from "./middleware/auth";
 import { createCorsMiddleware } from "./middleware/cors";
 import { compressionMiddleware } from "./middleware/compression";
 import { errorHandler } from "./middleware/errorHandler";
@@ -197,7 +196,6 @@ export function createApp(opts: AppOptions = {}): {
 
   // ── Admin Queue routes ─────────────────────────────────────────────────────
   app.use("/api/admin/queue", adminLimiter.middleware, createAdminQueueRouter(jobQueue));
-  app.use("/api/admin", adminLimiter.middleware, createAdminQueueRouter(jobQueue));
 
   // ── Feature-flag admin routes (#425) ───────────────────────────────────────
   app.use("/api/admin/flags", createFlagsRouter());

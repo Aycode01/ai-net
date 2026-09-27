@@ -48,6 +48,30 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     next();
     return;
   }
+
+  res.status(401).json({ error: "Unauthorized", message: "API key required" });
+}
+
+/**
+ * Session auth middleware: requires a valid JWT access token.
+ * Rejects unauthenticated requests with 401.
+ */
+export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const auth = req.headers["authorization"] ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (!token) {
+    res.status(401).json({ error: "Unauthorized", message: "Bearer token required" });
+    return;
+  }
+
+  try {
+    const payload = getAuthService().verifyAccessToken(token);
+    req.user = payload;
+    next();
+  } catch {
+    res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
+  }
 }
 
 /**

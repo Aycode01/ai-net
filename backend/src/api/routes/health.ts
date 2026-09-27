@@ -78,8 +78,6 @@ router.get("/ready", async (_req: Request, res: Response) => {
       taskDb.prepare("SELECT 1").get();
     } catch {
       checks.tasks = "error";
-    } finally {
-      (tasksModule.closeTaskDb as Function)();
     }
 
     try {
@@ -87,17 +85,13 @@ router.get("/ready", async (_req: Request, res: Response) => {
       paymentDb.prepare("SELECT 1").get();
     } catch {
       checks.payments = "error";
-    } finally {
-      (paymentsModule.closeDb as Function)();
     }
 
     try {
       const jobDb = (queueModule.getJobDb as Function)();
       jobDb.prepare("SELECT 1").get();
-    } catch (error) {
-      (checks as any).queue = "error";
-    } finally {
-      (queueModule.closeJobDb as Function)();
+    } catch {
+      checks.queue = "error";
     }
   } catch (error) {
     res.status(500).json({ status: "error", checks, error: String(error) });

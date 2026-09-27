@@ -221,6 +221,7 @@ impl UpgradeManager {
         initial_version: String,
         initial_wasm_hash: BytesN<32>,
     ) -> Result<(), UpgradeError> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(UpgradeError::InvalidVersion);
         }
@@ -736,6 +737,20 @@ mod tests {
         // Rollback should fail
         let result = client.try_rollback_upgrade();
         assert_eq!(result, Err(Ok(UpgradeError::RollbackDeadlineExpired)));
+    }
+
+    #[test]
+    fn test_negative_auth_initialize() {
+        let env = Env::default();
+        env.ledger().set_sequence_number(1);
+        env.mock_auths(&[]);
+        let contract_id = env.register(UpgradeManager, ());
+        let client = UpgradeManagerClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let initial_hash = test_wasm_hash(&env, 1);
+        assert!(client
+            .try_initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash)
+            .is_err());
     }
 
     #[test]
