@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import type { TaskResponse, NodeStatus } from '../types/api';
+import type { CursorPageEnvelope, TaskResponse, NodeStatus } from '../types/api';
 import { apiClient } from '../services/api';
 
 // ─── Filter types ────────────────────────────────────────────────────────────
@@ -169,6 +169,12 @@ export interface UseTaskHistoryResult {
   resetFilters: () => void;
   /** Refetch task list from API */
   refetch: () => void;
+  /** Cursor for the next page, if one is available */
+  nextCursor: string | null;
+  /** Whether another page of tasks is available */
+  hasNextPage: boolean;
+  /** Append the next page of tasks */
+  loadMore: () => void;
   /** IDs of the (up to 2) tasks selected for comparison */
   selectedIds: [string | null, string | null];
   /** Toggle a task's selection for comparison; deselects oldest if >2 */
@@ -194,8 +200,8 @@ export function useTaskHistory(
     null,
   ]);
   // Cursor state for incremental loading
-  const [, setNextCursor] = useState<string | null>(null);
-  const [, setHasNextPage] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasNextPage, setHasNextPage] = useState(false);
 
   const fetchTasks = useCallback(async (cursor?: string | null) => {
     setLoading(true);
@@ -224,8 +230,7 @@ export function useTaskHistory(
       let morePages = false;
 
       try {
-        type V2Envelope = { data: { items: TaskResponse[]; pagination: { nextCursor: string | null; hasNextPage: boolean } } };
-        const envelope = await apiClient.get<V2Envelope>(url);
+        const envelope = await apiClient.get<CursorPageEnvelope<TaskResponse>>(url);
         if (envelope?.data?.items) {
           fetchedTasks = envelope.data.items;
           newCursor = envelope.data.pagination.nextCursor ?? null;
@@ -242,7 +247,17 @@ export function useTaskHistory(
         fetchedTasks = Array.isArray(fallback) ? fallback : [];
       }
 
-      setAllTasks((prev) => (cursor ? [...prev, ...fetchedTasks] : fetchedTasks));
+      setAllTasks((prev) => {
+        if (!cursor) return fetchedTasks;
+
+        const seenIds = new Set(prev.map((task) => task.taskId));
+        const appendedTasks = fetchedTasks.filter((task) => {
+          if (seenIds.has(task.taskId)) return false;
+          seenIds.add(task.taskId);
+          return true;
+        });
+        return [...prev, ...appendedTasks];
+      });
       setNextCursor(newCursor);
       setHasNextPage(morePages);
     } catch (err) {
@@ -273,6 +288,10 @@ export function useTaskHistory(
     setHasNextPage(false);
     fetchTasks(null);
   }, [fetchTasks]);
+
+  const loadMore = useCallback(() => {
+    if (!loading && hasNextPage && nextCursor) fetchTasks(nextCursor);
+  }, [fetchTasks, hasNextPage, loading, nextCursor]);
 
   // Derive filtered + zoomed list
   const filteredTasks = useMemo(() => {
@@ -319,6 +338,9 @@ export function useTaskHistory(
     updateFilters,
     resetFilters,
     refetch,
+    nextCursor,
+    hasNextPage,
+    loadMore,
     selectedIds,
     toggleSelect,
     clearSelection,
