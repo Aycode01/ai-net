@@ -28,6 +28,7 @@
 //! Unique owners are collected and authorized exactly once.
 
 pub mod audit;
+pub mod bond;
 pub mod bridge;
 mod errors;
 mod events;
@@ -287,6 +288,10 @@ pub enum DataKey {
     /// Ledger number at which the cooldown expires for a deregistering agent.
     /// Key present ⟺ the agent is in the cooldown window.
     BondCooldown(Symbol),
+    /// Lifecycle state and balance for an agent's bond.
+    Bond(Symbol),
+    /// Bond value available for protocol rewards.
+    BondRewardPool,
     MultisigConfig,
     Proposal(u64),
     ProposalIdSequence,
@@ -505,13 +510,32 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
     Ok(admin)
 }
 
-fn internal_slash_bond(env: &Env, agent_id: Symbol, penalty_stroops: i128) -> Result<(), Error> {
+fn internal_slash_bond(
+    env: &Env,
+    agent_id: Symbol,
+    penalty_stroops: i128,
+    reason: String,
+) -> Result<i128, Error> {
+    if penalty_stroops < 0 {
+        return Err(Error::InvalidConfig);
+    }
     let agent_key = DataKey::Agent(agent_id.clone());
     let mut record: AgentRecord = env
         .storage()
         .persistent()
         .get(&agent_key)
         .ok_or(Error::NotFound)?;
+    let bond_key = DataKey::Bond(agent_id.clone());
+    let mut bond_record = env
+        .storage()
+        .persistent()
+        .get::<_, bond::BondRecord>(&bond_key);
+    if bond_record
+        .as_ref()
+        .is_some_and(|bond| bond.status == bond::BondStatus::Cooldown)
+    {
+        return Err(Error::CooldownNotElapsed);
+    }
 
     let remaining = if penalty_stroops >= record.bond_amount {
         0_i128
@@ -524,15 +548,33 @@ fn internal_slash_bond(env: &Env, agent_id: Symbol, penalty_stroops: i128) -> Re
     env.storage().persistent().set(&agent_key, &record);
     extend_ttl_for_existing_key(env, &agent_key);
 
+    if let Some(ref mut bond_record) = bond_record {
+        bond_record.amount_stroops = remaining;
+        bond_record.status = if remaining == 0 {
+            bond::BondStatus::Slashed
+        } else {
+            bond::BondStatus::Active
+        };
+        env.storage().persistent().set(&bond_key, &bond_record);
+        extend_ttl_for_existing_key(env, &bond_key);
+    }
+    let reward_pool = bond::reward_pool(env)
+        .checked_add(actual_penalty)
+        .ok_or(Error::InvalidConfig)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::BondRewardPool, &reward_pool);
+
     env.events().publish(
         (symbol_short!("registry"), symbol_short!("bond_slsh")),
         events::BondSlashed {
             agent_id,
             penalty_stroops: actual_penalty,
             remaining_stroops: remaining,
+            reason,
         },
     );
-    Ok(())
+    Ok(actual_penalty)
 }
 
 fn require_not_frozen(env: &Env, agent_id: &Symbol) -> Result<(), Error> {
@@ -963,7 +1005,12 @@ impl AgentRegistryContract {
                 );
             }
             AdminAction::SlashBond(agent_id, penalty_stroops) => {
-                internal_slash_bond(&env, agent_id, penalty_stroops)?;
+                internal_slash_bond(
+                    &env,
+                    agent_id,
+                    penalty_stroops,
+                    String::from_str(&env, "multisig penalty"),
+                )?;
             }
             AdminAction::SetMinBond(min_bond_val) => {
                 env.storage()
@@ -1151,6 +1198,7 @@ impl AgentRegistryContract {
         extend_ttl_for_existing_key(&env, &cap_key);
         env.storage().persistent().set(&agent_key, &record);
         extend_ttl_for_existing_key(&env, &agent_key);
+        bond::initialize(&env, &record);
 
         let seq = get_registration_sequence(&env);
         let index_key = DataKey::AgentByIndex(seq);
@@ -1330,6 +1378,7 @@ impl AgentRegistryContract {
 
             env.storage().persistent().set(&agent_key, &record);
             env.storage().persistent().set(&index_key, &record.id);
+            bond::initialize(&env, &record);
             ttl_keys.push_back(agent_key);
             ttl_keys.push_back(index_key);
             seq += 1;
@@ -1697,11 +1746,22 @@ impl AgentRegistryContract {
                 env.events().publish(
                     (symbol_short!("registry"), symbol_short!("bond_ret")),
                     events::BondReturned {
-                        agent_id,
+                        agent_id: agent_id.clone(),
                         owner: cr.owner,
                         amount_stroops: cr.bond_amount,
                     },
                 );
+            }
+            let bond_key = DataKey::Bond(agent_id.clone());
+            if let Some(mut bond_record) = env
+                .storage()
+                .persistent()
+                .get::<_, bond::BondRecord>(&bond_key)
+            {
+                bond_record.amount_stroops = 0;
+                bond_record.status = bond::BondStatus::Returned;
+                bond_record.cooldown_until = None;
+                env.storage().persistent().set(&bond_key, &bond_record);
             }
             return Ok(());
         }
@@ -1757,6 +1817,17 @@ impl AgentRegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&cooldown_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        bond::start_cooldown(&env, &agent_id, expiry_ledger)?;
+
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("bond_init")),
+            events::BondReturnInitiated {
+                agent_id: agent_id.clone(),
+                owner: record.owner.clone(),
+                amount_stroops: record.bond_amount,
+                expiry_ledger,
+            },
+        );
 
         // Emit (registry, agent_deregistered) including owner and capability
         // so indexers can update their capability maps without a storage read.
@@ -1817,47 +1888,223 @@ impl AgentRegistryContract {
         min_bond(&env)
     }
 
-    /// Admin: slash an agent's bond by `penalty_stroops`.
-    ///
-    /// The bond is reduced by `penalty_stroops` (floored at 0).
-    /// If the penalty equals or exceeds the remaining bond the bond becomes 0.
-    /// Emits a [`BondSlashed`][events::BondSlashed] event.
-    pub fn slash_bond(env: Env, agent_id: Symbol, penalty_stroops: i128) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-
+    /// Add collateral to an active agent's bond. The caller must be the owner.
+    pub fn deposit_bond(env: Env, agent_id: Symbol, amount_stroops: i128) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        if amount_stroops < min_bond(&env) {
+            return Err(Error::InsufficientBond);
+        }
         let agent_key = DataKey::Agent(agent_id.clone());
-        let mut record: AgentRecord = env
+        let mut agent: AgentRecord = env
             .storage()
             .persistent()
             .get(&agent_key)
             .ok_or(Error::NotFound)?;
-
-        // Floor at 0 — cannot slash below zero.
-        let remaining = if penalty_stroops >= record.bond_amount {
-            0_i128
-        } else {
-            record.bond_amount - penalty_stroops
-        };
-        let actual_penalty = record.bond_amount - remaining;
-
-        record.bond_amount = remaining;
-        env.storage().persistent().set(&agent_key, &record);
+        agent.owner.require_auth();
+        let mut record = bond::load(&env, &agent_id)?;
+        if record.status == bond::BondStatus::Cooldown {
+            return Err(Error::CooldownNotElapsed);
+        }
+        let new_amount = record
+            .amount_stroops
+            .checked_add(amount_stroops)
+            .ok_or(Error::InvalidConfig)?;
+        record.amount_stroops = new_amount;
+        record.status = bond::BondStatus::Active;
+        record.cooldown_until = None;
+        agent.bond_amount = new_amount;
+        env.storage().persistent().set(&agent_key, &agent);
         extend_ttl_for_existing_key(&env, &agent_key);
-
+        bond::save(&env, &agent_id, &record);
         env.events().publish(
-            (symbol_short!("registry"), symbol_short!("bond_slsh")),
-            events::BondSlashed {
-                agent_id: agent_id.clone(),
-                penalty_stroops: actual_penalty,
-                remaining_stroops: remaining,
+            (symbol_short!("registry"), symbol_short!("bond_dep")),
+            events::BondDeposited {
+                agent_id,
+                owner: agent.owner,
+                amount_stroops,
+                total_stroops: new_amount,
             },
         );
+        Ok(())
+    }
+
+    /// Begin the bond cooldown for an agent.
+    pub fn initiate_bond_return(env: Env, agent_id: Symbol) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        let record = bond::load(&env, &agent_id)?;
+        record.owner.require_auth();
+        if record.status == bond::BondStatus::Cooldown {
+            return Err(Error::AlreadyExists);
+        }
+        if record.amount_stroops <= 0 {
+            return Err(Error::InsufficientBond);
+        }
+        let expiry_ledger = env.ledger().sequence() + BOND_COOLDOWN_LEDGERS;
+        bond::start_cooldown(&env, &agent_id, expiry_ledger)?;
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("bond_init")),
+            events::BondReturnInitiated {
+                agent_id,
+                owner: record.owner,
+                amount_stroops: record.amount_stroops,
+                expiry_ledger,
+            },
+        );
+        Ok(())
+    }
+
+    /// Complete the bond return after the configured ledger cooldown.
+    pub fn claim_bond(env: Env, agent_id: Symbol) -> Result<i128, Error> {
+        let mut record = bond::load(&env, &agent_id)?;
+        record.owner.require_auth();
+        let expiry_ledger = record.cooldown_until.ok_or(Error::CooldownNotElapsed)?;
+        if record.status != bond::BondStatus::Cooldown || env.ledger().sequence() < expiry_ledger {
+            return Err(Error::CooldownNotElapsed);
+        }
+        let returned = record.amount_stroops;
+        record.amount_stroops = 0;
+        record.status = bond::BondStatus::Returned;
+        record.cooldown_until = None;
+        bond::save(&env, &agent_id, &record);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::BondCooldown(agent_id.clone()));
+        if let Some(mut agent) = env
+            .storage()
+            .persistent()
+            .get::<_, AgentRecord>(&DataKey::Agent(agent_id.clone()))
+        {
+            agent.bond_amount = 0;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Agent(agent_id.clone()), &agent);
+        }
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("bond_clm")),
+            events::BondClaimed {
+                agent_id,
+                owner: record.owner,
+                amount_stroops: returned,
+            },
+        );
+        Ok(returned)
+    }
+
+    /// Reward an active agent using value accumulated from bond slashes.
+    pub fn reward_bond(env: Env, agent_id: Symbol, amount_stroops: i128) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        if amount_stroops <= 0 {
+            return Err(Error::InvalidConfig);
+        }
+        let agent_key = DataKey::Agent(agent_id.clone());
+        let mut agent: AgentRecord = env
+            .storage()
+            .persistent()
+            .get(&agent_key)
+            .ok_or(Error::NotFound)?;
+        let mut record = bond::load(&env, &agent_id)?;
+        if record.status == bond::BondStatus::Cooldown {
+            return Err(Error::CooldownNotElapsed);
+        }
+        let pool = bond::reward_pool(&env);
+        if pool < amount_stroops {
+            return Err(Error::InsufficientBond);
+        }
+        let new_amount = record
+            .amount_stroops
+            .checked_add(amount_stroops)
+            .ok_or(Error::InvalidConfig)?;
+        record.amount_stroops = new_amount;
+        record.status = bond::BondStatus::Active;
+        agent.bond_amount = new_amount;
+        env.storage().persistent().set(&agent_key, &agent);
+        extend_ttl_for_existing_key(&env, &agent_key);
+        bond::save(&env, &agent_id, &record);
+        env.storage()
+            .instance()
+            .set(&DataKey::BondRewardPool, &(pool - amount_stroops));
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("bond_rwd")),
+            events::BondRewarded {
+                agent_id: agent_id.clone(),
+                amount_stroops,
+                total_stroops: new_amount,
+                admin: admin.clone(),
+            },
+        );
+        audit::record(
+            &env,
+            &admin,
+            symbol_short!("bondrwd"),
+            Some(agent_id),
+            amount_stroops,
+        );
+        Ok(())
+    }
+
+    /// Read an agent's bond balance and lifecycle state.
+    pub fn get_bond(env: Env, agent_id: Symbol) -> Option<bond::BondRecord> {
+        env.storage().persistent().get(&DataKey::Bond(agent_id))
+    }
+
+    /// Read value available for protocol bond rewards.
+    pub fn get_bond_reward_pool(env: Env) -> i128 {
+        bond::reward_pool(&env)
+    }
+
+    /// Admin: slash an agent's bond by an absolute amount (legacy multisig API).
+    pub fn slash_bond_amount(
+        env: Env,
+        agent_id: Symbol,
+        penalty_stroops: i128,
+    ) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        if penalty_stroops < 0 {
+            return Err(Error::InvalidConfig);
+        }
+        let actual_penalty = internal_slash_bond(
+            &env,
+            agent_id.clone(),
+            penalty_stroops,
+            String::from_str(&env, "admin penalty"),
+        )?;
         audit::record(
             &env,
             &admin,
             symbol_short!("slashbond"),
             Some(agent_id),
             actual_penalty,
+        );
+        Ok(())
+    }
+
+    /// Admin: slash a percentage of an agent's bond for a stated reason.
+    pub fn slash_bond(
+        env: Env,
+        agent_id: Symbol,
+        percentage: u32,
+        reason: String,
+    ) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        if percentage == 0 || percentage > 100 || reason.is_empty() {
+            return Err(Error::InvalidConfig);
+        }
+        let record = bond::load(&env, &agent_id)?;
+        if record.status != bond::BondStatus::Active {
+            return Err(Error::CooldownNotElapsed);
+        }
+        let penalty_stroops = record
+            .amount_stroops
+            .checked_mul(percentage as i128)
+            .ok_or(Error::InvalidConfig)?
+            / 100;
+        internal_slash_bond(&env, agent_id.clone(), penalty_stroops, reason)?;
+        audit::record(
+            &env,
+            &admin,
+            symbol_short!("slashbond"),
+            Some(agent_id),
+            penalty_stroops,
         );
         Ok(())
     }
@@ -2965,6 +3212,8 @@ fn get_metadata_u32(
 
 #[cfg(test)]
 mod audit_tests;
+#[cfg(test)]
+mod bond_tests;
 #[cfg(test)]
 mod bridge_tests;
 #[cfg(test)]

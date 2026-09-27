@@ -321,6 +321,47 @@ pub struct BondSlashed {
     pub penalty_stroops: i128,
     /// Remaining bond balance after the slash (≥ 0).
     pub remaining_stroops: i128,
+    /// Policy or dispute reason supplied by the administrator.
+    pub reason: String,
+}
+
+/// Data payload for `(registry, bond_dep)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondDeposited {
+    pub agent_id: Symbol,
+    pub owner: Address,
+    pub amount_stroops: i128,
+    pub total_stroops: i128,
+}
+
+/// Data payload for `(registry, bond_init)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondReturnInitiated {
+    pub agent_id: Symbol,
+    pub owner: Address,
+    pub amount_stroops: i128,
+    pub expiry_ledger: u32,
+}
+
+/// Data payload for `(registry, bond_clm)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondClaimed {
+    pub agent_id: Symbol,
+    pub owner: Address,
+    pub amount_stroops: i128,
+}
+
+/// Data payload for `(registry, bond_rwd)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondRewarded {
+    pub agent_id: Symbol,
+    pub amount_stroops: i128,
+    pub total_stroops: i128,
+    pub admin: Address,
 }
 
 /// Data payload for `(registry, bond_ret)`.
