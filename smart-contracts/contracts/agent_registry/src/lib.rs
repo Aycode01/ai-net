@@ -45,10 +45,12 @@ pub use shared_exit_codes::CommonExitCode;
 pub use upgrade::*;
 
 use events::{
-    AdminChangedEvent, AgentDeregisteredEvent, AgentRegisteredEvent, AnalyticsRecordedEvent,
-    ErrorReportedEvent, ErrorResolvedEvent, LeaderboardUpdatedEvent, OperationApproved,
+    AdminChangedEvent, AgentDeregisteredEvent, AgentFrozen, AgentRegisteredEvent, AgentResumed,
+    AnalyticsRecordedEvent, ErrorReportedEvent, ErrorResolvedEvent, ErrorTtlSetEvent,
+    ErrorsCleanedEvent, GasConfigSetEvent, GasConfigUpdatedEvent, LeaderboardUpdatedEvent,
+    MinBondSetEvent, MultisigConfigSetEvent, MultisigConfigUpdatedEvent, OperationApproved,
     OperationCancelled, OperationExecuted, OperationProposed, RegistryInitializedEvent,
-    SlaBonusAwardedEvent, SlaSetEvent, SlaViolationDetectedEvent,
+    SlaBonusAwardedEvent, SlaSetEvent, SlaViolationDetectedEvent, StorageConfigSetEvent,
 };
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, String, Symbol,
@@ -625,6 +627,17 @@ impl AgentRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::MultisigConfig, &config);
+
+        // Emit (registry, msig_set) after the write so indexers can track
+        // multi-sig rotations without polling instance storage.
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("msig_set")),
+            MultisigConfigSetEvent {
+                admins: config.admins,
+                threshold: config.threshold,
+                timelock_delay: config.timelock_delay,
+            },
+        );
         Ok(())
     }
 
@@ -837,11 +850,27 @@ impl AgentRegistryContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::MinBond, &min_bond_val);
+                env.events().publish(
+                    (symbol_short!("registry"), symbol_short!("minbond")),
+                    MinBondSetEvent {
+                        admin: executor.clone(),
+                        amount_stroops: min_bond_val,
+                    },
+                );
             }
             AdminAction::SetGasConfig(gas_config_val) => {
                 env.storage()
                     .instance()
                     .set(&DataKey::GasConfig, &gas_config_val);
+                env.events().publish(
+                    (symbol_short!("registry"), symbol_short!("gcfg_set")),
+                    GasConfigUpdatedEvent {
+                        proposal_id,
+                        tx_overhead: gas_config_val.tx_overhead,
+                        register_agent: gas_config_val.register_agent,
+                        resolve_error: gas_config_val.resolve_error,
+                    },
+                );
             }
             AdminAction::SetMultisigConfig(admins, threshold, timelock_delay) => {
                 if threshold == 0 || threshold > admins.len() {
@@ -855,6 +884,15 @@ impl AgentRegistryContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::MultisigConfig, &new_config);
+                env.events().publish(
+                    (symbol_short!("registry"), symbol_short!("msig_upd")),
+                    MultisigConfigUpdatedEvent {
+                        proposal_id,
+                        admins: new_config.admins,
+                        threshold: new_config.threshold,
+                        timelock_delay: new_config.timelock_delay,
+                    },
+                );
             }
         }
 
@@ -948,6 +986,16 @@ impl AgentRegistryContract {
             (symbol_short!("registry"), symbol_short!("freeze")),
             agent_id.clone(),
         );
+        // Typed freeze event with the acting admin, emitted after the write.
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("frz_upd")),
+            AgentFrozen {
+                agent_id: agent_id.clone(),
+                frozen: true,
+                admin: admin.clone(),
+                frozen_at_ledger: env.ledger().sequence() as u64,
+            },
+        );
         audit::record(&env, &admin, symbol_short!("freeze"), Some(agent_id), 0);
         Ok(())
     }
@@ -961,6 +1009,16 @@ impl AgentRegistryContract {
         env.events().publish(
             (symbol_short!("registry"), symbol_short!("unfreeze")),
             agent_id.clone(),
+        );
+        // Typed resume event with the acting admin, emitted after the write.
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("frz_upd")),
+            AgentResumed {
+                agent_id: agent_id.clone(),
+                frozen: false,
+                admin: admin.clone(),
+                frozen_at_ledger: env.ledger().sequence() as u64,
+            },
         );
         audit::record(&env, &admin, symbol_short!("unfreeze"), Some(agent_id), 0);
         Ok(())
@@ -1676,6 +1734,13 @@ impl AgentRegistryContract {
         env.storage()
             .instance()
             .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("minbond")),
+            MinBondSetEvent {
+                admin: admin.clone(),
+                amount_stroops,
+            },
+        );
         audit::record(&env, &admin, symbol_short!("minbond"), None, amount_stroops);
         Ok(())
     }
@@ -1811,6 +1876,13 @@ impl AgentRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::ErrorTTL, &ttl_ledgers);
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("errttl")),
+            ErrorTtlSetEvent {
+                admin: admin.clone(),
+                ttl_ledgers,
+            },
+        );
         audit::record(&env, &admin, symbol_short!("errttl"), None, 0);
         Ok(())
     }
@@ -1841,6 +1913,15 @@ impl AgentRegistryContract {
                     removed += 1;
                 }
             }
+        }
+
+        // Emit (registry, errcln) when this pass reclaimed storage so
+        // indexers can reconcile their error tables without polling.
+        if removed > 0 {
+            env.events().publish(
+                (symbol_short!("registry"), symbol_short!("errcln")),
+                ErrorsCleanedEvent { removed },
+            );
         }
 
         removed
@@ -2002,6 +2083,15 @@ impl AgentRegistryContract {
         env.storage()
             .instance()
             .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("gas_cfg")),
+            GasConfigSetEvent {
+                admin: admin.clone(),
+                tx_overhead: config.tx_overhead,
+                register_agent: config.register_agent,
+                resolve_error: config.resolve_error,
+            },
+        );
         audit::record(&env, &admin, symbol_short!("gascfg"), None, 0);
         Ok(())
     }
@@ -2029,6 +2119,14 @@ impl AgentRegistryContract {
         env.storage()
             .instance()
             .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("store_cfg")),
+            StorageConfigSetEvent {
+                admin: admin.clone(),
+                max_agents: config.max_agents,
+                max_per_capability: config.max_per_capability,
+            },
+        );
         audit::record(&env, &admin, symbol_short!("storecfg"), None, 0);
         Ok(())
     }

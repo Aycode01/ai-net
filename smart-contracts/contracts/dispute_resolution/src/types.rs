@@ -96,6 +96,36 @@ pub struct DisputeFiledEvent {
 pub struct EvidenceSubmittedEvent {
     pub dispute_id: Symbol,
     pub submitter: Address,
+    /// IPFS hash of the submitted evidence document.
+    pub evidence_hash: BytesN<32>,
+    /// Ledger timestamp of the submission.
+    pub submitted_at: u64,
+    /// 0-based index of this evidence item within the dispute.
+    pub evidence_index: u32,
+}
+
+/// Event: JurorsSet (issue #486)
+///
+/// Emitted after the admin replaces the active juror pool.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct JurorsSetEvent {
+    /// The new active juror pool.
+    pub jurors: Vec<Address>,
+    /// Ledger timestamp at which the pool was written.
+    pub set_at: u64,
+}
+
+/// Event: VoteCast (issue #486)
+///
+/// Emitted after a juror's vote is persisted, so indexers can reconstruct
+/// per-dispute tallies without reading every `JurorVote` record.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoteCastEvent {
+    pub dispute_id: Symbol,
+    pub juror: Address,
+    pub side: VoteSide,
 }
 
 /// Event: DisputeResolved

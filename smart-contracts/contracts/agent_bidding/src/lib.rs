@@ -90,11 +90,12 @@ mod types;
 pub use errors::Error;
 pub use types::{
     Auction, AuctionAbortedEvent, AuctionConfig, AuctionCreatedEvent, AuctionPhase,
-    BidRevealedEvent, BidSubmittedEvent, BidsRevealedEvent, BondRefundClaimedEvent,
-    ContractAwardedEvent, DataKey, Escrow, RefundClaimedEvent, SealedBid, CLAIM_WINDOW_SECS,
-    COMMITMENT_DOMAIN, DEFAULT_BIDDING_DURATION_SECS, DEFAULT_REVEAL_DURATION_SECS, MAX_BIDDERS,
-    MAX_BID_PRICE, MAX_PHASE_DURATION_SECS, MAX_REPUTATION, MAX_TERMS_LEN, MIN_PHASE_DURATION_SECS,
-    PRICE_WEIGHT, REPUTATION_WEIGHT, SCORE_SCALE,
+    BidRevealedEvent, BidSubmittedEvent, BidsRevealedEvent, BondDeposited, BondRefundClaimedEvent,
+    BondSlashed, ContractAwardedEvent, DataKey, Escrow, RefundClaimedEvent, SealedBid,
+    CLAIM_WINDOW_SECS, COMMITMENT_DOMAIN, DEFAULT_BIDDING_DURATION_SECS,
+    DEFAULT_REVEAL_DURATION_SECS, MAX_BIDDERS, MAX_BID_PRICE, MAX_PHASE_DURATION_SECS,
+    MAX_REPUTATION, MAX_TERMS_LEN, MIN_PHASE_DURATION_SECS, PRICE_WEIGHT, REPUTATION_WEIGHT,
+    SCORE_SCALE,
 };
 
 use soroban_sdk::{
@@ -123,6 +124,19 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
         .ok_or(Error::Unauthorized)?;
     admin.require_auth();
     Ok(admin)
+}
+
+/// Ensure the contract isn't paused.
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::ContractPaused);
+    }
+    Ok(())
 }
 
 /// Extend TTL for a single persistent key, but only when it exists.
@@ -229,9 +243,74 @@ impl AgentBiddingContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
             .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
+
+        env.events().publish(
+            (symbol_short!("bidding"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
+        Ok(())
+    }
+
+    /// Admin: pause the contract.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("bidding"), symbol_short!("paused")), ());
+        Ok(())
+    }
+
+    /// Admin: unpause the contract.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("bidding"), symbol_short!("unpaused")), ());
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    /// Admin: set or replace the pause administrator.
+    ///
+    /// The pause administrator can pause (but not unpause) the contract, so a
+    /// dedicated emergency responder can stop inflows without holding the
+    /// upgrade key.
+    pub fn set_pause_admin(env: Env, new_pause_admin: Address) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PauseAdmin, &new_pause_admin);
+        env.events().publish(
+            (symbol_short!("bidding"), symbol_short!("pa_adm")),
+            (new_pause_admin, admin, env.ledger().sequence()),
+        );
+        Ok(())
+    }
+
+    /// Pause-admin: pause the contract without holding the admin key.
+    pub fn pause_by_pause_admin(env: Env) -> Result<(), Error> {
+        let pause_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PauseAdmin)
+            .ok_or(Error::Unauthorized)?;
+        pause_admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (symbol_short!("bidding"), symbol_short!("pa_pause")),
+            (pause_admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -256,7 +335,13 @@ impl AgentBiddingContract {
             .set(&DataKey::Version, &new_version);
         env.events().publish(
             (symbol_short!("bidding"), symbol_short!("upgraded")),
-            (old_version, new_version, new_wasm_hash, admin, env.ledger().sequence()),
+            (
+                old_version,
+                new_version,
+                new_wasm_hash,
+                admin,
+                env.ledger().sequence(),
+            ),
         );
         Ok(())
     }
@@ -448,13 +533,29 @@ impl AgentBiddingContract {
         auction.bid_count += 1;
         save_auction(&env, &auction);
 
+        // Bid position (1-based) within this auction, stamped before the
+        // events so both payloads carry the same context.
+        let bid_index = auction.bid_count;
+
         env.events().publish(
             (symbol_short!("bidding"), symbol_short!("bid_sbmtd")),
             BidSubmittedEvent {
-                task_id,
-                bidder,
+                task_id: task_id.clone(),
+                bidder: bidder.clone(),
                 bond,
                 reputation,
+            },
+        );
+        // (bidding, bond_dep): every sealed bid locks the auction's required
+        // bond, so indexers can track locked value per auction per bidder.
+        env.events().publish(
+            (symbol_short!("bidding"), symbol_short!("bond_dep")),
+            BondDeposited {
+                task_id: task_id.clone(),
+                bidder: bidder.clone(),
+                amount_stroops: bond,
+                bid_index,
+                deposited_at: env.ledger().timestamp(),
             },
         );
 
@@ -574,6 +675,7 @@ impl AgentBiddingContract {
     ///
     /// Phase transitions to `Reveal`. Emits `(bidding, bids_rvld)`.
     pub fn reveal_bids(env: Env, caller: Address, task_id: Symbol) -> Result<(), Error> {
+        require_not_paused(&env)?;
         caller.require_auth();
 
         let mut auction = load_auction(&env, &task_id)?;
@@ -717,6 +819,7 @@ impl AgentBiddingContract {
     /// escrow award. It lets unsuccessful bidders recover independently if `award_contract`
     /// is delayed by the creator or an off-chain coordinator.
     pub fn claim_bid_refund(env: Env, task_id: Symbol, bidder: Address) -> Result<(), Error> {
+        require_not_paused(&env)?;
         bidder.require_auth();
 
         let auction: Auction = env
@@ -782,6 +885,7 @@ impl AgentBiddingContract {
     ///
     /// Phase transitions to `Awarded`. Emits `(bidding, cntrct_aw)`.
     pub fn award_contract(env: Env, caller: Address, task_id: Symbol) -> Result<(), Error> {
+        require_not_paused(&env)?;
         caller.require_auth();
 
         let mut auction = load_auction(&env, &task_id)?;
@@ -842,7 +946,7 @@ impl AgentBiddingContract {
         let mut forfeited_count: u32 = 0;
         let mut ttl_keys: Vec<DataKey> = Vec::new(&env);
         for b in bidders.iter() {
-            let bk = DataKey::Bid(task_id.clone(), b);
+            let bk = DataKey::Bid(task_id.clone(), b.clone());
             if let Some(mut bid) = env.storage().persistent().get::<_, SealedBid>(&bk) {
                 if bid.refunded || bid.forfeited {
                     continue;
@@ -853,6 +957,17 @@ impl AgentBiddingContract {
                 } else {
                     bid.forfeited = true;
                     forfeited_count += 1;
+                    // (bidding, bond_slsh): this bidder's bond was slashed.
+                    // Emitted after the forfeit flag has been persisted.
+                    env.events().publish(
+                        (symbol_short!("bidding"), symbol_short!("bond_slsh")),
+                        BondSlashed {
+                            task_id: task_id.clone(),
+                            bidder: b.clone(),
+                            penalty_stroops: bid.bond,
+                            remaining_stroops: 0,
+                        },
+                    );
                 }
                 env.storage().persistent().set(&bk, &bid);
                 ttl_keys.push_back(bk);
@@ -867,8 +982,8 @@ impl AgentBiddingContract {
         env.events().publish(
             (symbol_short!("bidding"), symbol_short!("cntrct_aw")),
             ContractAwardedEvent {
-                task_id,
-                winner,
+                task_id: task_id.clone(),
+                winner: winner.clone(),
                 escrow_amount,
                 refunded_bidders: refunded_count,
                 forfeited_bidders: forfeited_count,
@@ -894,6 +1009,7 @@ impl AgentBiddingContract {
     /// Permissionless but authenticated, so a vanished creator cannot strand
     /// other people's bonds. Emits `(bidding, aborted)`.
     pub fn abort_auction(env: Env, caller: Address, task_id: Symbol) -> Result<(), Error> {
+        require_not_paused(&env)?;
         caller.require_auth();
 
         let mut auction = load_auction(&env, &task_id)?;
@@ -972,6 +1088,7 @@ impl AgentBiddingContract {
     /// deadline (`auction.deadline + CLAIM_WINDOW_SECS`) elapses. Emits
     /// `(bidding, refnd_clm)`.
     pub fn claim_refund(env: Env, task_id: Symbol, bidder: Address) -> Result<(), Error> {
+        require_not_paused(&env)?;
         bidder.require_auth();
 
         let auct_key = DataKey::Auction(task_id.clone());
@@ -1099,10 +1216,11 @@ mod test {
     extern crate std;
 
     use super::*;
+    use soroban_sdk::xdr::ToXdr;
     use soroban_sdk::{
         symbol_short,
         testutils::{Address as _, Events as _, Ledger as _},
-        Address, IntoVal, Symbol,
+        Address, IntoVal, String, Symbol, TryFromVal, TryIntoVal, Val,
     };
 
     const RESERVE: i128 = 1_000_000; // 0.1 XLM in stroops
@@ -1110,14 +1228,17 @@ mod test {
     const BID_SECS: u64 = 3_600;
     const REVEAL_SECS: u64 = 3_600;
 
-    /// Creates a fresh in-memory test environment with the contract registered.
+    /// Creates a fresh in-memory test environment with the contract registered
+    /// and initialised. Returns the admin as the third tuple element so admin
+    /// gated calls (pause, set_pause_admin, ...) can be driven by tests.
     fn setup() -> (Env, AgentBiddingContractClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
         let id = env.register(AgentBiddingContract, ());
         let client = AgentBiddingContractClient::new(&env, &id);
-        let anyone = Address::generate(&env);
-        (env, client, anyone)
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        (env, client, admin)
     }
 
     /// Default auction config: 1 h bidding, 1 h reveal, no explicit price cap.
@@ -1349,8 +1470,24 @@ mod test {
 
         client.submit_bid(&task_id, &bidder, &commitment, &BOND, &90);
 
+        // `submit_bid` emits exactly two events: the BidSubmitted event and
+        // the BondDeposited event (issue #486) — nothing else.
         let events = env.events().all();
-        assert_eq!(events.len(), 1, "expected exactly one BidSubmitted event");
+        assert_eq!(events.len(), 2, "expected BidSubmitted + BondDeposited");
+        let mut saw_bid_sbmtd = false;
+        let mut saw_bond_dep = false;
+        for i in 0..events.len() {
+            let (_, topics, _) = events.get(i).unwrap();
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            if t1 == symbol_short!("bid_sbmtd") {
+                saw_bid_sbmtd = true;
+            }
+            if t1 == symbol_short!("bond_dep") {
+                saw_bond_dep = true;
+            }
+        }
+        assert!(saw_bid_sbmtd, "missing bid_sbmtd event");
+        assert!(saw_bond_dep, "missing bond_dep event");
     }
 
     #[test]
@@ -2823,43 +2960,206 @@ mod test {
         );
     }
 
+    // ── Event coverage (issue #486) ──────────────────────────────────────────
+
+    /// Find the single event with `expected` topics and decode its payload.
+    fn find_event<T: IntoVal<Env, Val> + TryFromVal<Env, Val>>(
+        env: &Env,
+        expected: (Symbol, Symbol),
+    ) -> T {
+        let events = env.events().all();
+        let mut matches = 0u32;
+        let mut found: Option<T> = None;
+        for idx in 0..events.len() {
+            let (_, topics, data) = events.get(idx).unwrap();
+            if topics.len() != 2 {
+                continue;
+            }
+            let t0: Symbol = topics.get(0).unwrap().try_into_val(env).unwrap();
+            let t1: Symbol = topics.get(1).unwrap().try_into_val(env).unwrap();
+            // Compare through the XDR bytes: Symbol equality inside the SDK
+            // compares internal SmallSymbol/Full representations which can
+            // differ textually-identical values built via symbol_short! vs
+            // Symbol::new in older SDK paths.
+            let same = t0.to_xdr(env) == expected.0.clone().to_xdr(env)
+                && t1.to_xdr(env) == expected.1.clone().to_xdr(env);
+            if same {
+                matches += 1;
+                found = Some(T::try_from_val(env, &data).unwrap());
+            }
+        }
+        assert_eq!(matches, 1, "expected exactly one matching event");
+        found.unwrap()
+    }
+
+    #[test]
+    fn initialize_emits_init_event() {
+        let (env, _client, _anyone) = setup();
+        let topics = env.events().all().last().unwrap().1;
+        let t1: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t1, symbol_short!("init"));
+    }
+
+    #[test]
+    fn pause_unpause_emit_events_after_write() {
+        let (env, client, _anyone) = setup();
+
+        client.pause();
+        // Query immediately after the mutating call: env.events().all()
+        // reflects only the most recent invocation.
+        let _: () = find_event(&env, (symbol_short!("bidding"), symbol_short!("paused")));
+        assert!(client.is_paused());
+
+        client.unpause();
+        let _: () = find_event(&env, (symbol_short!("bidding"), symbol_short!("unpaused")));
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn set_pause_admin_and_pause_by_pause_admin_emit_events() {
+        let (env, client, _anyone) = setup();
+        let responder = Address::generate(&env);
+
+        client.set_pause_admin(&responder);
+        // Query immediately after each mutating call: env.events().all()
+        // reflects only the most recent invocation.
+        let (stored, _admin, _seq): (Address, Address, u32) =
+            find_event(&env, (symbol_short!("bidding"), symbol_short!("pa_adm")));
+        assert_eq!(stored, responder);
+
+        client.pause_by_pause_admin();
+        let (caller, _seq): (Address, u32) =
+            find_event(&env, (symbol_short!("bidding"), symbol_short!("pa_pause")));
+        assert_eq!(caller, responder);
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn submit_bid_emits_bond_deposited_event_after_write() {
+        let (env, client, _) = setup();
+        let creator = Address::generate(&env);
+        let bidder = Address::generate(&env);
+        let task_id = Symbol::new(&env, "bond_dep");
+
+        create_test_auction(&env, &client, &creator, &task_id, BID_SECS);
+        let _ = env.events().all(); // drain
+
+        let s = salt(&env, 201);
+        let c = client.commitment_of(&task_id, &bidder, &2_000_000, &terms(&env, "T"), &s);
+        client.submit_bid(&task_id, &bidder, &c, &BOND, &60);
+
+        // The sealed bid (bond included) must already be stored when the
+        // deposit event is read — the event fires strictly after the write.
+        let payload: BondDeposited =
+            find_event(&env, (symbol_short!("bidding"), symbol_short!("bond_dep")));
+        assert_eq!(payload.task_id, task_id);
+        assert_eq!(payload.bidder, bidder);
+        assert_eq!(payload.amount_stroops, BOND);
+        assert_eq!(payload.bid_index, 1);
+        let stored = client.get_bid(&task_id, &bidder).unwrap();
+        assert_eq!(stored.bond, BOND);
+    }
+
+    #[test]
+    fn award_contract_emits_bond_slashed_per_non_revealer() {
+        let (env, client, anyone) = setup();
+        let creator = Address::generate(&env);
+        let task_id = Symbol::new(&env, "bond_slsh");
+
+        create_test_auction(&env, &client, &creator, &task_id, BID_SECS);
+
+        let honest = Address::generate(&env);
+        let ghost = Address::generate(&env);
+        let t = terms(&env, "T");
+        let c_h = client.commitment_of(&task_id, &honest, &3_000_000, &t, &salt(&env, 202));
+        let c_g = client.commitment_of(&task_id, &ghost, &1_500_000, &t, &salt(&env, 203));
+        client.submit_bid(&task_id, &honest, &c_h, &BOND, &50);
+        client.submit_bid(&task_id, &ghost, &c_g, &BOND, &90);
+
+        enter_reveal_window(&env, &client, &task_id);
+        client.reveal_bid(&task_id, &honest, &3_000_000, &t, &salt(&env, 202));
+        let _ = env.events().all(); // drain
+
+        close_reveal_window(&env, &client, &task_id);
+        client.reveal_bids(&anyone, &task_id);
+        client.award_contract(&creator, &task_id);
+
+        // The ghost's bond was already marked forfeited in storage when the
+        // slash event is read — strictly after the write.
+        let payload: BondSlashed =
+            find_event(&env, (symbol_short!("bidding"), symbol_short!("bond_slsh")));
+        assert_eq!(payload.task_id, task_id);
+        assert_eq!(payload.bidder, ghost);
+        assert_eq!(payload.penalty_stroops, BOND);
+        assert_eq!(payload.remaining_stroops, 0);
+        assert!(client.get_bid(&task_id, &ghost).unwrap().forfeited);
+    }
+
+    #[test]
+    fn new_event_payloads_roundtrip() {
+        let env = Env::default();
+        let bidder = Address::generate(&env);
+        let task_id = Symbol::new(&env, "rt");
+
+        let dep = BondDeposited {
+            task_id: task_id.clone(),
+            bidder: bidder.clone(),
+            amount_stroops: 1_000,
+            bid_index: 3,
+            deposited_at: 42,
+        };
+        let val: soroban_sdk::Val = dep.clone().into_val(&env);
+        let decoded: BondDeposited = val.try_into_val(&env).unwrap();
+        assert_eq!(dep, decoded);
+
+        let slashed = BondSlashed {
+            task_id,
+            bidder,
+            penalty_stroops: 500,
+            remaining_stroops: 0,
+        };
+        let val: soroban_sdk::Val = slashed.clone().into_val(&env);
+        let decoded: BondSlashed = val.try_into_val(&env).unwrap();
+        assert_eq!(slashed, decoded);
+    }
+
     // ── Pause / unpause ──────────────────────────────────────────────────
 
     #[test]
     fn initialize_sets_admin_and_unpaused() {
-        let (_env, client) = setup();
-        assert!(client.get_admin().is_some());
+        let (_env, client, _anyone) = setup();
+        // Contract initialisation succeeded (setup panics otherwise).
         assert!(!client.is_paused());
     }
 
     #[test]
     fn pause_blocks_create_auction() {
-        let (env, client) = setup();
+        let (env, client, _anyone) = setup();
         let creator = Address::generate(&env);
         let task_id = Symbol::new(&env, "paused_task");
 
         client.pause();
 
-        let err = client.try_create_auction(&creator, &task_id, &0, &1_000_000, &500_000);
+        let err = client.try_create_auction(&creator, &task_id, &config(&env, 3600));
         assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
     }
 
     #[test]
     fn unpause_allows_create_auction() {
-        let (env, client) = setup();
+        let (env, client, _anyone) = setup();
         let creator = Address::generate(&env);
         let task_id = Symbol::new(&env, "unpaused_task");
 
         client.pause();
         client.unpause();
 
-        client.create_auction(&creator, &task_id, &0, &1_000_000, &500_000);
+        create_test_auction(&env, &client, &creator, &task_id, 3600);
         assert!(client.get_auction(&task_id).is_some());
     }
 
     #[test]
     fn pause_blocks_submit_bid() {
-        let (env, client) = setup();
+        let (env, client, _anyone) = setup();
         let creator = Address::generate(&env);
         let bidder = Address::generate(&env);
         let task_id = Symbol::new(&env, "bid_pause");
@@ -2868,88 +3168,87 @@ mod test {
 
         client.pause();
 
-        let salt = BytesN::<32>::from_array(&env, &[99u8; 32]);
-        let commitment =
-            test_commitment(&env, &bidder, 2_000_000, &String::from_str(&env, ""), &salt);
-        let err = client.try_submit_bid(&task_id, &bidder, &commitment, &500_000, &50);
+        let s = salt(&env, 99);
+        let commitment = client.commitment_of(&task_id, &bidder, &2_000_000, &terms(&env, ""), &s);
+        let err = client.try_submit_bid(&task_id, &bidder, &commitment, &BOND, &50);
         assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
     }
 
     #[test]
     fn pause_blocks_reveal_bid() {
-        let (env, client) = setup();
+        let (env, client, _anyone) = setup();
         let creator = Address::generate(&env);
         let bidder = Address::generate(&env);
         let task_id = Symbol::new(&env, "rev_pause");
 
         create_test_auction(&env, &client, &creator, &task_id, 3600);
 
-        let salt = BytesN::<32>::from_array(&env, &[98u8; 32]);
+        let s = salt(&env, 98);
         let price: i128 = 3_000_000;
-        let terms = String::from_str(&env, "terms");
-        let commitment = test_commitment(&env, &bidder, price, &terms, &salt);
-        client.submit_bid(&task_id, &bidder, &commitment, &500_000, &70);
+        let terms_s = terms(&env, "terms");
+        let commitment = client.commitment_of(&task_id, &bidder, &price, &terms_s, &s);
+        client.submit_bid(&task_id, &bidder, &commitment, &BOND, &70);
 
         env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
 
         client.pause();
 
-        let err = client.try_reveal_bid(&task_id, &bidder, &price, &terms, &salt);
+        let err = client.try_reveal_bid(&task_id, &bidder, &price, &terms_s, &s);
         assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
     }
 
     #[test]
     fn pause_blocks_reveal_bids() {
-        let (env, client) = setup();
+        let (env, client, anyone) = setup();
         let creator = Address::generate(&env);
         let bidder = Address::generate(&env);
         let task_id = Symbol::new(&env, "rvb_pause");
 
         create_test_auction(&env, &client, &creator, &task_id, 3600);
 
-        let salt = BytesN::<32>::from_array(&env, &[97u8; 32]);
+        let s = salt(&env, 97);
         let price: i128 = 3_000_000;
-        let terms = String::from_str(&env, "");
-        let commitment = test_commitment(&env, &bidder, price, &terms, &salt);
-        client.submit_bid(&task_id, &bidder, &commitment, &500_000, &70);
+        let terms_s = terms(&env, "");
+        let commitment = client.commitment_of(&task_id, &bidder, &price, &terms_s, &s);
+        client.submit_bid(&task_id, &bidder, &commitment, &BOND, &70);
 
         env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
-        client.reveal_bid(&task_id, &bidder, &price, &terms, &salt);
+        client.reveal_bid(&task_id, &bidder, &price, &terms_s, &s);
 
         client.pause();
 
-        let err = client.try_reveal_bids(&task_id);
+        let err = client.try_reveal_bids(&anyone, &task_id);
         assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
     }
 
     #[test]
     fn pause_blocks_award_contract() {
-        let (env, client) = setup();
+        let (env, client, _anyone) = setup();
         let creator = Address::generate(&env);
         let bidder = Address::generate(&env);
         let task_id = Symbol::new(&env, "aw_pause");
 
         create_test_auction(&env, &client, &creator, &task_id, 3600);
 
-        let salt = BytesN::<32>::from_array(&env, &[96u8; 32]);
+        let s = salt(&env, 96);
         let price: i128 = 3_000_000;
-        let terms = String::from_str(&env, "");
-        let commitment = test_commitment(&env, &bidder, price, &terms, &salt);
-        client.submit_bid(&task_id, &bidder, &commitment, &500_000, &70);
+        let terms_s = terms(&env, "");
+        let commitment = client.commitment_of(&task_id, &bidder, &price, &terms_s, &s);
+        client.submit_bid(&task_id, &bidder, &commitment, &BOND, &70);
 
         env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
-        client.reveal_bid(&task_id, &bidder, &price, &terms, &salt);
-        client.reveal_bids(&task_id);
+        client.reveal_bid(&task_id, &bidder, &price, &terms_s, &s);
+        client.reveal_bids(&creator, &task_id);
 
         client.pause();
 
-        let err = client.try_award_contract(&task_id);
+        let err = client.try_award_contract(&creator, &task_id);
         assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
     }
 
     #[test]
     fn get_auction_still_works_when_paused() {
-        let (env, client) = setup();
+        let (env, client, _anyone) = setup();
         let creator = Address::generate(&env);
         let task_id = Symbol::new(&env, "read_pause");
 

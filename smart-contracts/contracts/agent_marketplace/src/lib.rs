@@ -59,6 +59,10 @@ impl AgentMarketplaceContract {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (symbol_short!("market"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -319,7 +323,7 @@ impl AgentMarketplaceContract {
     pub fn rate_booking(env: Env, booking_id: Symbol, rating: u32) -> Result<(), Error> {
         require_not_paused(&env)?;
 
-        if rating < 1 || rating > 5 {
+        if !(1..=5).contains(&rating) {
             return Err(Error::InvalidPrice);
         }
 
@@ -357,6 +361,15 @@ impl AgentMarketplaceContract {
         agent_rating.total_ratings += 1;
         agent_rating.rating_sum += rating as u64;
         env.storage().persistent().set(&rating_key, &agent_rating);
+
+        env.events().publish(
+            (symbol_short!("market"), symbol_short!("svc_rate")),
+            ServiceRatedEvent {
+                booking_id,
+                agent_id: booking.agent_id,
+                rating,
+            },
+        );
 
         Ok(())
     }

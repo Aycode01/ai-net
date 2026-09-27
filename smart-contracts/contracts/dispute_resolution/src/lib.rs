@@ -71,6 +71,10 @@ impl DisputeResolutionContract {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -107,6 +111,13 @@ impl DisputeResolutionContract {
         env.storage()
             .instance()
             .set(&DataKey::ActiveJurors, &jurors);
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("jurors")),
+            JurorsSetEvent {
+                jurors,
+                set_at: env.ledger().timestamp(),
+            },
+        );
         Ok(())
     }
 
@@ -207,7 +218,7 @@ impl DisputeResolutionContract {
         let evidence = Evidence {
             dispute_id: dispute_id.clone(),
             submitter: submitter.clone(),
-            evidence_hash,
+            evidence_hash: evidence_hash.clone(),
             submitted_at: now,
         };
 
@@ -228,6 +239,9 @@ impl DisputeResolutionContract {
             EvidenceSubmittedEvent {
                 dispute_id,
                 submitter,
+                evidence_hash,
+                submitted_at: now,
+                evidence_index: evidence_count,
             },
         );
 
@@ -286,6 +300,15 @@ impl DisputeResolutionContract {
             dispute.status = DisputeStatus::Voting;
             env.storage().persistent().set(&key, &dispute);
         }
+
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("voted")),
+            VoteCastEvent {
+                dispute_id: dispute_id.clone(),
+                juror,
+                side,
+            },
+        );
 
         Ok(())
     }

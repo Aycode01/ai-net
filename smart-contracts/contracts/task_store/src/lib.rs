@@ -40,16 +40,6 @@ use soroban_sdk::{
 const SECONDS_PER_DAY: u64 = 86_400;
 const CONTRACT_VERSION: &str = "1.0.0";
 
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin: Address = env
-        .storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotFound)?;
-    admin.require_auth();
-    Ok(admin)
-}
-
 fn require_not_paused(env: &Env) -> Result<(), Error> {
     let paused: bool = env
         .storage()
@@ -160,14 +150,21 @@ pub struct TaskStoreContract;
 
 #[contractimpl]
 impl TaskStoreContract {
-<<<<<<< HEAD
     /// Initialise the contract with an admin. Can only be called once.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyExists);
+            return Err(Error::AlreadyInitialized);
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
+        env.events().publish(
+            (symbol_short!("task_meta"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -200,21 +197,6 @@ impl TaskStoreContract {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
-=======
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
-        Ok(())
-    }
-
-    pub fn admin(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Admin)
     }
 
     pub fn set_oracle_manager(env: Env, oracle_manager: Option<Address>) -> Result<(), Error> {
@@ -260,7 +242,6 @@ impl TaskStoreContract {
             ),
         );
         Ok(())
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
     }
 
     pub fn store_task_metadata(
@@ -424,7 +405,7 @@ mod test {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events, Ledger},
-        Address, Bytes, Env, IntoVal,
+        Address, Bytes, Env, IntoVal, TryFromVal, TryIntoVal, Val,
     };
 
     struct Fixture {
@@ -652,11 +633,59 @@ mod test {
         assert_eq!(fixture.env.events().all().len(), 0);
     }
 
-<<<<<<< HEAD
+    // ── Admin / pause / oracle manager ────────────────────────────────────
+
     #[test]
     fn initialize_sets_unpaused() {
         let fixture = fixture();
         assert!(!fixture.client.is_paused());
+    }
+
+    #[test]
+    fn initialize_sets_admin() {
+        let fixture = fixture();
+        assert!(fixture.client.get_admin().is_some());
+    }
+
+    #[test]
+    fn double_initialize_is_rejected() {
+        let fixture = fixture();
+        let admin = Address::generate(&fixture.env);
+        assert_eq!(
+            fixture.client.try_initialize(&admin),
+            Err(Ok(Error::AlreadyInitialized))
+        );
+    }
+
+    #[test]
+    fn set_oracle_manager_stores_address() {
+        let fixture = fixture();
+        let mgr = Address::generate(&fixture.env);
+        fixture.client.set_oracle_manager(&Some(mgr.clone()));
+        assert_eq!(fixture.client.get_oracle_manager(), Some(mgr));
+    }
+
+    #[test]
+    fn set_oracle_manager_none_clears_address() {
+        let fixture = fixture();
+        let mgr = Address::generate(&fixture.env);
+        fixture.client.set_oracle_manager(&Some(mgr));
+        fixture.client.set_oracle_manager(&None);
+        assert_eq!(fixture.client.get_oracle_manager(), None);
+    }
+
+    #[test]
+    fn set_oracle_manager_emits_event() {
+        let fixture = fixture();
+        let mgr = Address::generate(&fixture.env);
+        fixture.client.set_oracle_manager(&Some(mgr));
+
+        let events = fixture.env.events().all();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events.get(0).unwrap().1,
+            (symbol_short!("task_str"), symbol_short!("ora_set")).into_val(&fixture.env)
+        );
     }
 
     #[test]
@@ -667,63 +696,16 @@ mod test {
 
         fixture.client.pause();
 
-=======
-    // ── Admin / set_oracle_manager ────────────────────────────────────────────
-
-    #[test]
-    fn initialize_sets_admin() {
-        let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
-        // no panic → admin stored; further calls would check auth
-    }
-
-    #[test]
-    fn double_initialize_is_rejected() {
-        let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
-        assert_eq!(
-            fixture.client.try_initialize(&admin),
-            Err(Ok(Error::AlreadyInitialized))
+        let result = fixture.client.try_store_task_metadata(
+            &fixture.submitter,
+            &fixture.task_id,
+            &fixture.prompt_hash,
+            &agents,
+            &dag,
+            &1u32,
+            &None,
         );
-    }
-
-    #[test]
-    fn set_oracle_manager_stores_address() {
-        let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
-        let mgr = Address::generate(&fixture.env);
-        fixture.client.set_oracle_manager(&Some(mgr.clone()));
-        assert_eq!(fixture.client.get_oracle_manager(), Some(mgr));
-    }
-
-    #[test]
-    fn set_oracle_manager_none_clears_address() {
-        let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
-        let mgr = Address::generate(&fixture.env);
-        fixture.client.set_oracle_manager(&Some(mgr));
-        fixture.client.set_oracle_manager(&None);
-        assert_eq!(fixture.client.get_oracle_manager(), None);
-    }
-
-    #[test]
-    fn set_oracle_manager_emits_event() {
-        let fixture = fixture();
-        let admin = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin);
-        let mgr = Address::generate(&fixture.env);
-        fixture.client.set_oracle_manager(&Some(mgr));
-
-        let events = fixture.env.events().all();
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events.get(0).unwrap().1,
-            (symbol_short!("task_str"), symbol_short!("ora_set")).into_val(&fixture.env)
-        );
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
     }
 
     // ── Oracle pricing integration (cross-contract) ────────────────────────────
@@ -777,8 +759,6 @@ mod test {
         mgr_client.set_oracle(&Some(oracle_id));
 
         // Initialise TaskStore and point it at the OracleManager.
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
         fixture.client.set_oracle_manager(&Some(mgr_id));
 
         // store_task_metadata with a price_pair — should stamp the oracle price.
@@ -825,23 +805,21 @@ mod test {
         mgr_client.set_oracle(&Some(oracle_id));
         // No fallback set → NoPriceAvailable from oracle_manager.
 
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
         fixture.client.set_oracle_manager(&Some(mgr_id));
 
         let agents = Vec::from_array(&fixture.env, [fixture.agent.clone()]);
         let dag = Bytes::from_slice(&fixture.env, &[0x78, 0x9c, 0x03, 0x00]);
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
         let result = fixture.client.try_store_task_metadata(
             &fixture.submitter,
             &fixture.task_id,
             &fixture.prompt_hash,
             &agents,
             &dag,
-<<<<<<< HEAD
-            &1,
+            &1u32,
+            &Some(pair),
         );
-        assert_eq!(result, Err(Ok(Error::ContractPaused)));
+
+        assert_eq!(result, Err(Ok(Error::OraclePriceUnavailable)));
     }
 
     #[test]
@@ -880,12 +858,6 @@ mod test {
         // Reads should still work when paused.
         let metadata = fixture.client.get_task_metadata(&fixture.task_id);
         assert_eq!(metadata.task_id, fixture.task_id);
-=======
-            &1u32,
-            &Some(pair),
-        );
-
-        assert_eq!(result, Err(Ok(Error::OraclePriceUnavailable)));
     }
 
     #[test]
@@ -916,8 +888,6 @@ mod test {
         // Set a fallback price for this pair.
         mgr_client.set_fallback_price(&pair, &8_000_000i128);
 
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
         fixture.client.set_oracle_manager(&Some(mgr_id));
 
         let agents = Vec::from_array(&fixture.env, [fixture.agent.clone()]);
@@ -943,8 +913,6 @@ mod test {
 
         // A dummy OracleManager address is enough (the error happens before
         // we call out to it).
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
         let mgr = Address::generate(&fixture.env);
         fixture.client.set_oracle_manager(&Some(mgr));
 
@@ -994,9 +962,6 @@ mod test {
         mgr_b_client.initialize(&Address::generate(&fixture.env));
         mgr_b_client.set_oracle(&Some(oracle_b));
 
-        let admin_ts = Address::generate(&fixture.env);
-        fixture.client.initialize(&admin_ts);
-
         // ── First task uses mgr_a ────────────────────────────────────────────
         fixture.client.set_oracle_manager(&Some(mgr_a));
 
@@ -1040,6 +1005,71 @@ mod test {
                 .quoted_price_stroops,
             Some(20_000_000i128)
         );
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
+    }
+    // ── Event payload roundtrips (issue #486) ─────────────────────────────
+
+    fn assert_roundtrip<T>(env: &Env, original: T)
+    where
+        T: Clone + IntoVal<Env, Val> + TryFromVal<Env, Val> + PartialEq,
+    {
+        let val: Val = original.clone().into_val(env);
+        let decoded: T = val.try_into_val(env).unwrap();
+        assert!(original == decoded, "roundtrip failed");
+    }
+
+    #[test]
+    fn task_event_payloads_roundtrip() {
+        let env = Env::default();
+        let agent = Address::generate(&env);
+        let agents = Vec::from_array(&env, [agent]);
+        let task_id = BytesN::from_array(&env, &[3; 32]);
+        let prompt_hash = BytesN::from_array(&env, &[4; 32]);
+
+        assert_roundtrip(
+            &env,
+            TaskCreatedEvent {
+                version: TASK_LIFECYCLE_EVENT_VERSION,
+                task_id,
+                prompt_hash,
+                assigned_agents: agents,
+                created_at: 1_700_000_000,
+                expires_at: 1_700_000_000 + 86_400,
+                quoted_price_stroops: None,
+            },
+        );
+        assert_roundtrip(
+            &env,
+            TaskUpdatedEvent {
+                version: TASK_LIFECYCLE_EVENT_VERSION,
+                task_id: BytesN::from_array(&env, &[3; 32]),
+                agent: Address::generate(&env),
+                old_status: TaskStatus::Pending,
+                new_status: TaskStatus::Running,
+                updated_at: 1_700_000_100,
+            },
+        );
+        assert_roundtrip(
+            &env,
+            TaskFinalizedEvent {
+                version: TASK_LIFECYCLE_EVENT_VERSION,
+                task_id: BytesN::from_array(&env, &[3; 32]),
+                agent: Address::generate(&env),
+                old_status: TaskStatus::Running,
+                final_status: TaskStatus::Completed,
+                finalized_at: 1_700_000_200,
+            },
+        );
+        assert_roundtrip(
+            &env,
+            OracleManagerSetEvent {
+                oracle_manager: Some(Address::generate(&env)),
+            },
+        );
+        assert_roundtrip(
+            &env,
+            OracleManagerSetEvent {
+                oracle_manager: None,
+            },
+        );
     }
 }

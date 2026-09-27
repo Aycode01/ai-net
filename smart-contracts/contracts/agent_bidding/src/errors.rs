@@ -5,7 +5,7 @@
 //! callers can branch on the numeric code without coupling to a specific SDK
 //! build.
 //!
-//! The code range used here (`1..=26`) is local to this contract. Codes are
+//! The code range used here (`1..=33`) is local to this contract. Codes are
 //! chosen to read naturally in logs while remaining stable across releases:
 //! **never renumber an existing variant** once the contract is deployed.
 
@@ -74,4 +74,21 @@ pub enum Error {
     AuctionNotAbortable = 25,
     /// An arithmetic operation overflowed while scoring bids.
     ArithmeticOverflow = 26,
+
+    // ── Missing from the failed merge of the pause/upgrade hardening (restored) ──
+    /// Contract instance has already been initialized.
+    AlreadyInitialized = 27,
+    /// The contract is paused and cannot accept mutations.
+    ContractPaused = 28,
+    /// The auction is not in the `Reveal` phase yet when claiming a bid refund.
+    /// (Alias of `NotInRevealPhase`, kept as its own code for completeness.)
+    WinnerNotDeterminedDuplicate = 29,
+    /// The winning bidder cannot claim the losing-bidder refund path.
+    WinnerCannotClaimRefund = 30,
+    /// The bid bond has already been refunded via `claim_bid_refund`.
+    RefundAlreadyClaimed = 31,
+    /// The post-deadline claim window (`CLAIM_WINDOW_SECS`) has elapsed.
+    ClaimWindowExpired = 32,
+    /// The bond has already been refunded (idempotency guard for `claim_refund`).
+    AlreadyRefunded = 33,
 }

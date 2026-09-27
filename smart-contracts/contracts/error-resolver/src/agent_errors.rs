@@ -19,6 +19,8 @@ pub enum DataKey {
     Quorum,
     PendingOps,
     AuditLog,
+    /// Whether the contract is paused (instance storage).
+    Paused,
 }
 
 /// A pending allowlist operation awaiting quorum approvals.
@@ -67,6 +69,8 @@ pub enum ContractError {
     AlreadyApproved = 6,
     OpNotFound = 7,
     SignerNotFound = 8,
+    /// The contract is paused and cannot accept mutations.
+    ContractPaused = 9,
 }
 
 #[contract]
@@ -419,6 +423,32 @@ impl ErrorResolverContract {
         };
         record_audit(&env, &executor, audit_op, &op.target);
         Ok(())
+    }
+
+    /// Pause the contract. Only admin can call this.
+    pub fn pause(env: Env) -> Result<(), ContractError> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("errres"), symbol_short!("paused")), ());
+        Ok(())
+    }
+
+    /// Unpause the contract. Only admin can call this.
+    pub fn unpause(env: Env) -> Result<(), ContractError> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("errres"), symbol_short!("unpaused")), ());
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     /// Allowlists a contract address (e.g. agent-registry) to call
