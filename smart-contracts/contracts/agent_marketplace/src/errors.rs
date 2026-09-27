@@ -18,6 +18,11 @@ pub enum Error {
     SlaViolation = 10,
     NotOwner = 11,
     ServiceNotAvailable = 12,
+    AgentNotFound = 13,
+    AgentFrozen = 14,
+    InsufficientBond = 15,
+    AgentDeregistered = 16,
+    AgentNotEligible = 17,
 }
 
 impl Error {
@@ -35,6 +40,11 @@ impl Error {
             10 => Some(Error::SlaViolation),
             11 => Some(Error::NotOwner),
             12 => Some(Error::ServiceNotAvailable),
+            13 => Some(Error::AgentNotFound),
+            14 => Some(Error::AgentFrozen),
+            15 => Some(Error::InsufficientBond),
+            16 => Some(Error::AgentDeregistered),
+            17 => Some(Error::AgentNotEligible),
             _ => None,
         }
     }

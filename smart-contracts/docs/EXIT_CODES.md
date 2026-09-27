@@ -50,6 +50,10 @@ match common_code {
 }
 ```
 
+### Local Error Mapping vs Shared Exit Codes
+
+Contracts retain local error enum definitions (`1..=100`) to maintain compact WASM binary size and zero-dependency compilation per contract crate. When performing cross-contract invocations (such as calling `verify_agent_eligible`), calling contracts map the raw error status codes (`1` = `NotFound`, `5` = `AgentFrozen`, `10` = `InsufficientBond`, `36` = `AgentDeregistered`) back into local typed contract errors. `shared_exit_codes.rs` defines the authoritative code taxonomy for off-chain callers and indexers mapping errors across all ai-net Soroban contracts.
+
 ### Adding New Common Codes
 
 1. Add the variant to `CommonExitCode` in `shared_exit_codes.rs`.

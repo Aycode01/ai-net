@@ -84,6 +84,33 @@ fn total_power(env: &Env) -> i128 {
         .unwrap_or(0)
 }
 
+fn verify_agent_eligibility(env: &Env, agent_id: &soroban_sdk::Symbol) -> Result<(), Error> {
+    let registry: Option<Address> = env.storage().instance().get(&DataKey::AgentRegistry);
+    let registry_addr = match registry {
+        Some(addr) => addr,
+        None => return Ok(()),
+    };
+
+    use soroban_sdk::{InvokeError, IntoVal, Symbol, Val, vec};
+    let fn_name = Symbol::new(env, "verify_agent_eligible");
+    let args = vec![env, agent_id.into_val(env)];
+
+    let res: Result<Result<Val, _>, Result<InvokeError, InvokeError>> =
+        env.try_invoke_contract(&registry_addr, &fn_name, args);
+
+    match res {
+        Ok(Ok(_)) => Ok(()),
+        Err(Ok(InvokeError::Contract(code))) | Err(Err(InvokeError::Contract(code))) => match code {
+            1 => Err(Error::AgentNotFound),
+            5 => Err(Error::AgentFrozen),
+            10 => Err(Error::InsufficientBond),
+            36 => Err(Error::AgentDeregistered),
+            _ => Err(Error::AgentNotEligible),
+        },
+        _ => Err(Error::AgentNotEligible),
+    }
+}
+
 // ─── Contract ────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -105,6 +132,18 @@ impl AgentGovernanceContract {
         Ok(())
     }
 
+    /// Set the agent registry contract address.
+    pub fn set_agent_registry(env: Env, registry: Address) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::AgentRegistry, &registry);
+        Ok(())
+    }
+
     // ── Agent registration ───────────────────────────────────────────────
 
     /// Register `agent` as a stakeholder with a reputation score and stake.
@@ -122,6 +161,7 @@ impl AgentGovernanceContract {
     ) -> Result<(), Error> {
         require_initialized(&env)?;
         agent.require_auth();
+        verify_agent_eligibility(&env, &soroban_sdk::Symbol::new(&env, "agent"))?;
 
         if reputation > MAX_REPUTATION {
             return Err(Error::InvalidReputation);

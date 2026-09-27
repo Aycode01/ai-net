@@ -74,4 +74,15 @@ pub enum Error {
     AuctionNotAbortable = 25,
     /// An arithmetic operation overflowed while scoring bids.
     ArithmeticOverflow = 26,
+    AgentNotFound = 27,
+    AgentFrozen = 28,
+    InsufficientBond = 29,
+    AgentDeregistered = 30,
+    AgentNotEligible = 31,
+    AlreadyInitialized = 32,
+    ContractPaused = 33,
+    WinnerCannotClaimRefund = 34,
+    RefundAlreadyClaimed = 35,
+    ClaimWindowExpired = 36,
+    AlreadyRefunded = 37,
 }

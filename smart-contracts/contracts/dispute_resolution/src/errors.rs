@@ -18,6 +18,11 @@ pub enum Error {
     AppealWindowClosed = 10,
     NoJurorsAvailable = 11,
     InvalidEvidence = 12,
+    AgentNotFound = 13,
+    AgentFrozen = 14,
+    InsufficientBond = 15,
+    AgentDeregistered = 16,
+    AgentNotEligible = 17,
 }
 
 impl Error {
@@ -35,6 +40,11 @@ impl Error {
             10 => Some(Error::AppealWindowClosed),
             11 => Some(Error::NoJurorsAvailable),
             12 => Some(Error::InvalidEvidence),
+            13 => Some(Error::AgentNotFound),
+            14 => Some(Error::AgentFrozen),
+            15 => Some(Error::InsufficientBond),
+            16 => Some(Error::AgentDeregistered),
+            17 => Some(Error::AgentNotEligible),
             _ => None,
         }
     }

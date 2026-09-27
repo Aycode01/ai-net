@@ -92,14 +92,23 @@ Average reduction: **20.3%**, exceeding the 15% acceptance threshold.
 5. Lookup/list paths extend TTL directly when a previous `get()` already proved
    the key exists.
 
+## Cross-Contract Eligibility Verification Costs
+
+When cross-contract eligibility verification (`AgentRegistry::verify_agent_eligible`) is configured:
+- **Invocation Overhead**: Paying the Soroban cross-contract invocation cost (~62,000 CPU instructions + host context setup).
+- **Registry Lookup**: Single `DataKey::Agent` persistent read (~15,000 CU) plus `FrozenAgent` / `MinBond` verification.
+- **Total Overhead**: ~80,000 - 95,000 CU per verified mutation (`book_agent`, `list_service`, `submit_bid`, `file_dispute`, `register_agent`).
+- **Unconfigured Bypass**: 0 additional gas overhead when `AgentRegistry` contract address is `None`.
+
 ## Contract Snapshot
 
 | Contract | Hot path profiled | Current status |
 |----------|-------------------|----------------|
-| `agent_registry` | Registration, batch registration, error resolution, cleanup, bond updates | Optimized and CI-guarded |
-| `agent_bidding` | Auction create, bid submit/reveal, award/refund | Bounded maps/vectors; no unbounded storage iteration in this change |
-| `agent_marketplace` | Listing and purchase flows | Singleton config and per-listing records; no gas model exported yet |
-| `dispute_resolution` | Dispute create/vote/resolve | Bounded case records; no hot-path regression in this change |
+| `agent_registry` | Registration, batch registration, error resolution, cleanup, bond updates, eligibility check | Optimized and CI-guarded |
+| `agent_bidding` | Auction create, bid submit/reveal, award/refund | Bounded maps/vectors; cross-contract eligibility checks enabled |
+| `agent_marketplace` | Listing and purchase flows | Singleton config and per-listing records; cross-contract eligibility checks enabled |
+| `dispute_resolution` | Dispute create/vote/resolve | Bounded case records; cross-contract eligibility checks enabled |
+| `agent_governance` | Governance proposal and registration | Voting & stakeholder registration; cross-contract eligibility checks enabled |
 | `error-registry` | Error submit, indexed lookup, bounded cleanup | Already uses cursor/batch cleanup; no extra reads introduced |
 | `error-resolver` | Error count record/clear/query | Minimal per-agent counters; no extra reads introduced |
 | `task_store` | Task create/update/query | Per-task records; no unbounded collection mutation in this change |

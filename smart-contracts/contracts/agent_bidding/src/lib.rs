@@ -125,6 +125,18 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
     Ok(admin)
 }
 
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::ContractPaused);
+    }
+    Ok(())
+}
+
 /// Extend TTL for a single persistent key, but only when it exists.
 fn extend_ttl_for_key(env: &Env, key: &DataKey) {
     if env.storage().persistent().has(key) {
@@ -138,6 +150,33 @@ fn extend_ttl_for_key(env: &Env, key: &DataKey) {
 fn extend_ttl_batch(env: &Env, keys: &Vec<DataKey>) {
     for key in keys.iter() {
         extend_ttl_for_key(env, &key);
+    }
+}
+
+fn verify_agent_eligibility(env: &Env, agent_id: &Symbol) -> Result<(), Error> {
+    let registry: Option<Address> = env.storage().instance().get(&DataKey::AgentRegistry);
+    let registry_addr = match registry {
+        Some(addr) => addr,
+        None => return Ok(()),
+    };
+
+    use soroban_sdk::{InvokeError, IntoVal, Val, vec};
+    let fn_name = Symbol::new(env, "verify_agent_eligible");
+    let args = vec![env, agent_id.into_val(env)];
+
+    let res: Result<Result<Val, _>, Result<InvokeError, InvokeError>> =
+        env.try_invoke_contract(&registry_addr, &fn_name, args);
+
+    match res {
+        Ok(Ok(_)) => Ok(()),
+        Err(Ok(InvokeError::Contract(code))) | Err(Err(InvokeError::Contract(code))) => match code {
+            1 => Err(Error::AgentNotFound),
+            5 => Err(Error::AgentFrozen),
+            10 => Err(Error::InsufficientBond),
+            36 => Err(Error::AgentDeregistered),
+            _ => Err(Error::AgentNotEligible),
+        },
+        _ => Err(Error::AgentNotEligible),
     }
 }
 
@@ -360,6 +399,13 @@ impl AgentBiddingContract {
         Ok(())
     }
 
+    /// Admin: set the agent registry address.
+    pub fn set_agent_registry(env: Env, registry: Address) -> Result<(), Error> {
+        let _admin = require_admin(&env)?;
+        env.storage().instance().set(&DataKey::AgentRegistry, &registry);
+        Ok(())
+    }
+
     // ── Submit Sealed Bid ─────────────────────────────────────────────────
 
     /// Submit a sealed bid during the bidding period.
@@ -386,6 +432,7 @@ impl AgentBiddingContract {
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         bidder.require_auth();
+        verify_agent_eligibility(&env, &task_id)?;
 
         let mut auction = load_auction(&env, &task_id)?;
         require_live(&auction)?;

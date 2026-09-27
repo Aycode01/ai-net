@@ -69,6 +69,8 @@ pub enum Error {
     InvalidConfig = 34,
     /// Price supplied is zero or negative.
     InvalidPrice = 35,
+    /// Agent has been deregistered.
+    AgentDeregistered = 36,
 }
 
 impl Error {
@@ -110,6 +112,7 @@ impl Error {
             33 => Some(Error::RateLimitExceeded),
             34 => Some(Error::InvalidConfig),
             35 => Some(Error::InvalidPrice),
+            36 => Some(Error::AgentDeregistered),
             _ => None,
         }
     }

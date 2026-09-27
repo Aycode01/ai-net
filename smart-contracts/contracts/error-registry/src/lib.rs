@@ -56,11 +56,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map,
-<<<<<<< HEAD
-    Symbol, Vec,
-=======
     String, Symbol, Vec,
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
 };
 
 /// Maximum allowed TTL for a single record: **90 days** (in seconds).
@@ -118,17 +114,12 @@ pub struct CleanupStats {
 /// Storage keys. All entries live in `persistent` storage.
 #[contracttype]
 pub enum DataKey {
-<<<<<<< HEAD
     /// Contract admin address (instance storage).
     Admin,
     /// Whether the contract is paused (instance storage).
     Paused,
-=======
-    /// Admin address allowed to upgrade this contract.
-    Admin,
     /// Current semantic contract version.
     Version,
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
     /// Primary storage: `error_id` -> [`ErrorRecord`].
     Record(BytesN<32>),
     /// Secondary lookup index: `error_code` -> `Vec<error_id>`.
@@ -146,19 +137,9 @@ pub enum Error {
     InvalidTtl = 2,
     /// `created_at + ttl_seconds` would overflow `u64`.
     TtlOverflow = 3,
-<<<<<<< HEAD
-    /// The contract is paused and cannot accept mutations.
     ContractPaused = 4,
-=======
-    /// Contract instance has already been initialized.
-    AlreadyInitialized = 4,
-    /// Contract instance has not been initialized with an admin.
     NotInitialized = 5,
-    /// Caller is not authorized for the requested admin action.
-    Unauthorized = 6,
-    /// Requested upgrade could not be applied.
-    UpgradeFailed = 7,
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
+    AlreadyInitialized = 6,
 }
 
 #[contract]
@@ -169,7 +150,7 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
         .storage()
         .instance()
         .get(&DataKey::Admin)
-        .ok_or(Error::ContractPaused)?;
+        .ok_or(Error::NotInitialized)?;
     admin.require_auth();
     Ok(admin)
 }
@@ -188,14 +169,17 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
 
 #[contractimpl]
 impl ErrorRegistryContract {
-<<<<<<< HEAD
     /// Initialise the contract with an admin. Can only be called once.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyExists);
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
 
         env.events()
             .publish((symbol_short!("errreg"), symbol_short!("init")), admin);
@@ -231,17 +215,6 @@ impl ErrorRegistryContract {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
-=======
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
-        Ok(())
     }
 
     pub fn admin(env: Env) -> Option<Address> {
@@ -274,7 +247,6 @@ impl ErrorRegistryContract {
             ),
         );
         Ok(())
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
     }
 
     /// Submit a new error report with an explicit TTL.
@@ -495,15 +467,7 @@ impl ErrorRegistryContract {
     }
 }
 
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin: Address = env
-        .storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotInitialized)?;
-    admin.require_auth();
-    Ok(admin)
-}
+
 
 /// Reject `ttl_seconds` outside `(0, MAX_TTL_SECONDS]`.
 fn validate_ttl(ttl_seconds: u64) -> Result<(), Error> {

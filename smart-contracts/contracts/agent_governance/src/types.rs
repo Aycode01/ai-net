@@ -186,6 +186,8 @@ pub enum DataKey {
     Proposal(u64),
     /// [`VoteRecord`] for a given (proposal, voter) pair.
     Vote(u64, Address),
+    /// Agent Registry contract address.
+    AgentRegistry,
 }
 
 // ─── Event payloads ──────────────────────────────────────────────────────────

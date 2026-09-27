@@ -12,6 +12,7 @@ const CONTRACT_VERSION: &str = "1.0.0";
 #[contracttype]
 pub enum DataKey {
     Admin,
+    Paused,
     Version,
     AuthorizedCallers,
     AgentErrorCount(Symbol),
@@ -67,6 +68,7 @@ pub enum ContractError {
     AlreadyApproved = 6,
     OpNotFound = 7,
     SignerNotFound = 8,
+    ContractPaused = 9,
 }
 
 #[contract]

@@ -23,6 +23,7 @@ pub enum DataKey {
     Booking(Symbol),
     AgentRating(Symbol),
     ListingsByCapability(Symbol),
+    AgentRegistry,
 }
 
 #[contract]
@@ -48,6 +49,33 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
         return Err(Error::ContractPaused);
     }
     Ok(())
+}
+
+fn verify_agent_eligibility(env: &Env, agent_id: &Symbol) -> Result<(), Error> {
+    let registry: Option<Address> = env.storage().instance().get(&DataKey::AgentRegistry);
+    let registry_addr = match registry {
+        Some(addr) => addr,
+        None => return Ok(()),
+    };
+
+    use soroban_sdk::{InvokeError, IntoVal, Val, vec};
+    let fn_name = Symbol::new(env, "verify_agent_eligible");
+    let args = vec![env, agent_id.into_val(env)];
+
+    let res: Result<Result<Val, _>, Result<InvokeError, InvokeError>> =
+        env.try_invoke_contract(&registry_addr, &fn_name, args);
+
+    match res {
+        Ok(Ok(_)) => Ok(()),
+        Err(Ok(InvokeError::Contract(code))) | Err(Err(InvokeError::Contract(code))) => match code {
+            1 => Err(Error::AgentNotFound),
+            5 => Err(Error::AgentFrozen),
+            10 => Err(Error::InsufficientBond),
+            36 => Err(Error::AgentDeregistered),
+            _ => Err(Error::AgentNotEligible),
+        },
+        _ => Err(Error::AgentNotEligible),
+    }
 }
 
 #[contractimpl]
@@ -88,6 +116,13 @@ impl AgentMarketplaceContract {
             .unwrap_or(false)
     }
 
+    /// Admin: set the agent registry address.
+    pub fn set_agent_registry(env: Env, registry: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::AgentRegistry, &registry);
+        Ok(())
+    }
+
     /// List a service on the marketplace.
     pub fn list_service(
         env: Env,
@@ -101,6 +136,7 @@ impl AgentMarketplaceContract {
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         owner.require_auth();
+        verify_agent_eligibility(&env, &agent_id)?;
 
         if price_stroops <= 0 {
             return Err(Error::InvalidPrice);
@@ -197,6 +233,8 @@ impl AgentMarketplaceContract {
             .persistent()
             .get(&key)
             .ok_or(Error::NotFound)?;
+
+        verify_agent_eligibility(&env, &listing.agent_id)?;
 
         if !listing.active {
             return Err(Error::ServiceNotAvailable);
