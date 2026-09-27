@@ -12,7 +12,7 @@ export * from './coordinator/coordinator';
 export * from './payment/payment';
 export * from './agent_bidding/agent_bidding';
 export * from './agent_marketplace/agent_marketplace';
-export * from './dispute_resolution/dispute_resolution';
+export * from './dispute/resolution';
 export * from './task_store/task_store';
 export * from './upgrade_manager/upgrade_manager';
 
