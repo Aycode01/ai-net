@@ -4,6 +4,7 @@ import {
   createDefaultReconciliationService,
 } from '../../services/reconciliation';
 import type { ReconciliationTrigger } from '../../services/reconciliation.types';
+import { adminAuthMiddleware } from '../middleware/auth';
 import { createLogger } from '../../utils/logger';
 import { NotFoundError, AppError } from '../../errors';
 
@@ -66,6 +67,9 @@ export function createReconciliationRouter(
 ): Router {
   const router = Router();
   const logger = createLogger({ module: "reconciliation" });
+
+  router.use(adminAuthMiddleware);
+
   let service: ReconciliationService | null = null;
   const getService = (): ReconciliationService =>
     (service ??= options.service ?? createDefaultReconciliationService());

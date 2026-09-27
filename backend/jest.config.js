@@ -9,6 +9,7 @@ module.exports = {
   globalTeardown: '<rootDir>/tests/global-teardown.ts',
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
+      diagnostics: false,
       tsconfig: {
         strict: true,
         esModuleInterop: true,

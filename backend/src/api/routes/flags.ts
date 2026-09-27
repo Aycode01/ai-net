@@ -12,10 +12,13 @@ import {
   KNOWN_FLAGS,
   type FeatureFlag,
 } from "../../services/featureFlags";
+import { adminAuthMiddleware } from "../middleware/auth";
 import { NotFoundError, ValidationError } from "../../errors";
 
 export function createFlagsRouter(): Router {
   const router = Router();
+
+  router.use(adminAuthMiddleware);
 
   router.get("/", (_req: Request, res: Response) => {
     res.json({ flags: getAllFlags() });
