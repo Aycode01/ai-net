@@ -55,6 +55,29 @@ const envSchema = z.object({
   HEARTBEAT_STALE_THRESHOLD_MINUTES: z.coerce.number().int().positive().default(5),
   AGENT_OFFLINE_DELETE_HOURS: z.coerce.number().int().positive().default(24),
 
+  // ── Agent ownership proof (#557, #558) ─────────────────────────────────────
+  /**
+   * Lifetime of a `POST /api/agents/challenge` nonce. The signed message binds
+   * the nonce to a single request, so this only has to cover the round trip —
+   * minutes is generous. Short enough that an intercepted signature has a
+   * small useful window.
+   */
+  AGENT_CHALLENGE_TTL_MS: z.coerce.number().int().positive().default(300_000),
+  /**
+   * Failed ownership proofs allowed per IP per window before the failure path
+   * itself is throttled (#558). Counted separately from the success-path
+   * limiter so a legitimate agent is never throttled by its own traffic, and
+   * so probing for agent existence cannot be done at the success-path rate.
+   */
+  AGENT_AUTH_FAILURE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
+  AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * Date the unsigned agent-lifecycle path is withdrawn (ISO-8601). Emitted as
+   * a `Sunset` header on unsigned agent requests while the migration window
+   * is open; see `FEATURE_AGENT_OWNERSHIP_PROOF` for the cutover switch.
+   */
+  AGENT_AUTH_SUNSET_DATE: z.string().optional(),
+
   RECONCILIATION_WEBHOOK_URL: z.string().url().optional(),
   RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(86_400_000),
 
