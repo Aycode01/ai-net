@@ -21,15 +21,6 @@ const toSeries = (points: TimePoint[] | undefined): number[] => {
   return [];
 };
 
-const syntheticSeries = (value: number, length = 7): number[] => {
-  const base = Math.max(value, 1);
-  return Array.from({ length }, (_, i) => {
-    const wave = Math.sin(i / 2) * base * 0.12;
-    const drift = (i / (length - 1)) * base * 0.3;
-    return Math.max(0, Math.round(drift + wave + 1));
-  });
-};
-
 /**
  * Context-aware skeleton that mirrors the dashboard layout so there is no
  * layout shift between the loading and loaded states.
@@ -95,30 +86,19 @@ export const DashboardPage: React.FC = () => {
     uptimePercent: 0,
   };
 
-  const agentsSeries =
-    toSeries(kpiData.tasksLast7d).length > 0
-      ? toSeries(kpiData.tasksLast7d)
-      : syntheticSeries(kpiData.totalAgents);
-  const tasksSeries =
-    toSeries(kpiData.tasksLast7d).length > 0
-      ? toSeries(kpiData.tasksLast7d)
-      : syntheticSeries(kpiData.totalTasks);
-  const xlmSeries =
-    toSeries(kpiData.xlmLast7d).length > 0
-      ? toSeries(kpiData.xlmLast7d)
-      : syntheticSeries(kpiData.totalXLMTransacted);
-  const uptimeSeries =
-    toSeries(kpiData.tasksLast7d).length > 0
-      ? toSeries(kpiData.tasksLast7d)
-      : syntheticSeries(Math.round(kpiData.uptimePercent));
+  // Only totalTasks and totalXLMTransacted have a real 7-day series from the
+  // backend. totalAgents and uptimePercent have no time-series equivalent, so
+  // their KPI cards render without a sparkline rather than a fabricated one.
+  const tasksSeries = toSeries(kpiData.tasksLast7d);
+  const xlmSeries = toSeries(kpiData.xlmLast7d);
 
   return (
     <DashboardLayout className="fade-in">
       <section className={styles.kpis}>
-        <KpiCard title={t('page.dashboard.totalAgents')} value={kpiData.totalAgents} sparklineData={agentsSeries} loading={loading} />
+        <KpiCard title={t('page.dashboard.totalAgents')} value={kpiData.totalAgents} loading={loading} />
         <KpiCard title={t('page.dashboard.totalTasks')} value={kpiData.totalTasks} sparklineData={tasksSeries} loading={loading} />
         <KpiCard title={t('page.dashboard.totalXLM')} value={kpiData.totalXLMTransacted} sparklineData={xlmSeries} loading={loading} />
-        <KpiCard title={t('page.dashboard.uptime')} value={`${kpiData.uptimePercent.toFixed(2)}%`} sparklineData={uptimeSeries} loading={loading} />
+        <KpiCard title={t('page.dashboard.uptime')} value={`${kpiData.uptimePercent.toFixed(2)}%`} loading={loading} />
       </section>
       <section className={styles.health}>
         <NetworkHealthBadge uptimePercent={kpiData.uptimePercent} />
