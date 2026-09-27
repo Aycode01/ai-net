@@ -2,32 +2,72 @@
 
 //! # Upgrade Manager Contract
 //!
-//! Provides safe contract upgrade functionality with version tracking, data migration hooks,
-//! and rollback capabilities for Soroban contracts.
+//! Timelock-governed, multi-signature upgrade management for Soroban contracts.
 //!
-//! ## Features
+//! ## Scope: this is a *self*-upgrade manager
 //!
-//! - **Version Tracking**: Each contract version is stored with metadata
-//! - **Migration Hooks**: Pre-upgrade validation and post-upgrade data migration
-//! - **Rollback Support**: Admin can revert to previous version within 48h window
-//! - **Gas Budget Estimation**: Calculate gas costs for migration operations
-//! - **Event System**: Comprehensive upgrade tracking via events
-//! - **Admin Controls**: Only authorized admins can perform upgrades
+//! Soroban's only upgrade primitive is
+//! `env.deployer().update_current_contract_wasm(hash)`. Per the SDK docs
+//! (soroban-sdk 22.0.11, `src/deploy.rs`):
 //!
-//! ## Usage Flow
+//! > Replaces the executable of **the current contract** with the provided Wasm.
+//! > ... The function won't do anything immediately. The contract executable
+//! > will only be updated after the invocation has successfully finished.
 //!
-//! 1. `propose_upgrade` - Admin proposes new WASM hash with validation
-//! 2. Pre-upgrade hook validates compatibility and estimates gas
-//! 3. `execute_upgrade` - Admin executes the upgrade after validation
-//! 4. Post-upgrade hook migrates data to new format
-//! 5. `rollback_upgrade` - Optional rollback within 48h window
+//! There is no target-address parameter, so **a contract can only ever upgrade
+//! itself**. This contract therefore governs its own WASM. Other contracts that
+//! want the same governance copy the pattern: they depend on this crate as a
+//! library (`default-features = false`) and implement the [`Upgradeable`] trait,
+//! as `agent_registry` does. This crate is the reference implementation and the
+//! shared source of types and constants — not a cross-contract upgrade authority.
 //!
-//! ## Security Model
+//! ## Lifecycle
 //!
-//! - Only contract admin can propose/execute upgrades
-//! - Pre-upgrade hooks prevent incompatible upgrades
-//! - Rollback window provides safety net for problematic upgrades
-//! - Version tracking prevents downgrades without explicit rollback
+//! ```text
+//! Proposed ──approve*──> Approved ──threshold reached──> PendingTimelock
+//!     │                                                    │
+//!     │                                          eta elapsed │
+//!     │                                                    ▼
+//!     └────────────────── insufficient ────────────────> Ready
+//!                                                          │ execute
+//!                                                          ▼
+//!                                          Executed ──rollback──> RolledBack
+//!     any non-terminal ──now > expires_at──> Expired ──sweep──> (reaped)
+//! ```
+//!
+//! ## Timelock: deliberately stricter than `agent_registry`
+//!
+//! `agent_registry` sets `eta = created_at + timelock_delay` **at proposal
+//! time**. That is flawed: if the signer set is widened, a proposal can sit
+//! unapproved past its `eta` and become *instantly* executable the moment the
+//! last approval lands, so the timelock provides no real delay.
+//!
+//! This contract instead starts the clock **only when the approval threshold is
+//! first reached** (`eta` is `0` until then). The waiting period is therefore
+//! always observed in full, after the decision to upgrade is final. This is an
+//! intentional deviation from the sibling contract; see `approve_upgrade`.
+//!
+//! ## Rollback is a *code* revert, not a state revert
+//!
+//! `rollback_upgrade` re-invokes `update_current_contract_wasm` with the
+//! previous hash — the same primitive as an upgrade, which is the only thing
+//! the platform offers. It does **not** undo any storage mutation performed by
+//! `execute_post_upgrade_migration`. Today every migration function in
+//! `migration.rs` is a stub that writes nothing, so no data is at risk; but a
+//! future destructive migration must not rely on rollback to undo itself. See
+//! `migration::is_migration_reversible`.
+//!
+//! ## Security model
+//!
+//! - Only governance members (single admin, or the multisig signer set when one
+//!   is configured) may propose, approve, execute or roll back.
+//! - `require_auth()` is called on the *caller-supplied* address, so Soroban
+//!   enforces the signature — membership alone is not enough.
+//! - Execution requires BOTH the timelock to have elapsed AND the approval
+//!   threshold to be met.
+//! - A single-signature emergency path (`set_admin`, `set_multisig_config`,
+//!   `pause`) is deliberately retained even when a multisig is configured, so a
+//!   misconfigured signer set can always be repaired.
 
 pub mod events;
 mod migration;
@@ -44,8 +84,26 @@ pub use upgradeable::*;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-/// Rollback window in ledgers (48 hours at ~5s per ledger)
+/// Rollback window in ledgers (48h at ~5s per ledger).
+///
+/// UNIT NOTE: this is a *ledger-sequence* window, whereas [`DEFAULT_TIMELOCK_DELAY`]
+/// and [`DEFAULT_PROPOSAL_EXPIRY`] are *wall-clock seconds*. The inconsistency
+/// is preserved deliberately — `agent_registry::get_upgrade_status` derives its
+/// own rollback deadline from this constant, so changing the unit would silently
+/// break that contract. Documented rather than fixed.
 pub const ROLLBACK_WINDOW_LEDGERS: u32 = 34_560;
+
+/// Default timelock delay in seconds (24h).
+pub const DEFAULT_TIMELOCK_DELAY: u64 = 86_400;
+
+/// Default proposal validity period in seconds (7 days).
+pub const DEFAULT_PROPOSAL_EXPIRY: u64 = 604_800;
+
+/// Approval threshold applied when no multisig is configured: the proposer alone.
+pub const DEFAULT_THRESHOLD: u32 = 1;
+
+/// Maximum proposals examined by a single sweep call, to bound gas.
+pub const MAX_SWEEP_PROPOSALS: u32 = 50;
 
 /// Default TTL threshold for storage extension
 pub const TTL_THRESHOLD: u32 = 100_000;
@@ -71,20 +129,6 @@ pub struct ContractVersion {
     pub rollback_deadline: u32,
 }
 
-/// Upgrade proposal before execution
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeProposal {
-    pub new_version: String,
-    pub new_wasm_hash: BytesN<32>,
-    pub description: String,
-    pub proposed_ledger: u32,
-    pub proposer: Address,
-    pub validated: bool,
-    pub estimated_gas: u64,
-    pub migration_plan: MigrationPlan,
-}
-
 /// Migration execution plan
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,11 +148,89 @@ pub struct RollbackRecord {
     pub can_rollback: bool,
 }
 
-/// Storage keys for upgrade manager data
+/// Multi-signature administration configuration.
+///
+/// Mirrors `agent_registry::MultisigConfig` so the two contracts stay
+/// idiomatic with each other.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultisigConfig {
+    /// Authorized governance members.
+    pub admins: Vec<Address>,
+    /// Required approval count (M of N).
+    pub threshold: u32,
+    /// Delay in seconds between reaching threshold and becoming executable.
+    pub timelock_delay: u64,
+}
+
+/// Lifecycle state of an upgrade proposal.
+///
+/// `Ready` is never persisted: it is *derived* at read time from
+/// `PendingTimelock + now >= eta`, because no transaction runs at the moment
+/// the timelock elapses.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalStatus {
+    Proposed = 0,
+    Approved = 1,
+    PendingTimelock = 2,
+    Ready = 3,
+    Executed = 4,
+    RolledBack = 5,
+    Expired = 6,
+}
+
+impl ProposalStatus {
+    /// Terminal states can never transition again.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            ProposalStatus::Executed | ProposalStatus::RolledBack | ProposalStatus::Expired
+        )
+    }
+}
+
+/// An upgrade proposal awaiting approval, timelock, and execution.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub new_version: String,
+    pub new_wasm_hash: BytesN<32>,
+    pub description: String,
+    pub migration_plan: MigrationPlan,
+    /// Ledger timestamp (seconds) at proposal creation.
+    pub created_at: u64,
+    /// Earliest execution time. `0` until the approval threshold is reached.
+    pub eta: u64,
+    /// Timestamp after which this proposal can never be executed.
+    pub expires_at: u64,
+    /// Governance members who have approved. Length is the approval count.
+    pub approvals: Vec<Address>,
+    pub status: ProposalStatus,
+    pub validated: bool,
+    pub estimated_gas: u64,
+    /// Captured at execution time, for rollback.
+    pub previous_version: String,
+    pub previous_wasm_hash: BytesN<32>,
+    pub executed_ledger: u32,
+    pub rollback_deadline: u32,
+}
+
+/// Storage keys for upgrade manager data.
+///
+/// STORAGE-LAYOUT NOTE (issue #488): `Proposal` and `Rollback` changed from
+/// unit variants to tuple variants keyed by proposal id, and `MultisigConfig` /
+/// `NextProposalId` were appended. New variants are appended at the end so
+/// existing discriminants are not shifted. The two *changed* slots only ever
+/// hold transient records (a proposal is superseded once executed, a rollback
+/// record is deleted once consumed), so the blast radius of this change is
+/// limited to an in-flight proposal or rollback record at upgrade time.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// Current admin address
+    /// Current admin address (retained as the emergency single-signature path)
     Admin,
     /// Whether the contract is paused
     Paused,
@@ -116,17 +238,24 @@ pub enum DataKey {
     CurrentVersion,
     /// Version history (version_string -> ContractVersion)
     Version(String),
-    /// Active upgrade proposal
-    Proposal,
-    /// Rollback information
-    Rollback,
+    /// Upgrade proposal, keyed by proposal id
+    Proposal(u64),
+    /// Rollback record, keyed by proposal id
+    Rollback(u64),
     /// Migration state during upgrade
     MigrationState,
     /// Contract-specific upgrade hooks
     UpgradeHooks,
+    /// Multisig configuration, when configured
+    MultisigConfig,
+    /// Monotonic proposal id counter
+    NextProposalId,
 }
 
-/// Upgrade operation errors
+/// Upgrade operation errors.
+///
+/// Codes 1-13 are the original set and are frozen — never renumber them, as the
+/// values are part of the contract's ABI. New variants start at 14.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -157,6 +286,20 @@ pub enum UpgradeError {
     DowngradeNotAllowed = 12,
     /// The contract is paused and cannot accept mutations
     ContractPaused = 13,
+    /// Signer has already approved this proposal
+    AlreadyApproved = 14,
+    /// Approval threshold not met
+    InsufficientApprovals = 15,
+    /// Timelock has not yet elapsed
+    TimelockNotElapsed = 16,
+    /// Proposal validity window has elapsed
+    ProposalExpired = 17,
+    /// Proposal has already been executed or rolled back
+    ProposalAlreadyExecuted = 18,
+    /// Multisig configuration is invalid
+    InvalidMultisigConfig = 19,
+    /// Proposal has not been validated yet
+    ProposalNotValidatedForExecution = 20,
 }
 
 /// Main upgrade manager contract
@@ -199,12 +342,92 @@ fn get_current_version(env: &Env) -> Option<ContractVersion> {
     env.storage().persistent().get(&DataKey::CurrentVersion)
 }
 
+fn get_multisig(env: &Env) -> Option<MultisigConfig> {
+    env.storage().instance().get(&DataKey::MultisigConfig)
+}
+
+fn next_proposal_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::NextProposalId)
+        .unwrap_or(1)
+}
+
+fn load_proposal(env: &Env, id: u64) -> Result<UpgradeProposal, UpgradeError> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Proposal(id))
+        .ok_or(UpgradeError::NoProposal)
+}
+
+fn save_proposal(env: &Env, proposal: &UpgradeProposal) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Proposal(proposal.id), proposal);
+    extend_ttl_for_key(env, &DataKey::Proposal(proposal.id));
+}
+
+/// Effective threshold and timelock delay for the current configuration.
+///
+/// With no multisig configured this degrades to single-admin governance:
+/// threshold 1 (the proposer's implicit approval) and the default 24h delay,
+/// so a single-admin deployment still gets a real timelock.
+fn effective_config(env: &Env) -> (u32, u64) {
+    match get_multisig(env) {
+        Some(cfg) => (cfg.threshold, cfg.timelock_delay),
+        None => (DEFAULT_THRESHOLD, DEFAULT_TIMELOCK_DELAY),
+    }
+}
+
+/// Whether `addr` may participate in upgrade governance.
+fn is_governance_member(env: &Env, addr: &Address) -> bool {
+    if let Some(admin) = env.storage().instance().get::<_, Address>(&DataKey::Admin) {
+        if &admin == addr {
+            return true;
+        }
+    }
+    match get_multisig(env) {
+        Some(cfg) => cfg.admins.contains(addr),
+        None => false,
+    }
+}
+
+/// Require that `member` signed the transaction and is a governance member.
+///
+/// `require_auth()` is what actually proves authorization; the membership check
+/// only narrows who is allowed at all. Both are required.
+fn require_governance_member(env: &Env, member: &Address) -> Result<(), UpgradeError> {
+    member.require_auth();
+    if !is_governance_member(env, member) {
+        return Err(UpgradeError::Unauthorized);
+    }
+    Ok(())
+}
+
+/// The status a proposal *actually* has right now.
+///
+/// `Ready` is derived rather than stored, because no transaction runs at the
+/// moment the timelock elapses.
+fn effective_status(proposal: &UpgradeProposal, now: u64) -> ProposalStatus {
+    if proposal.status.is_terminal() {
+        return proposal.status.clone();
+    }
+    if now > proposal.expires_at {
+        return ProposalStatus::Expired;
+    }
+    if proposal.status == ProposalStatus::PendingTimelock && proposal.eta > 0 && now >= proposal.eta
+    {
+        return ProposalStatus::Ready;
+    }
+    proposal.status.clone()
+}
+
 /// Returns `true` when `proposed` sorts strictly after `current`.
 ///
 /// [`String`] implements `Ord` via the host's lexicographic byte comparison,
 /// which works identically natively and under `wasm32v1-none`. Version tags are
 /// therefore compared as byte strings, matching the ordering the registry has
-/// always used.
+/// always used. Callers needing semver precedence must zero-pad components.
 fn is_version_newer(current: &String, proposed: &String) -> bool {
     proposed > current
 }
@@ -214,7 +437,7 @@ fn is_version_newer(current: &String, proposed: &String) -> bool {
 #[cfg(feature = "contract")]
 #[contractimpl]
 impl UpgradeManager {
-    /// Initialize the upgrade manager with an admin and initial version
+    /// Initialize the upgrade manager with an admin and initial version.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -225,8 +448,12 @@ impl UpgradeManager {
             return Err(UpgradeError::InvalidVersion);
         }
 
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &1u64);
 
         let initial = ContractVersion {
             version: initial_version.clone(),
@@ -259,7 +486,10 @@ impl UpgradeManager {
         Ok(())
     }
 
-    /// Set a new admin for the upgrade manager
+    /// Set a new admin for the upgrade manager.
+    ///
+    /// Intentionally single-signature even when a multisig is configured, so a
+    /// misconfigured signer set can always be repaired.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), UpgradeError> {
         require_not_paused(&env)?;
         let old_admin = require_admin(&env)?;
@@ -276,9 +506,54 @@ impl UpgradeManager {
         Ok(())
     }
 
-    /// Get the current admin
+    /// Get the current admin.
     pub fn get_admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// Configure the multisig signer set, threshold, and timelock delay.
+    ///
+    /// Single-signature (admin) on purpose — see [`UpgradeManager::set_admin`].
+    pub fn set_multisig_config(
+        env: Env,
+        admins: Vec<Address>,
+        threshold: u32,
+        timelock_delay: u64,
+    ) -> Result<(), UpgradeError> {
+        require_not_paused(&env)?;
+        require_admin(&env)?;
+
+        if admins.is_empty() || threshold == 0 || threshold > admins.len() {
+            return Err(UpgradeError::InvalidMultisigConfig);
+        }
+        if timelock_delay == 0 {
+            return Err(UpgradeError::InvalidMultisigConfig);
+        }
+
+        env.storage().instance().set(
+            &DataKey::MultisigConfig,
+            &MultisigConfig {
+                admins: admins.clone(),
+                threshold,
+                timelock_delay,
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("upgrade"), symbol_short!("msig_set")),
+            MultisigConfigChangedEvent {
+                admins,
+                threshold,
+                timelock_delay,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Read the multisig configuration, if one is configured.
+    pub fn get_multisig_config(env: Env) -> Option<MultisigConfig> {
+        get_multisig(&env)
     }
 
     /// Pause the contract. Only admin can call this.
@@ -307,92 +582,193 @@ impl UpgradeManager {
             .unwrap_or(false)
     }
 
-    /// Get the current contract version
+    /// Get the current contract version.
     pub fn get_current_version(env: Env) -> Option<ContractVersion> {
         get_current_version(&env)
     }
 
-    /// Get version history for a specific version
+    /// Get version history for a specific version.
     pub fn get_version(env: Env, version: String) -> Option<ContractVersion> {
         env.storage().persistent().get(&DataKey::Version(version))
     }
 
-    /// Propose a new upgrade with validation
+    /// Create an upgrade proposal and start governance.
+    ///
+    /// Returns the new proposal id. The proposer is recorded as the first
+    /// approver, so a 1-of-N configuration becomes immediately timelocked while
+    /// a higher threshold stays in [`ProposalStatus::Proposed`].
     pub fn propose_upgrade(
         env: Env,
+        proposer: Address,
         new_version: String,
         new_wasm_hash: BytesN<32>,
         description: String,
         migration_plan: MigrationPlan,
-    ) -> Result<(), UpgradeError> {
+    ) -> Result<u64, UpgradeError> {
         require_not_paused(&env)?;
-        let admin = require_admin(&env)?;
+        require_governance_member(&env, &proposer)?;
 
-        // Check if version is valid and newer
         if let Some(current) = get_current_version(&env) {
             if !is_version_newer(&current.version, &new_version) {
                 return Err(UpgradeError::DowngradeNotAllowed);
             }
         }
 
-        // Create proposal
-        let proposal = UpgradeProposal {
+        let (threshold, timelock_delay) = effective_config(&env);
+        let id = next_proposal_id(&env);
+        let now = env.ledger().timestamp();
+
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+
+        let mut proposal = UpgradeProposal {
+            id,
+            proposer: proposer.clone(),
             new_version: new_version.clone(),
             new_wasm_hash: new_wasm_hash.clone(),
             description: description.clone(),
-            proposed_ledger: env.ledger().sequence(),
-            proposer: admin,
+            migration_plan,
+            created_at: now,
+            eta: 0,
+            expires_at: now + DEFAULT_PROPOSAL_EXPIRY,
+            approvals,
+            status: ProposalStatus::Proposed,
             validated: false,
             estimated_gas: 0,
-            migration_plan,
+            previous_version: String::from_str(&env, ""),
+            previous_wasm_hash: BytesN::from_array(&env, &[0u8; 32]),
+            executed_ledger: 0,
+            rollback_deadline: 0,
         };
 
+        // Start the timelock now only if the proposer's own approval already
+        // satisfies the threshold (the 1-of-N case).
+        if threshold <= 1 {
+            proposal.eta = now + timelock_delay;
+            proposal.status = ProposalStatus::PendingTimelock;
+        }
+
+        save_proposal(&env, &proposal);
         env.storage()
-            .persistent()
-            .set(&DataKey::Proposal, &proposal);
-        extend_ttl_for_key(&env, &DataKey::Proposal);
+            .instance()
+            .set(&DataKey::NextProposalId, &(id + 1));
 
         env.events().publish(
             (symbol_short!("upgrade"), symbol_short!("proposed")),
             UpgradeProposedEvent {
+                proposal_id: id,
                 version: new_version,
                 wasm_hash: new_wasm_hash,
-                proposer: proposal.proposer,
+                proposer,
                 description,
+                threshold,
+                expires_at: proposal.expires_at,
+            },
+        );
+
+        // The implicit proposer approval is a real approval and emits too, so
+        // an indexer counting approvals never under-reports.
+        if threshold <= 1 {
+            env.events().publish(
+                (symbol_short!("upgrade"), symbol_short!("approved")),
+                UpgradeApprovedEvent {
+                    proposal_id: id,
+                    approver: proposal.proposer.clone(),
+                    approval_count: 1,
+                    threshold,
+                    eta: proposal.eta,
+                },
+            );
+        }
+
+        Ok(id)
+    }
+
+    /// Record a governance member's approval.
+    ///
+    /// The timelock starts on the approval that *reaches the threshold*, not at
+    /// proposal creation. This is an intentional, security-motivated deviation
+    /// from `agent_registry`, which sets `eta` at propose time — under that
+    /// scheme a proposal that sits below threshold past its `eta` becomes
+    /// instantly executable the moment the final approval lands, so the timelock
+    /// never actually delays anything.
+    pub fn approve_upgrade(
+        env: Env,
+        approver: Address,
+        proposal_id: u64,
+    ) -> Result<(), UpgradeError> {
+        require_not_paused(&env)?;
+        require_governance_member(&env, &approver)?;
+
+        let mut proposal = load_proposal(&env, proposal_id)?;
+        let now = env.ledger().timestamp();
+
+        if proposal.status == ProposalStatus::Executed
+            || proposal.status == ProposalStatus::RolledBack
+        {
+            return Err(UpgradeError::ProposalAlreadyExecuted);
+        }
+        if now > proposal.expires_at {
+            return Err(UpgradeError::ProposalExpired);
+        }
+        if proposal.approvals.contains(&approver) {
+            return Err(UpgradeError::AlreadyApproved);
+        }
+
+        proposal.approvals.push_back(approver.clone());
+        let count = proposal.approvals.len() as u32;
+
+        let (threshold, timelock_delay) = effective_config(&env);
+        if proposal.eta == 0 && count >= threshold {
+            proposal.eta = now + timelock_delay;
+            proposal.status = ProposalStatus::PendingTimelock;
+        } else if count == 1 {
+            proposal.status = ProposalStatus::Approved;
+        }
+
+        save_proposal(&env, &proposal);
+
+        env.events().publish(
+            (symbol_short!("upgrade"), symbol_short!("approved")),
+            UpgradeApprovedEvent {
+                proposal_id,
+                approver,
+                approval_count: count,
+                threshold,
+                eta: proposal.eta,
             },
         );
 
         Ok(())
     }
 
-    /// Validate the current upgrade proposal (pre-upgrade hook)
-    pub fn validate_proposal(env: Env) -> Result<u64, UpgradeError> {
+    /// Run the pre-upgrade validation hook and estimate migration gas.
+    pub fn validate_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+    ) -> Result<u64, UpgradeError> {
         require_not_paused(&env)?;
-        require_admin(&env)?;
+        require_governance_member(&env, &caller)?;
 
-        let mut proposal: UpgradeProposal = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Proposal)
-            .ok_or(UpgradeError::NoProposal)?;
+        let mut proposal = load_proposal(&env, proposal_id)?;
+        if proposal.status == ProposalStatus::Executed
+            || proposal.status == ProposalStatus::RolledBack
+        {
+            return Err(UpgradeError::ProposalAlreadyExecuted);
+        }
 
-        // Execute pre-upgrade validation
         let validation_result = execute_pre_upgrade_validation(&env, &proposal)?;
-
-        // Estimate gas costs
         let estimated_gas = estimate_migration_gas(&env, &proposal.migration_plan);
 
         proposal.validated = true;
         proposal.estimated_gas = estimated_gas;
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Proposal, &proposal);
-        extend_ttl_for_key(&env, &DataKey::Proposal);
+        save_proposal(&env, &proposal);
 
         env.events().publish(
             (symbol_short!("upgrade"), symbol_short!("validated")),
             UpgradeValidatedEvent {
+                proposal_id,
                 version: proposal.new_version,
                 estimated_gas,
                 validation_results: validation_result,
@@ -402,41 +778,63 @@ impl UpgradeManager {
         Ok(estimated_gas)
     }
 
-    /// Execute the validated upgrade proposal
-    pub fn execute_upgrade(env: Env) -> Result<(), UpgradeError> {
+    /// Execute an approved, timelocked proposal: replace this contract's WASM.
+    ///
+    /// Requires BOTH the timelock to have elapsed AND the approval threshold to
+    /// be met. The WASM swap itself is deferred by the host until this
+    /// invocation finishes successfully, so the bookkeeping below still runs
+    /// under the outgoing code.
+    pub fn execute_upgrade(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), UpgradeError> {
         require_not_paused(&env)?;
-        let admin = require_admin(&env)?;
+        require_governance_member(&env, &executor)?;
 
-        let proposal: UpgradeProposal = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Proposal)
-            .ok_or(UpgradeError::NoProposal)?;
+        let mut proposal = load_proposal(&env, proposal_id)?;
+        let now = env.ledger().timestamp();
+        let status = effective_status(&proposal, now);
 
+        match status {
+            ProposalStatus::Executed | ProposalStatus::RolledBack => {
+                return Err(UpgradeError::ProposalAlreadyExecuted)
+            }
+            ProposalStatus::Expired => return Err(UpgradeError::ProposalExpired),
+            ProposalStatus::PendingTimelock => return Err(UpgradeError::TimelockNotElapsed),
+            ProposalStatus::Proposed | ProposalStatus::Approved => {
+                return Err(UpgradeError::InsufficientApprovals)
+            }
+            ProposalStatus::Ready => {}
+        }
+
+        let (threshold, _) = effective_config(&env);
+        if (proposal.approvals.len() as u32) < threshold {
+            return Err(UpgradeError::InsufficientApprovals);
+        }
         if !proposal.validated {
             return Err(UpgradeError::ProposalNotValidated);
         }
 
-        // Store current version for potential rollback
-        let current_version = get_current_version(&env);
+        let previous_version = get_current_version(&env);
         let rollback_deadline = env.ledger().sequence() + ROLLBACK_WINDOW_LEDGERS;
+        let executor_address = executor.clone();
 
-        // Execute the upgrade
+        // Replace this contract's own executable. No other contract can do this
+        // for us — see the module docs.
         #[cfg(all(target_arch = "wasm32", not(any(test, feature = "testutils"))))]
         env.deployer()
             .update_current_contract_wasm(proposal.new_wasm_hash.clone());
 
-        // Create new version record
         let new_version = ContractVersion {
             version: proposal.new_version.clone(),
             wasm_hash: proposal.new_wasm_hash.clone(),
             upgrade_ledger: env.ledger().sequence(),
             description: proposal.description.clone(),
-            admin,
+            admin: executor_address.clone(),
             rollback_deadline,
         };
 
-        // Update storage
         env.storage()
             .persistent()
             .set(&DataKey::CurrentVersion, &new_version);
@@ -445,23 +843,26 @@ impl UpgradeManager {
             &new_version,
         );
 
-        // Store rollback info if we had a previous version
-        if let Some(ref prev_version) = current_version {
-            let rollback_record = RollbackRecord {
-                previous_version: prev_version.clone(),
-                rollback_deadline,
-                can_rollback: true,
-            };
-            env.storage()
-                .persistent()
-                .set(&DataKey::Rollback, &rollback_record);
-            extend_ttl_for_key(&env, &DataKey::Rollback);
+        if let Some(ref prev) = previous_version {
+            env.storage().persistent().set(
+                &DataKey::Rollback(proposal_id),
+                &RollbackRecord {
+                    previous_version: prev.clone(),
+                    rollback_deadline,
+                    can_rollback: true,
+                },
+            );
+            extend_ttl_for_key(&env, &DataKey::Rollback(proposal_id));
+
+            proposal.previous_version = prev.version.clone();
+            proposal.previous_wasm_hash = prev.wasm_hash.clone();
         }
 
-        // Clean up proposal
-        env.storage().persistent().remove(&DataKey::Proposal);
+        proposal.status = ProposalStatus::Executed;
+        proposal.executed_ledger = env.ledger().sequence();
+        proposal.rollback_deadline = rollback_deadline;
+        save_proposal(&env, &proposal);
 
-        // Execute post-upgrade migration
         execute_post_upgrade_migration(&env, &proposal.migration_plan)?;
 
         extend_ttl_for_key(&env, &DataKey::CurrentVersion);
@@ -473,51 +874,72 @@ impl UpgradeManager {
         env.events().publish(
             (symbol_short!("upgrade"), symbol_short!("applied")),
             UpgradeAppliedEvent {
-                old_version: current_version
+                proposal_id,
+                old_version: previous_version
                     .map(|v| v.version)
                     .unwrap_or(String::from_str(&env, "none")),
                 new_version: proposal.new_version,
-                wasm_hash: proposal.new_wasm_hash.clone(),
-                admin: new_version.admin,
+                wasm_hash: proposal.new_wasm_hash,
+                admin: executor_address,
+                rollback_deadline,
             },
         );
 
         Ok(())
     }
 
-    /// Rollback to the previous version (within 48h window)
-    pub fn rollback_upgrade(env: Env) -> Result<(), UpgradeError> {
+    /// Revert this contract's executable to the hash captured at execution.
+    ///
+    /// CODE-ONLY REVERT. This restores the previous WASM; it does **not** undo
+    /// any storage mutation the post-upgrade migration performed. It reuses
+    /// `update_current_contract_wasm` because that is the only primitive the
+    /// platform offers, so "rollback" and "upgrade" are the same operation
+    /// pointed at a different hash.
+    pub fn rollback_upgrade(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), UpgradeError> {
         require_not_paused(&env)?;
-        let admin = require_admin(&env)?;
+        require_governance_member(&env, &executor)?;
 
-        let rollback_record: RollbackRecord = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Rollback)
-            .ok_or(UpgradeError::NoRollbackAvailable)?;
-
-        if !rollback_record.can_rollback {
+        let mut proposal = load_proposal(&env, proposal_id)?;
+        if proposal.status != ProposalStatus::Executed {
             return Err(UpgradeError::NoRollbackAvailable);
         }
 
-        if env.ledger().sequence() > rollback_record.rollback_deadline {
+        let record: RollbackRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Rollback(proposal_id))
+            .ok_or(UpgradeError::NoRollbackAvailable)?;
+
+        if !record.can_rollback {
+            return Err(UpgradeError::NoRollbackAvailable);
+        }
+        if env.ledger().sequence() > record.rollback_deadline {
             return Err(UpgradeError::RollbackDeadlineExpired);
         }
 
-        let current_version = get_current_version(&env).unwrap();
+        let reverted_version = proposal.new_version.clone();
+        let restored_wasm_hash = record.previous_version.wasm_hash.clone();
+        let restored_version = record.previous_version.version.clone();
 
-        // Perform the rollback
         #[cfg(all(target_arch = "wasm32", not(any(test, feature = "testutils"))))]
         env.deployer()
-            .update_current_contract_wasm(rollback_record.previous_version.wasm_hash.clone());
+            .update_current_contract_wasm(restored_wasm_hash.clone());
 
-        // Restore previous version as current
         env.storage()
             .persistent()
-            .set(&DataKey::CurrentVersion, &rollback_record.previous_version);
+            .set(&DataKey::CurrentVersion, &record.previous_version);
 
-        // Disable further rollbacks
-        env.storage().persistent().remove(&DataKey::Rollback);
+        // Single-use: a second rollback must not be possible.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Rollback(proposal_id));
+
+        proposal.status = ProposalStatus::RolledBack;
+        save_proposal(&env, &proposal);
 
         extend_ttl_for_key(&env, &DataKey::CurrentVersion);
         env.storage()
@@ -527,43 +949,95 @@ impl UpgradeManager {
         env.events().publish(
             (symbol_short!("upgrade"), symbol_short!("rollback")),
             UpgradeRolledBackEvent {
-                reverted_version: current_version.version,
-                restored_version: rollback_record.previous_version.version,
-                admin,
+                proposal_id,
+                reverted_version,
+                restored_version,
+                restored_wasm_hash,
+                admin: executor,
             },
         );
 
         Ok(())
     }
 
-    /// Get rollback information (if available)
-    pub fn get_rollback_info(env: Env) -> Option<RollbackRecord> {
-        env.storage().persistent().get(&DataKey::Rollback)
-    }
-
-    /// Check if rollback is still available
-    pub fn can_rollback(env: Env) -> bool {
-        if let Some(rollback_record) = env
+    /// Read a proposal, resolving the derived `Ready` status.
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Option<UpgradeProposal> {
+        let mut proposal: UpgradeProposal = env
             .storage()
             .persistent()
-            .get::<DataKey, RollbackRecord>(&DataKey::Rollback)
+            .get(&DataKey::Proposal(proposal_id))?;
+        proposal.status = effective_status(&proposal, env.ledger().timestamp());
+        Some(proposal)
+    }
+
+    /// Get rollback information for a proposal, if one is recorded.
+    pub fn get_rollback_info(env: Env, proposal_id: u64) -> Option<RollbackRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Rollback(proposal_id))
+    }
+
+    /// Whether the given proposal can still be rolled back.
+    pub fn can_rollback(env: Env, proposal_id: u64) -> bool {
+        match env
+            .storage()
+            .persistent()
+            .get::<DataKey, RollbackRecord>(&DataKey::Rollback(proposal_id))
         {
-            rollback_record.can_rollback
-                && env.ledger().sequence() <= rollback_record.rollback_deadline
-        } else {
-            false
+            Some(record) => {
+                record.can_rollback && env.ledger().sequence() <= record.rollback_deadline
+            }
+            None => false,
         }
     }
 
-    /// Estimate gas costs for a migration plan
+    /// Mark expired, non-terminal proposals as `Expired`.
+    ///
+    /// Bounded by [`MAX_SWEEP_PROPOSALS`] to cap gas. Returns how many
+    /// proposals were transitioned.
+    pub fn sweep_expired_proposals(env: Env, caller: Address) -> Result<u32, UpgradeError> {
+        require_governance_member(&env, &caller)?;
+        let admin = caller.clone();
+        let now = env.ledger().timestamp();
+        let next_id = next_proposal_id(&env);
+        let mut swept = 0u32;
+
+        let mut id = 1u64;
+        while id < next_id && swept < MAX_SWEEP_PROPOSALS {
+            if let Some(mut proposal) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, UpgradeProposal>(&DataKey::Proposal(id))
+            {
+                if !proposal.status.is_terminal() && now > proposal.expires_at {
+                    proposal.status = ProposalStatus::Expired;
+                    save_proposal(&env, &proposal);
+                    swept += 1;
+                }
+            }
+            id += 1;
+        }
+
+        env.events().publish(
+            (symbol_short!("upgrade"), symbol_short!("swept")),
+            ExpiredProposalsSweptEvent { swept, admin },
+        );
+
+        Ok(swept)
+    }
+
+    /// Estimate gas costs for a migration plan.
     pub fn estimate_migration_gas(env: Env, migration_plan: MigrationPlan) -> u64 {
         estimate_migration_gas(&env, &migration_plan)
     }
 
-    /// Get all version history (for debugging/auditing)
+    /// Get the proposal id that will be assigned to the next proposal.
+    pub fn next_proposal_id(env: Env) -> u64 {
+        next_proposal_id(&env)
+    }
+
+    /// Get all version history (for debugging/auditing).
     pub fn get_version_history(env: Env) -> Vec<ContractVersion> {
-        // In a real implementation, you'd maintain a separate index
-        // For now, this is a placeholder that returns current version only
         let mut history = Vec::new(&env);
         if let Some(current) = get_current_version(&env) {
             history.push_back(current);
@@ -572,7 +1046,8 @@ impl UpgradeManager {
     }
 }
 
-// ─── Gas Estimation Functions ───────────────────────────────────────────────
+#[cfg(test)]
+mod tests;
 
 fn estimate_migration_gas(_env: &Env, migration_plan: &MigrationPlan) -> u64 {
     let base_cost = GAS_UPGRADE_BASE;
@@ -585,183 +1060,4 @@ fn estimate_migration_gas(_env: &Env, migration_plan: &MigrationPlan) -> u64 {
         * 5000;
 
     base_cost + item_cost + step_overhead
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger as _},
-        BytesN, Env,
-    };
-
-    fn create_test_env() -> (Env, UpgradeManagerClient<'static>, Address) {
-        let env = Env::default();
-        env.ledger().set_sequence_number(1);
-        env.mock_all_auths();
-        let contract_id = env.register(UpgradeManager, ());
-        let client = UpgradeManagerClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        (env, client, admin)
-    }
-
-    fn test_wasm_hash(env: &Env, seed: u8) -> BytesN<32> {
-        let mut bytes = [0u8; 32];
-        bytes[0] = seed;
-        BytesN::from_array(env, &bytes)
-    }
-
-    #[test]
-    fn test_initialize_upgrade_manager() {
-        let (env, client, admin) = create_test_env();
-        let initial_hash = test_wasm_hash(&env, 1);
-
-        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
-
-        assert_eq!(client.get_admin(), Some(admin));
-
-        let version = client.get_current_version().unwrap();
-        assert_eq!(version.version, String::from_str(&env, "1.0.0"));
-        assert_eq!(version.wasm_hash, initial_hash);
-    }
-
-    #[test]
-    fn test_propose_and_execute_upgrade() {
-        let (env, client, admin) = create_test_env();
-        let initial_hash = test_wasm_hash(&env, 1);
-        let new_hash = test_wasm_hash(&env, 2);
-
-        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
-
-        let migration_plan = MigrationPlan {
-            pre_migration_checks: Vec::new(&env),
-            data_transformations: Vec::new(&env),
-            post_migration_validations: Vec::new(&env),
-            estimated_items: 10,
-        };
-
-        // Propose upgrade
-        let result = client.try_propose_upgrade(
-            &String::from_str(&env, "2.0.0"),
-            &new_hash,
-            &String::from_str(&env, "Major upgrade"),
-            &migration_plan,
-        );
-        assert!(result.is_ok());
-
-        // Validate proposal
-        let gas_estimate = client.validate_proposal();
-        assert!(gas_estimate > 0);
-
-        // Execute upgrade
-        let result = client.try_execute_upgrade();
-        assert!(result.is_ok());
-
-        let new_version = client.get_current_version().unwrap();
-        assert_eq!(new_version.version, String::from_str(&env, "2.0.0"));
-        assert_eq!(new_version.wasm_hash, new_hash);
-    }
-
-    #[test]
-    fn test_rollback_within_window() {
-        let (env, client, admin) = create_test_env();
-        let initial_hash = test_wasm_hash(&env, 1);
-        let new_hash = test_wasm_hash(&env, 2);
-
-        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
-
-        let migration_plan = MigrationPlan {
-            pre_migration_checks: Vec::new(&env),
-            data_transformations: Vec::new(&env),
-            post_migration_validations: Vec::new(&env),
-            estimated_items: 5,
-        };
-
-        // Perform upgrade
-        client.propose_upgrade(
-            &String::from_str(&env, "2.0.0"),
-            &new_hash,
-            &String::from_str(&env, "Test upgrade"),
-            &migration_plan,
-        );
-        client.validate_proposal();
-        client.execute_upgrade();
-
-        // Check rollback is available
-        assert!(client.can_rollback());
-
-        // Perform rollback
-        let result = client.try_rollback_upgrade();
-        assert!(result.is_ok());
-
-        // Verify we're back to original version
-        let current = client.get_current_version().unwrap();
-        assert_eq!(current.version, String::from_str(&env, "1.0.0"));
-        assert_eq!(current.wasm_hash, initial_hash);
-
-        // Verify rollback is no longer available
-        assert!(!client.can_rollback());
-    }
-
-    #[test]
-    fn test_rollback_after_deadline() {
-        let (env, client, admin) = create_test_env();
-        let initial_hash = test_wasm_hash(&env, 1);
-        let new_hash = test_wasm_hash(&env, 2);
-
-        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
-
-        let migration_plan = MigrationPlan {
-            pre_migration_checks: Vec::new(&env),
-            data_transformations: Vec::new(&env),
-            post_migration_validations: Vec::new(&env),
-            estimated_items: 5,
-        };
-
-        // Perform upgrade
-        client.propose_upgrade(
-            &String::from_str(&env, "2.0.0"),
-            &new_hash,
-            &String::from_str(&env, "Test upgrade"),
-            &migration_plan,
-        );
-        client.validate_proposal();
-        client.execute_upgrade();
-
-        // Advance ledger past rollback deadline
-        let current_seq = env.ledger().sequence();
-        env.ledger()
-            .set_sequence_number(current_seq + ROLLBACK_WINDOW_LEDGERS + 1);
-
-        // Rollback should fail
-        let result = client.try_rollback_upgrade();
-        assert_eq!(result, Err(Ok(UpgradeError::RollbackDeadlineExpired)));
-    }
-
-    #[test]
-    fn test_gas_estimation() {
-        let (env, client, _admin) = create_test_env();
-
-        let mut migration_plan = MigrationPlan {
-            pre_migration_checks: Vec::new(&env),
-            data_transformations: Vec::new(&env),
-            post_migration_validations: Vec::new(&env),
-            estimated_items: 100,
-        };
-
-        migration_plan
-            .pre_migration_checks
-            .push_back(String::from_str(&env, "check1"));
-        migration_plan
-            .data_transformations
-            .push_back(String::from_str(&env, "transform1"));
-        migration_plan
-            .post_migration_validations
-            .push_back(String::from_str(&env, "validate1"));
-
-        let gas_estimate = client.estimate_migration_gas(&migration_plan);
-
-        let expected = GAS_UPGRADE_BASE + (GAS_MIGRATION_PER_ITEM * 100) + (3 * 5000);
-        assert_eq!(gas_estimate, expected);
-    }
 }
