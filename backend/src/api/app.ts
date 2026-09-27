@@ -24,6 +24,7 @@ import { createPaymentReleaseFn, type StellarReleasePaymentFn } from "../payment
 import { getGlobalJobQueue, JobWorker, type JobQueue } from "../queue";
 import { createHeartbeatService, type HeartbeatServiceOptions } from "../services/heartbeat";
 import { metricsMiddleware, metricsService } from "../services/metrics";
+import { getEventStore } from "../events/eventStore";
 import type { EventStore } from "../events/eventStore";
 import {
   attachTaskStream,
@@ -152,6 +153,8 @@ export function createApp(opts: AppOptions = {}): {
   const dispatch: DispatchFn = opts.dispatch ?? makeHttpDispatch(opts.agentRegistry);
   const releasePayment: PaymentReleaseFn =
     opts.releasePayment ?? createPaymentReleaseFn(tryLoadStellarRelease());
+
+  const eventStore = opts.eventStore ?? getEventStore();
 
   const jobQueue = opts.queue ?? getGlobalJobQueue();
   const jobWorker =
