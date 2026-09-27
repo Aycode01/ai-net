@@ -172,7 +172,7 @@ impl DisputeResolutionContract {
         let count = available_pool.len().min(JUROR_COUNT);
 
         let mut seed_preimage = Bytes::new(&env);
-        seed_preimage.append(&dispute_id.to_xdr(&env));
+        seed_preimage.append(&dispute_id.clone().to_xdr(&env));
         seed_preimage.append(&now.to_xdr(&env));
         seed_preimage.append(&env.ledger().sequence().to_xdr(&env));
         let hash: BytesN<32> = env.crypto().sha256(&seed_preimage).into();
