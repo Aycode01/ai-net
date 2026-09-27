@@ -76,7 +76,7 @@ const TreeNode: React.FC<{ node: ComponentNode; depth: number }> = ({ node, dept
   );
 };
 
-const DesignRenderer: React.FC<Props> = ({ result }) => {
+const DesignRenderer: React.FC<Props> = ({ result, searchQuery }) => {
   const { t } = useTranslation();
   const details = getDesignDetails(result);
   const [copiedColor, setCopiedColor] = useState<string | null>(null);

@@ -1,4 +1,4 @@
-import React, { Suspense } from 'react';
+import React, { Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Capability, AgentResult, ResearchReportResult, CodingResult, RiskResult, DesignResult } from '../../types/agent';
 import RiskMatrix from './RiskMatrix';
@@ -14,6 +14,8 @@ interface Props {
   agentName?: string;
   executionTimeMs?: number;
   tokenCount?: number;
+  searchQuery?: string;
+  onSearchChange?: (query: string) => void;
 }
 
 const LoadingFallback: React.FC = () => {
@@ -32,8 +34,34 @@ const LoadingFallback: React.FC = () => {
   );
 };
 
-const AgentOutputRenderer: React.FC<Props> = ({ agentType, result }) => {
+const AgentOutputRenderer: React.FC<Props> = ({
+  agentType,
+  result,
+  agentName,
+  executionTimeMs,
+  tokenCount,
+  searchQuery: controlledSearchQuery,
+  onSearchChange,
+}) => {
   const { t } = useTranslation();
+  const [internalSearchQuery, setInternalSearchQuery] = useState<string>(
+    controlledSearchQuery ?? ''
+  );
+  const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
+
+  // Keep internal state in sync when used as a controlled component.
+  useEffect(() => {
+    if (controlledSearchQuery !== undefined) {
+      setInternalSearchQuery(controlledSearchQuery);
+    }
+  }, [controlledSearchQuery]);
+
+  const searchQuery = controlledSearchQuery ?? internalSearchQuery;
+  const setSearchQuery = (value: string): void => {
+    setInternalSearchQuery(value);
+    onSearchChange?.(value);
+  };
+  const displayName = agentName ?? agentType;
   // All renderers handle null/undefined result with an empty-state placeholder
   if (result === null || result === undefined) {
     return (

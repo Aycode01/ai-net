@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import { Horizon, Keypair } from "@stellar/stellar-sdk";
+import { Horizon } from "@stellar/stellar-sdk";
+import { verifyWalletSignature } from "../../services/auth/walletChallenge";
 import { getAgentDb, createAgentDb, AgentDb } from "../../db/agents";
 import { heartbeatRateLimitMiddleware } from "../middleware/rateLimit";
 import { NotFoundError, ValidationError, UnauthorizedError, AppError } from "../../errors";
@@ -443,8 +444,7 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
       }
 
       try {
-        const keypair = Keypair.fromPublicKey(agent.stellarPublicKey);
-        const isValid = keypair.verify(Buffer.from(challenge), Buffer.from(signature, "base64"));
+        const isValid = verifyWalletSignature(agent.stellarPublicKey, challenge, signature);
         if (!isValid) {
           throw new UnauthorizedError("Invalid signature", undefined, correlationId);
         }

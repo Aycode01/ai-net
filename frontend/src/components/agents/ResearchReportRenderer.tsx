@@ -20,7 +20,7 @@ interface Heading {
   id: string;
 }
 
-const ResearchReportRenderer: React.FC<Props> = ({ result }) => {
+const ResearchReportRenderer: React.FC<Props> = ({ result, searchQuery }) => {
   const { t } = useTranslation();
   const markdown = getMarkdown(result);
   const [headings, setHeadings] = useState<Heading[]>([]);

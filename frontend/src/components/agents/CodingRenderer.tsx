@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -11,7 +11,7 @@ interface Props {
   searchQuery?: string;
 }
 
-const CodingRenderer: React.FC<Props> = ({ result }) => {
+const CodingRenderer: React.FC<Props> = ({ result, searchQuery }) => {
   const { t } = useTranslation();
   const details = getCodeDetails(result);
 
@@ -53,23 +53,6 @@ const CodingRenderer: React.FC<Props> = ({ result }) => {
     );
   }
 
-  const containerStyle: React.CSSProperties = {
-    position: 'relative',
-    borderRadius: '8px',
-    overflow: 'hidden',
-    border: '1px solid rgba(255, 255, 255, 0.1)',
-    backgroundColor: '#1e1e1e',
-  };
-
-  const headerStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '8px 16px',
-    backgroundColor: 'rgba(255, 255, 255, 0.04)',
-    borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-  };
-
   return (
     <div
       className="coding-container"
@@ -82,29 +65,20 @@ const CodingRenderer: React.FC<Props> = ({ result }) => {
         backgroundColor: 'var(--surface-black)',
       }}
     >
-      <button
-        onClick={handleCopy}
-        className="copy-btn"
-        id="btn-copy-code"
+      <div
         style={{
           position: 'absolute',
           top: '12px',
           right: '12px',
           zIndex: 10,
-          background: copied ? 'var(--success)' : 'var(--white-alpha-08)',
-          border: '1px solid var(--white-alpha-15)',
-          color: 'var(--text-inverse)',
-          padding: '6px 12px',
-          borderRadius: '6px',
-          cursor: 'pointer',
-          fontSize: '0.8rem',
-          fontWeight: 600,
-          transition: 'all 0.2s ease',
-          outline: 'none',
         }}
       >
-        {copied ? t('agent.coding.copied') : t('agent.coding.copyCode')}
-      </button>
+        <CopyButton
+          text={details.code}
+          label={t('agent.coding.copyCode')}
+          copiedLabel={t('agent.coding.copied')}
+        />
+      </div>
       <SyntaxHighlighter
         language={details.language}
         style={vscDarkPlus}
