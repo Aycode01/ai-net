@@ -49,16 +49,16 @@ export interface PreviewNodeData {
 // ─── Capability colour map ──────────────────────────────────────────────────
 
 const CAPABILITY_COLORS: Record<string, string> = {
-  research: '#38bdf8',
-  risk:     '#f59e0b',
-  coding:   '#a78bfa',
-  design:   '#34d399',
-  report:   '#fb7185',
+  research: 'var(--agent-research)',
+  risk:     'var(--agent-risk)',
+  coding:   'var(--agent-coding)',
+  design:   'var(--agent-design)',
+  report:   'var(--agent-report)',
 };
 
 function capabilityColor(capability?: string): string {
-  if (!capability) return '#8b5cf6';
-  return CAPABILITY_COLORS[capability.toLowerCase()] ?? '#8b5cf6';
+  if (!capability) return 'var(--accent)';
+  return CAPABILITY_COLORS[capability.toLowerCase()] ?? 'var(--accent)';
 }
 
 // ─── Tooltip component ──────────────────────────────────────────────────────
