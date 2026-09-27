@@ -6,21 +6,26 @@
  * • Persist every {@link AppEvent} with a globally-unique `globalSeq` and a
  *   per-task `taskSeq` (the per-task cursor assigned upstream by the EventBus).
  * • Expose read queries needed by replay, projection, and WebSocket resume.
- * • Own the DDL — the schema in `../../db/events.sql` is the authoritative
- *   documentation; this module applies an equivalent DDL inline so the store
- *   can be instantiated without an external migration tool (e.g. in tests).
  *
- * Compatibility note
- * ──────────────────
- * The coordinator still imports the legacy {@link createEventStore} from
- * `../coordinator/eventStore`.  That module now re-exports from here so both
- * import paths resolve to the same implementation without breaking existing
- * callers or the tests in `tests/replay.test.ts`.
+ * Schema ownership
+ * ────────────────
+ * The DDL is defined in exactly one place — the migration system:
+ *   backend/src/db/migrations/tasks/002_create_task_events_table.up.sql  (schema B)
+ *   backend/src/db/migrations/tasks/005_replace_task_events_schema.up.sql (schema A)
+ *
+ * When `createEventStore` is called without a pre-migrated database (e.g. in
+ * unit tests or when operating against an in-memory DB), it applies both
+ * migration files in sequence — exactly what the production migrator does —
+ * so the resulting schema is identical regardless of how the store is created.
+ *
+ * There is no separate `events.sql` DDL: the migration files ARE the single
+ * source of truth.
  */
 
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { validateEvent } from './schemaRegistry';
 import type { AppEvent } from './eventTypes';
 
 // ---------------------------------------------------------------------------
@@ -129,31 +134,35 @@ function rowToStoredEvent(row: EventRow): StoredEvent {
 }
 
 // ---------------------------------------------------------------------------
-// DDL — mirrors backend/src/db/events.sql
+// DDL — loaded from the canonical migration files
 // ---------------------------------------------------------------------------
 
-const DDL = `
-  CREATE TABLE IF NOT EXISTS task_events (
-    global_seq  INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_seq    INTEGER NOT NULL,
-    version     INTEGER NOT NULL DEFAULT 1,
-    type        TEXT    NOT NULL,
-    task_id     TEXT    NOT NULL,
-    node_id     TEXT,
-    occurred_at TEXT    NOT NULL,
-    payload     TEXT,
-    UNIQUE (task_id, task_seq)
+/**
+ * Bootstrap the task_events schema in a database that has NOT been migrated
+ * through the full migration chain (e.g. in-memory DBs in unit tests).
+ *
+ * The canonical schema is defined entirely within the migration system:
+ *   - 002_create_task_events_table.up.sql  →  creates schema B (legacy shape)
+ *   - 005_replace_task_events_schema.up.sql → transforms schema B → schema A
+ *
+ * Running both migrations in sequence is identical to what the production
+ * migrator does, so in-memory and file-backed databases end up with exactly
+ * the same schema A shape.  This is the single source of truth: no DDL is
+ * duplicated outside of the migration files.
+ */
+function applyDDL(db: import('better-sqlite3').Database): void {
+  const migrationsDir = join(__dirname, '..', 'db', 'migrations', 'tasks');
+  const migration002 = readFileSync(
+    join(migrationsDir, '002_create_task_events_table.up.sql'),
+    'utf8',
   );
-
-  CREATE INDEX IF NOT EXISTS idx_events_task_seq
-    ON task_events (task_id, task_seq ASC);
-
-  CREATE INDEX IF NOT EXISTS idx_events_occurred_at
-    ON task_events (occurred_at ASC);
-
-  CREATE INDEX IF NOT EXISTS idx_events_type
-    ON task_events (type, occurred_at ASC);
-`;
+  const migration005 = readFileSync(
+    join(migrationsDir, '005_replace_task_events_schema.up.sql'),
+    'utf8',
+  );
+  db.exec(migration002);
+  db.exec(migration005);
+}
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -174,7 +183,7 @@ export function createEventStore(db?: Database.Database | string): EventStore {
 
   database.pragma('journal_mode = WAL');
   database.pragma('busy_timeout = 5000');
-  database.exec(DDL);
+  applyDDL(database);
 
   // ---------------------------------------------------------------------------
   // Prepared statements
@@ -233,6 +242,20 @@ export function createEventStore(db?: Database.Database | string): EventStore {
       // 0 only as a defensive measure so the insert never fails on a missing
       // value.
       const taskSeq = event.taskSeq ?? 0;
+
+      // Validate the event payload against the declared version schema.
+      // A validation failure is a programming error — throw immediately rather
+      // than silently persisting a malformed event.
+      // Cast through unknown: AppEvent is a discriminated union without a string
+      // index signature, but validateEvent reads only type/version/payload at
+      // runtime, so this cast is safe.
+      const validation = validateEvent(event as unknown as Parameters<typeof validateEvent>[0]);
+      if (!validation.valid) {
+        throw new Error(
+          `Event payload schema validation failed for ${event.type} v${event.version ?? 1}: ` +
+          validation.errors.join('; ')
+        );
+      }
 
       const nodeId =
         'nodeId' in event && event.nodeId != null ? (event.nodeId as string) : null;
