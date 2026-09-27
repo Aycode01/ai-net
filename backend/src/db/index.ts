@@ -81,8 +81,6 @@ export function openDatabase(dbPath: string): Database.Database {
   return db;
 }
 
-export function getDb(dbPath?: string): Database.Database {
-  if (!_db) {
 let _pool: SqlitePool | null = null;
 
 /** Create the payments schema. Runs once, on the pool's writer connection. */

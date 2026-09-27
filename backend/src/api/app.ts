@@ -103,7 +103,7 @@ export function createApp(opts: AppOptions = {}): {
   const logger = createLogger({ module: "api-app" });
   const app = express();
   const httpServer = createServer(app);
-  const eventStore = opts.eventStore ?? eventBus.store;
+  const eventStore = opts.eventStore ?? getEventStore();
 
   app.use(express.json());
   app.use((_req, res, next) => {
@@ -131,8 +131,6 @@ export function createApp(opts: AppOptions = {}): {
   const dispatch: DispatchFn = opts.dispatch ?? makeHttpDispatch(opts.agentRegistry);
   const releasePayment: PaymentReleaseFn =
     opts.releasePayment ?? createPaymentReleaseFn(tryLoadStellarRelease());
-
-  const eventStore = opts.eventStore ?? getEventStore();
 
   const jobQueue = opts.queue ?? getGlobalJobQueue();
   const jobWorker =
