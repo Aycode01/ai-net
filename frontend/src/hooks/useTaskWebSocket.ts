@@ -28,7 +28,34 @@ export type WebSocketStatus = 'connecting' | 'connected' | 'disconnected' | 'err
 
 /** Application-defined close code for a stale socket: mirros backend WS_CLOSE.STALE. */
 const WS_CLOSE_STALE = 4408;
-const DEFAULT_BASE_URL = 'ws://localhost:3001';
+
+/**
+ * Derives the WebSocket stream host/prefix.
+ * 1. Uses VITE_WS_URL if set.
+ * 2. Falls back to VITE_API_BASE_URL upgraded to ws/wss.
+ * 3. Falls back to same-origin (window.location) upgraded to ws/wss.
+ */
+function getDefaultWsBaseUrl(): string {
+  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL;
+  }
+  
+  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) {
+    const apiBase = import.meta.env.VITE_API_BASE_URL;
+    if (apiBase.startsWith('http')) {
+      return apiBase.replace(/^http/, 'ws');
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}`;
+  }
+
+  return 'ws://localhost:3001';
+}
+
+const DEFAULT_BASE_URL = getDefaultWsBaseUrl();
 
 /** Build the event cursor only to be truthy for positive sequences. */
 const seqCursor = (seq: number | undefined): number | undefined =>
@@ -112,7 +139,9 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
     // by asking the server to replay events with seq > cursor.
     const cursor = resumeCursorRef.current >= 0 ? resumeCursorRef.current : undefined;
     const query = cursor !== undefined ? `?lastEventId=${cursor}` : '';
-    const wsUrl = `${baseUrl}/tasks/${taskId}/stream${query}`;
+    const base = baseUrl.replace(/\/$/, '');
+    // Using /api/tasks matches same-origin proxy rules
+    const wsUrl = `${base}/api/tasks/${taskId}/stream${query}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 

@@ -13,7 +13,7 @@ import { createLogger } from '../../utils/logger';
 import { runWithTraceContext } from '../../services/traceContext';
 import { getConfig } from '../../config';
 
-const STREAM_PATH = /^\/tasks\/([^/?]+)\/stream(?:\?.*)?$/;
+const STREAM_PATH = /^\/(?:api\/)?tasks\/([^/?]+)\/stream(?:\?.*)?$/;
 
 const logger = createLogger({ module: 'ws-stream' });
 
