@@ -4,12 +4,15 @@
 //! index: `get_history`, `get_task_creator` and `get_tasks_by_creator`.
 //!
 //! The lifecycle, pause and oracle tests live in the inline `test` module in
-//! `lib.rs`; this file covers only the version-history surface.
+//! `lib.rs`; this file covers the version-history surface plus the budget-based
+//! `create_task` / `update_status` / `get_task` entrypoints, which is where
+//! the state machine, the authorization rules and the event payloads come
+//! together.
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    Address, Bytes, BytesN, Env, Vec,
+    testutils::{Address as _, Events, Ledger},
+    Address, Bytes, BytesN, Env, IntoVal, Vec,
 };
 
 struct Fixture {
@@ -60,6 +63,13 @@ fn store(fixture: &Fixture, id: &BytesN<32>, submitter: &Address) {
     );
 }
 
+/// Register a budget-based task. 1 XLM in stroops.
+fn create(fixture: &Fixture, id: &BytesN<32>, creator: &Address, budget_xlm: i128) {
+    fixture
+        .client
+        .create_task(id, creator, &fixture.prompt_hash, &budget_xlm);
+}
+
 fn contains(ids: &Vec<BytesN<32>>, id: &BytesN<32>) -> bool {
     ids.iter().any(|candidate| &candidate == id)
 }
@@ -67,7 +77,7 @@ fn contains(ids: &Vec<BytesN<32>>, id: &BytesN<32>) -> bool {
 // ── Creation seeds the history ────────────────────────────────────────────────
 
 #[test]
-fn creating_a_task_seeds_a_single_pending_version_record() {
+fn creating_a_task_seeds_a_single_version_record_at_its_initial_status() {
     let f = fixture();
     let id = task_id(&f, 1);
     store(&f, &id, &f.submitter);
@@ -77,7 +87,8 @@ fn creating_a_task_seeds_a_single_pending_version_record() {
 
     let record = history.get(0).unwrap();
     assert_eq!(record.seq, 1);
-    assert_eq!(record.status, TaskStatus::Pending);
+    // A DAG task is submitted with its agents already assigned.
+    assert_eq!(record.status, TaskStatus::Assigned);
     assert_eq!(record.updater, f.submitter);
     assert_eq!(record.timestamp, f.env.ledger().timestamp());
     assert_eq!(record.ledger_sequence, f.env.ledger().sequence());
@@ -122,7 +133,7 @@ fn each_status_update_appends_one_version_record() {
     assert_eq!(history.len(), 3);
 
     let statuses = [
-        TaskStatus::Pending,
+        TaskStatus::Assigned,
         TaskStatus::Running,
         TaskStatus::Completed,
     ];
@@ -365,4 +376,627 @@ fn the_creator_index_is_bounded_and_evicts_the_oldest_task() {
     assert_eq!(page.total, MAX_TRACKED_TASKS_PER_CREATOR);
     // The first task was evicted; the next-oldest is still indexed.
     assert!(!contains(&page.task_ids, &task_id(&f, 1)));
+}
+
+// ── create_task: metadata + event ─────────────────────────────────────────────
+
+#[test]
+fn create_task_stores_the_metadata_it_was_given() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 5_000_000);
+
+    let task = f.client.get_task(&id).task;
+    assert_eq!(task.task_id, id);
+    assert_eq!(task.creator, f.submitter);
+    assert_eq!(task.prompt_hash, f.prompt_hash);
+    assert_eq!(task.budget_xlm, 5_000_000);
+    assert_eq!(task.status, TaskStatus::Created);
+    assert_eq!(task.created_at, f.env.ledger().timestamp());
+    assert_eq!(task.updated_at, task.created_at);
+    // Creation is itself the first version.
+    assert_eq!(task.version, 1);
+}
+
+#[test]
+fn create_task_accepts_a_zero_budget_but_rejects_a_negative_one() {
+    let f = fixture();
+    let free = task_id(&f, 1);
+    create(&f, &free, &f.submitter, 0);
+    assert_eq!(f.client.get_task(&free).task.budget_xlm, 0);
+
+    let result = f
+        .client
+        .try_create_task(&task_id(&f, 2), &f.submitter, &f.prompt_hash, &-1i128);
+    assert_eq!(result, Err(Ok(Error::InvalidBudget)));
+    assert_eq!(
+        f.client.try_get_task(&task_id(&f, 2)),
+        Err(Ok(Error::NotFound))
+    );
+}
+
+#[test]
+fn create_task_rejects_a_duplicate_task_id() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    let other = Address::generate(&f.env);
+    assert_eq!(
+        f.client
+            .try_create_task(&id, &other, &f.prompt_hash, &1_000i128),
+        Err(Ok(Error::AlreadyExists))
+    );
+}
+
+#[test]
+fn create_task_does_not_collide_with_the_dag_submission_path() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    // Same id through both paths: the DAG record and the budget record live in
+    // separate storage slots, so neither overwrites the other.
+    store(&f, &id, &f.submitter);
+    create(&f, &id, &f.submitter, 7_000_000);
+
+    assert_eq!(f.client.get_task_metadata(&id).task_id, id);
+    assert_eq!(f.client.get_task(&id).task.budget_xlm, 7_000_000);
+    assert_eq!(f.client.get_task_lifecycle_status(&id), TaskStatus::Created);
+}
+
+#[test]
+fn create_task_emits_exactly_one_created_event_with_full_context() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 5_000_000);
+
+    let events = f.env.events().all();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events.get(0).unwrap().1,
+        (symbol_short!("task_life"), symbol_short!("created")).into_val(&f.env)
+    );
+
+    let (_contract, _topics, data) = events.get(0).unwrap();
+    let payload: LifecycleTaskCreatedEvent = data.into_val(&f.env);
+    assert_eq!(payload.version, TASK_LIFECYCLE_EVENT_VERSION);
+    assert_eq!(payload.task_id, id);
+    assert_eq!(payload.creator, f.submitter);
+    assert_eq!(payload.prompt_hash, f.prompt_hash);
+    assert_eq!(payload.budget_xlm, 5_000_000);
+    assert_eq!(payload.created_at, f.env.ledger().timestamp());
+}
+
+#[test]
+fn create_task_seeds_the_history_with_one_created_record() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    let history = f.client.get_history(&id);
+    assert_eq!(history.len(), 1);
+    let record = history.get(0).unwrap();
+    assert_eq!(record.seq, 1);
+    assert_eq!(record.status, TaskStatus::Created);
+    assert_eq!(record.updater, f.submitter);
+}
+
+#[test]
+fn create_task_indexes_the_task_under_its_creator() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    assert_eq!(f.client.get_task_creator(&id), Some(f.submitter.clone()));
+    let page = f
+        .client
+        .get_tasks_by_creator(&f.submitter, &0, &MAX_TASKS_PAGE_SIZE);
+    assert_eq!(page.total, 1);
+    assert_eq!(page.task_ids.get(0), Some(id));
+}
+
+#[test]
+fn create_task_is_blocked_while_paused() {
+    let f = fixture();
+    f.client.pause();
+
+    assert_eq!(
+        f.client
+            .try_create_task(&task_id(&f, 1), &f.submitter, &f.prompt_hash, &1_000i128),
+        Err(Ok(Error::ContractPaused))
+    );
+}
+
+// ── get_task: full record + history ───────────────────────────────────────────
+
+#[test]
+fn get_task_returns_the_record_and_its_whole_history() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    f.client
+        .update_status(&id, &TaskStatus::Queued, &f.submitter);
+    f.client
+        .update_status(&id, &TaskStatus::Assigned, &f.submitter);
+    f.client
+        .update_status(&id, &TaskStatus::Running, &f.submitter);
+
+    let full = f.client.get_task(&id);
+    assert_eq!(full.task.status, TaskStatus::Running);
+    assert_eq!(full.task.version, 4);
+    assert_eq!(full.history, f.client.get_history(&id));
+    assert_eq!(full.history.len(), 4);
+}
+
+#[test]
+fn get_task_rejects_an_unknown_task() {
+    let f = fixture();
+    assert_eq!(
+        f.client.try_get_task(&task_id(&f, 9)),
+        Err(Ok(Error::NotFound))
+    );
+}
+
+#[test]
+fn get_task_reports_expiry_after_the_default_retention_window() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    f.env.ledger().with_mut(|ledger| {
+        ledger.timestamp += u64::from(DEFAULT_TTL_DAYS) * SECONDS_PER_DAY;
+    });
+
+    assert_eq!(f.client.try_get_task(&id), Err(Ok(Error::Expired)));
+    // The history is gated the same way, so a lapsed task leaves no readable trail.
+    assert_eq!(f.client.try_get_history(&id), Err(Ok(Error::Expired)));
+}
+
+// ── update_status: authorization ──────────────────────────────────────────────
+
+#[test]
+fn only_the_creator_or_the_coordinator_may_update_status() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    let coordinator = Address::generate(&f.env);
+    f.client.set_coordinator(&Some(coordinator.clone()));
+    let stranger = Address::generate(&f.env);
+
+    // The creator can move their own task...
+    f.client
+        .update_status(&id, &TaskStatus::Queued, &f.submitter);
+    // ...and so can the configured coordinator.
+    f.client
+        .update_status(&id, &TaskStatus::Assigned, &coordinator);
+    // ...but nobody else.
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Running, &stranger),
+        Err(Ok(Error::NotAuthorizedUpdater))
+    );
+    assert_eq!(
+        f.client.get_task_lifecycle_status(&id),
+        TaskStatus::Assigned
+    );
+}
+
+#[test]
+fn clearing_the_coordinator_revokes_its_authority() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    let coordinator = Address::generate(&f.env);
+    f.client.set_coordinator(&Some(coordinator.clone()));
+    f.client.set_coordinator(&None);
+
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Queued, &coordinator),
+        Err(Ok(Error::NotAuthorizedUpdater))
+    );
+}
+
+#[test]
+fn the_assigned_agent_has_no_authority_over_a_budget_task() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    // An agent assigned to the DAG variant of the task has no claim here: the
+    // budget record has no agent list, so the creator/coordinator rule stands.
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Running, &f.agent),
+        Err(Ok(Error::NotAuthorizedUpdater))
+    );
+}
+
+#[test]
+fn an_unauthorized_caller_does_not_create_a_version_or_an_event() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    let stranger = Address::generate(&f.env);
+
+    let _ = f
+        .client
+        .try_update_status(&id, &TaskStatus::Queued, &stranger);
+
+    assert_eq!(f.client.get_history(&id).len(), 1);
+    assert_eq!(f.env.events().all().len(), 0);
+}
+
+#[test]
+fn the_creator_may_drive_a_dag_task_too() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    store(&f, &id, &f.submitter);
+
+    // The submitter is not in `assigned_agents`, but is the task's creator.
+    f.client
+        .update_task_status(&id, &f.submitter, &TaskStatus::Running);
+    assert_eq!(f.client.get_task_status(&id), TaskStatus::Running);
+}
+
+#[test]
+fn update_status_is_blocked_while_paused() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    f.client.pause();
+
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Queued, &f.submitter),
+        Err(Ok(Error::ContractPaused))
+    );
+}
+
+#[test]
+fn update_status_rejects_an_unknown_task() {
+    let f = fixture();
+    assert_eq!(
+        f.client
+            .try_update_status(&task_id(&f, 9), &TaskStatus::Queued, &f.submitter),
+        Err(Ok(Error::NotFound))
+    );
+}
+
+// ── update_status: the state machine ─────────────────────────────────────────
+
+#[test]
+fn a_task_walks_the_full_lifecycle_in_order() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    for status in [
+        TaskStatus::Queued,
+        TaskStatus::Assigned,
+        TaskStatus::Running,
+        TaskStatus::Completed,
+    ] {
+        f.client.update_status(&id, &status, &f.submitter);
+        assert_eq!(f.client.get_task_lifecycle_status(&id), status);
+    }
+}
+
+#[test]
+fn every_legal_transition_is_accepted() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    // `Created -> Assigned` skips the queue, which the table allows.
+    f.client
+        .update_status(&id, &TaskStatus::Assigned, &f.submitter);
+    f.client
+        .update_status(&id, &TaskStatus::Running, &f.submitter);
+    f.client
+        .update_status(&id, &TaskStatus::Failed, &f.submitter);
+
+    let history = f.client.get_history(&id);
+    let expected = [
+        TaskStatus::Created,
+        TaskStatus::Assigned,
+        TaskStatus::Running,
+        TaskStatus::Failed,
+    ];
+    assert_eq!(history.len(), expected.len() as u32);
+    for (index, status) in expected.iter().enumerate() {
+        assert_eq!(history.get(index as u32).unwrap().status, *status);
+    }
+}
+
+#[test]
+fn a_task_cannot_jump_from_created_to_completed() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Completed, &f.submitter),
+        Err(Ok(Error::InvalidStatusTransition))
+    );
+    assert_eq!(f.client.get_task_lifecycle_status(&id), TaskStatus::Created);
+    assert_eq!(f.client.get_history(&id).len(), 1);
+}
+
+#[test]
+fn a_task_cannot_jump_from_created_to_running() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Running, &f.submitter),
+        Err(Ok(Error::InvalidStatusTransition))
+    );
+}
+
+#[test]
+fn a_completed_task_cannot_return_to_running() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    for status in [
+        TaskStatus::Queued,
+        TaskStatus::Assigned,
+        TaskStatus::Running,
+        TaskStatus::Completed,
+    ] {
+        f.client.update_status(&id, &status, &f.submitter);
+    }
+
+    for status in [
+        TaskStatus::Running,
+        TaskStatus::Failed,
+        TaskStatus::Cancelled,
+    ] {
+        assert_eq!(
+            f.client.try_update_status(&id, &status, &f.submitter),
+            Err(Ok(Error::InvalidStatusTransition))
+        );
+    }
+    assert_eq!(
+        f.client.get_task_lifecycle_status(&id),
+        TaskStatus::Completed
+    );
+}
+
+#[test]
+fn a_cancelled_task_is_terminal() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    f.client
+        .update_status(&id, &TaskStatus::Cancelled, &f.submitter);
+
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Running, &f.submitter),
+        Err(Ok(Error::InvalidStatusTransition))
+    );
+    assert_eq!(
+        f.client.get_task_lifecycle_status(&id),
+        TaskStatus::Cancelled
+    );
+}
+
+#[test]
+fn a_task_cannot_be_reverted_to_its_earlier_status() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    f.client
+        .update_status(&id, &TaskStatus::Queued, &f.submitter);
+
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Created, &f.submitter),
+        Err(Ok(Error::InvalidStatusTransition))
+    );
+}
+
+#[test]
+fn a_coordinator_cannot_resurrect_a_finished_task() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    let coordinator = Address::generate(&f.env);
+    f.client.set_coordinator(&Some(coordinator.clone()));
+    f.client
+        .update_status(&id, &TaskStatus::Failed, &f.submitter);
+
+    // Authorized, but the state machine still says no.
+    assert_eq!(
+        f.client
+            .try_update_status(&id, &TaskStatus::Running, &coordinator),
+        Err(Ok(Error::InvalidStatusTransition))
+    );
+}
+
+// ── update_status: history + events ───────────────────────────────────────────
+
+#[test]
+fn each_accepted_transition_appends_exactly_one_version_record() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    f.env.ledger().with_mut(|ledger| ledger.timestamp += 60);
+    f.client
+        .update_status(&id, &TaskStatus::Queued, &f.submitter);
+    f.env.ledger().with_mut(|ledger| ledger.timestamp += 60);
+    f.client
+        .update_status(&id, &TaskStatus::Assigned, &f.submitter);
+
+    let history = f.client.get_history(&id);
+    assert_eq!(history.len(), 3);
+    for index in 0..3 {
+        let record = history.get(index).unwrap();
+        assert_eq!(record.seq, index + 1);
+    }
+    // Timestamps are strictly increasing, so the history is chronological.
+    assert!(history.get(0).unwrap().timestamp < history.get(1).unwrap().timestamp);
+    assert!(history.get(1).unwrap().timestamp < history.get(2).unwrap().timestamp);
+}
+
+#[test]
+fn the_history_attributes_each_transition_to_its_updater() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    let coordinator = Address::generate(&f.env);
+    f.client.set_coordinator(&Some(coordinator.clone()));
+
+    f.client
+        .update_status(&id, &TaskStatus::Queued, &f.submitter);
+    f.client
+        .update_status(&id, &TaskStatus::Assigned, &coordinator);
+
+    let history = f.client.get_history(&id);
+    assert_eq!(history.get(0).unwrap().updater, f.submitter);
+    assert_eq!(history.get(1).unwrap().updater, f.submitter);
+    assert_eq!(history.get(2).unwrap().updater, coordinator);
+}
+
+#[test]
+fn a_rejected_transition_leaves_the_version_and_the_event_log_untouched() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+
+    let _ = f
+        .client
+        .try_update_status(&id, &TaskStatus::Completed, &f.submitter);
+
+    assert_eq!(f.env.events().all().len(), 0);
+    let task = f.client.get_task(&id).task;
+    assert_eq!(task.version, 1);
+    assert_eq!(task.status, TaskStatus::Created);
+    // `updated_at` is untouched, so the record still reflects creation time.
+    assert_eq!(task.updated_at, task.created_at);
+}
+
+#[test]
+fn update_status_emits_exactly_one_event_per_transition() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    f.client
+        .update_status(&id, &TaskStatus::Queued, &f.submitter);
+
+    let events = f.env.events().all();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events.get(0).unwrap().1,
+        (symbol_short!("task_life"), symbol_short!("status")).into_val(&f.env)
+    );
+}
+
+#[test]
+fn the_status_changed_event_carries_the_whole_transition() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    f.client
+        .update_status(&id, &TaskStatus::Queued, &f.submitter);
+
+    let (_contract, _topics, data) = f.env.events().all().get(0).unwrap();
+    let payload: LifecycleStatusChangedEvent = data.into_val(&f.env);
+    assert_eq!(payload.version, TASK_LIFECYCLE_EVENT_VERSION);
+    assert_eq!(payload.task_id, id);
+    assert_eq!(payload.record_version, 2);
+    assert_eq!(payload.from_status, TaskStatus::Created);
+    assert_eq!(payload.to_status, TaskStatus::Queued);
+    assert_eq!(payload.updater, f.submitter);
+    assert_eq!(payload.updated_at, f.env.ledger().timestamp());
+}
+
+#[test]
+fn the_status_changed_event_marks_the_new_version_on_the_record() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    f.client
+        .update_status(&id, &TaskStatus::Queued, &f.submitter);
+    f.client
+        .update_status(&id, &TaskStatus::Assigned, &f.submitter);
+
+    let (_contract, _topics, data) = f.env.events().all().get(0).unwrap();
+    let payload: LifecycleStatusChangedEvent = data.into_val(&f.env);
+    assert_eq!(payload.record_version, 3);
+    // The version on the record and the version in the event agree.
+    assert_eq!(payload.record_version, f.client.get_task(&id).task.version);
+}
+
+#[test]
+fn a_terminal_transition_still_emits_the_single_status_event() {
+    let f = fixture();
+    let id = task_id(&f, 1);
+    create(&f, &id, &f.submitter, 1_000);
+    f.client
+        .update_status(&id, &TaskStatus::Cancelled, &f.submitter);
+
+    let events = f.env.events().all();
+    assert_eq!(events.len(), 1);
+    let (_contract, _topics, data) = events.get(0).unwrap();
+    let payload: LifecycleStatusChangedEvent = data.into_val(&f.env);
+    assert_eq!(payload.to_status, TaskStatus::Cancelled);
+    assert!(payload.to_status.is_terminal());
+}
+
+// ── Creator index across both submission paths ───────────────────────────────
+
+#[test]
+fn the_creator_index_holds_tasks_from_both_submission_paths() {
+    let f = fixture();
+    let dag_id = task_id(&f, 1);
+    let lifecycle_id = task_id(&f, 2);
+    store(&f, &dag_id, &f.submitter);
+    create(&f, &lifecycle_id, &f.submitter, 1_000);
+
+    let page = f
+        .client
+        .get_tasks_by_creator(&f.submitter, &0, &MAX_TASKS_PAGE_SIZE);
+    assert_eq!(page.total, 2);
+    assert!(contains(&page.task_ids, &dag_id));
+    assert!(contains(&page.task_ids, &lifecycle_id));
+}
+
+#[test]
+fn the_creator_index_paginates_a_large_lifecycle_backlog() {
+    let f = fixture();
+    let count = MAX_TRACKED_TASKS_PER_CREATOR;
+    for i in 0..count {
+        create(
+            &f,
+            &task_id(&f, (i + 1) as u8),
+            &f.submitter,
+            1_000 + i128::from(i),
+        );
+    }
+
+    let mut seen = Vec::new(&f.env);
+    let mut cursor = 0u32;
+    let total = loop {
+        let page = f.client.get_tasks_by_creator(&f.submitter, &cursor, &7u32);
+        for id in page.task_ids.iter() {
+            seen.push_back(id);
+        }
+        match page.next_cursor {
+            Some(next) => cursor = next,
+            None => break page.total,
+        }
+    };
+
+    assert_eq!(total, count);
+    assert_eq!(seen.len(), count);
+    // No duplicates across pages, and the first task survived the cap.
+    assert!(contains(&seen, &task_id(&f, 1)));
+    assert_eq!(f.client.get_task(&task_id(&f, 1)).task.budget_xlm, 1_000);
 }

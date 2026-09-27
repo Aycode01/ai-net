@@ -79,7 +79,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "u32": 3
+                  "u32": 5
                 }
               ]
             }
@@ -246,7 +246,7 @@
                         "symbol": "status"
                       },
                       "val": {
-                        "u32": 3
+                        "u32": 5
                       }
                     },
                     {
@@ -371,7 +371,7 @@
                             "symbol": "status"
                           },
                           "val": {
-                            "u32": 0
+                            "u32": 2
                           }
                         },
                         {
@@ -415,7 +415,7 @@
                             "symbol": "status"
                           },
                           "val": {
-                            "u32": 3
+                            "u32": 5
                           }
                         },
                         {
@@ -712,7 +712,7 @@
                     "symbol": "final_status"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 5
                   }
                 },
                 {
@@ -728,7 +728,7 @@
                     "symbol": "old_status"
                   },
                   "val": {
-                    "u32": 0
+                    "u32": 2
                   }
                 },
                 {

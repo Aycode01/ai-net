@@ -18,3 +18,9 @@ export * from './upgrade_manager/upgrade_manager';
 
 // Type definitions
 export * from './types';
+
+// Several contract wrappers each declare a structurally identical
+// `AssembledTransaction`, so `export *` above leaves the name ambiguous and
+// consumers get error TS2308. Every copy is the same shape, so name one of them
+// as the public type rather than leaving it unresolved.
+export type { AssembledTransaction } from './task_store/task_store';

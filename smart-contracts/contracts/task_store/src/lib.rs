@@ -6,7 +6,35 @@
 
 //! # Task Store Contract
 //!
-//! Stores task metadata and manages the task lifecycle state machine.
+//! Tracks the on-chain lifecycle of AI-net tasks. Every accepted state
+//! transition is appended to a per-task, append-only version history, so the
+//! sequence `created -> queued -> assigned -> running -> completed | failed |
+//! cancelled` is reconstructable after the fact and cannot be rewritten.
+//!
+//! ## Two submission paths, one history
+//!
+//! * [`create_task`](TaskStoreContract::create_task) stores a budget-based
+//!   record ([`TaskRecord`]) and is the entrypoint the lifecycle audit trail is
+//!   built around.
+//! * [`store_task_metadata`](TaskStoreContract::store_task_metadata) stores a
+//!   DAG plus an assigned-agent list ([`TaskMetadata`]) and optionally stamps an
+//!   oracle price.
+//!
+//! Both write to the same status enum, the same transition table, the same
+//! per-task version history and the same per-creator task index, so
+//! [`get_history`](TaskStoreContract::get_history) and
+//! [`get_tasks_by_creator`](TaskStoreContract::get_tasks_by_creator) work
+//! uniformly across them. They keep separate storage slots, so one path can
+//! never overwrite the other.
+//!
+//! ## Authorization
+//!
+//! [`update_status`](TaskStoreContract::update_status) accepts an updater that
+//! is either the task's own creator or the coordinator address configured by the
+//! admin via [`set_coordinator`](TaskStoreContract::set_coordinator). The
+//! DAG-based [`update_task_status`](TaskStoreContract::update_task_status)
+//! additionally accepts the agents assigned to that task. Every mutation
+//! requires the acting address to sign, via `require_auth()`.
 //!
 //! ## Oracle integration
 //!
@@ -30,9 +58,10 @@ mod types;
 mod tests;
 
 pub use types::{
-    DataKey, Error, OracleManagerSetEvent, TaskCreatedEvent, TaskFinalizedEvent, TaskMetadata,
-    TaskPage, TaskStatus, TaskUpdatedEvent, TaskVersionRecord, DEFAULT_TTL_DAYS, LEDGERS_PER_DAY,
-    MAX_COMPRESSED_DAG_BYTES, MAX_HISTORY_RECORDS, MAX_TASKS_PAGE_SIZE,
+    CoordinatorSetEvent, DataKey, Error, LifecycleStatusChangedEvent, LifecycleTaskCreatedEvent,
+    OracleManagerSetEvent, TaskCreatedEvent, TaskFinalizedEvent, TaskMetadata, TaskPage,
+    TaskRecord, TaskStatus, TaskUpdatedEvent, TaskVersionRecord, TaskWithHistory, DEFAULT_TTL_DAYS,
+    LEDGERS_PER_DAY, MAX_COMPRESSED_DAG_BYTES, MAX_HISTORY_RECORDS, MAX_TASKS_PAGE_SIZE,
     MAX_TRACKED_TASKS_PER_CREATOR, MAX_TTL_DAYS, TASK_LIFECYCLE_EVENT_VERSION,
 };
 
@@ -79,6 +108,43 @@ fn read_metadata(env: &Env, task_id: &BytesN<32>) -> Result<TaskMetadata, Error>
     Ok(metadata)
 }
 
+/// Retention window for a budget-based task, in seconds after `created_at`.
+///
+/// Lifecycle tasks are given the same default retention as DAG tasks; they
+/// carry no caller-supplied TTL because the audit trail, not the rent, is the
+/// point of the record.
+fn lifecycle_expires_at(created_at: u64) -> u64 {
+    created_at.saturating_add(u64::from(DEFAULT_TTL_DAYS).saturating_mul(SECONDS_PER_DAY))
+}
+
+fn read_record(env: &Env, task_id: &BytesN<32>) -> Result<TaskRecord, Error> {
+    let record: TaskRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LifecycleTask(task_id.clone()))
+        .ok_or(Error::NotFound)?;
+
+    if env.ledger().timestamp() >= lifecycle_expires_at(record.created_at) {
+        return Err(Error::Expired);
+    }
+
+    Ok(record)
+}
+
+/// Existence-and-expiry gate for reads that have to work across both submission
+/// paths, such as `get_history` and `get_task_creator`.
+fn require_live_task(env: &Env, task_id: &BytesN<32>) -> Result<(), Error> {
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::LifecycleTask(task_id.clone()))
+    {
+        read_record(env, task_id).map(|_| ())
+    } else {
+        read_metadata(env, task_id).map(|_| ())
+    }
+}
+
 fn has_duplicate_agents(agents: &Vec<Address>) -> bool {
     for (index, agent) in agents.iter().enumerate() {
         for other in agents.iter().skip(index + 1) {
@@ -105,7 +171,8 @@ fn read_history(env: &Env, task_id: &BytesN<32>) -> Vec<TaskVersionRecord> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
-/// Append one record to a task's append-only version history.
+/// Append one record to a task's append-only version history and return the
+/// resulting number of records, which is the task's current version.
 ///
 /// This is the only writer of [`DataKey::TaskHistory`]. No entry is ever
 /// overwritten or removed, so the history is an immutable audit trail of the
@@ -116,15 +183,19 @@ fn append_version(
     status: TaskStatus,
     updater: &Address,
     expires_at: u64,
-) {
+) -> u32 {
     let history_key = DataKey::TaskHistory(task_id.clone());
     let mut history = read_history(env, task_id);
-    if history.len() >= MAX_HISTORY_RECORDS {
-        return;
-    }
-
     let count_key = DataKey::TaskVersionCount(task_id.clone());
     let seq: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+    // Defensive only: the state machine admits at most five records, so the
+    // history can never legitimately reach this cap. If it somehow did, report
+    // the unchanged version so `TaskRecord::version` stays equal to the number
+    // of records actually retained.
+    if history.len() >= MAX_HISTORY_RECORDS {
+        return seq;
+    }
 
     let next_seq = seq.saturating_add(1);
 
@@ -144,6 +215,8 @@ fn append_version(
             .persistent()
             .extend_ttl(&key, ledgers.saturating_sub(1), ledgers);
     }
+
+    next_seq
 }
 
 /// Record the creator of a task and add it to that creator's task index.
@@ -175,18 +248,65 @@ fn index_creator_task(env: &Env, creator: &Address, task_id: &BytesN<32>, expire
         .extend_ttl(&key, ledgers.saturating_sub(1), ledgers);
 }
 
+/// The lifecycle state machine.
+///
+/// A task walks `Created -> Queued -> Assigned -> Running` and then leaves for
+/// exactly one terminal status (`Completed`, `Failed` or `Cancelled`). The
+/// table is deliberately non-linear in two places: `Created -> Assigned` allows
+/// a caller to publish and assign in one step, and `Queued -> Running` allows
+/// an already-assigned task to skip the redundant re-queue. Everything not
+/// listed here is rejected, including every jump that would skip execution
+/// (`Created -> Completed`) and every transition out of a terminal status
+/// (`Completed -> Running`).
 fn can_transition(from: TaskStatus, to: TaskStatus) -> bool {
-    matches!(
-        (from, to),
-        (TaskStatus::Pending, TaskStatus::Running)
-            | (TaskStatus::Pending, TaskStatus::Failed)
-            | (TaskStatus::Running, TaskStatus::Completed)
-            | (TaskStatus::Running, TaskStatus::Failed)
-    )
+    use TaskStatus::{Assigned, Cancelled, Completed, Created, Failed, Queued, Running};
+
+    match from {
+        Created => matches!(to, Queued | Assigned | Cancelled | Failed),
+        Queued => matches!(to, Assigned | Running | Cancelled | Failed),
+        Assigned => matches!(to, Running | Cancelled | Failed),
+        Running => matches!(to, Completed | Failed | Cancelled),
+        Completed | Failed | Cancelled => false,
+    }
 }
 
-fn is_terminal(status: TaskStatus) -> bool {
-    matches!(status, TaskStatus::Completed | TaskStatus::Failed)
+/// Reject any transition the state machine does not admit.
+fn ensure_transition(from: TaskStatus, to: TaskStatus) -> Result<(), Error> {
+    if !can_transition(from, to) {
+        return Err(Error::InvalidStatusTransition);
+    }
+    Ok(())
+}
+
+/// True when `addr` is the coordinator address configured by the admin.
+fn is_coordinator(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .instance()
+        .get::<DataKey, Address>(&DataKey::Coordinator)
+        .as_ref()
+        == Some(addr)
+}
+
+/// Authorize a status update.
+///
+/// The creator of the task and the configured coordinator may always drive a
+/// transition. The agents in `assigned_agents` may additionally drive
+/// DAG-based tasks, because assignment is what entitles an agent to report on
+/// it. Anyone else is rejected with `denied`.
+fn ensure_can_update(
+    env: &Env,
+    updater: &Address,
+    creator: Option<&Address>,
+    assigned_agents: Option<&Vec<Address>>,
+    denied: Error,
+) -> Result<(), Error> {
+    if creator.is_some_and(|creator| creator == updater) || is_coordinator(env, updater) {
+        return Ok(());
+    }
+    if assigned_agents.is_some_and(|agents| agents.contains(updater)) {
+        return Ok(());
+    }
+    Err(denied)
 }
 
 fn read_admin(env: &Env) -> Result<Address, Error> {
@@ -309,6 +429,30 @@ impl TaskStoreContract {
         env.storage().instance().get(&DataKey::OracleManager)
     }
 
+    /// Set (or clear) the coordinator address.
+    ///
+    /// The coordinator is the off-chain service allowed to drive status
+    /// transitions on tasks it did not create, e.g. to move a task to
+    /// `Assigned` once bidding has closed. It can never move a task out of a
+    /// terminal status, because the transition table rejects that regardless of
+    /// who asks. Admin only.
+    pub fn set_coordinator(env: Env, coordinator: Option<Address>) -> Result<(), Error> {
+        require_admin(&env)?;
+        match &coordinator {
+            Some(addr) => env.storage().instance().set(&DataKey::Coordinator, addr),
+            None => env.storage().instance().remove(&DataKey::Coordinator),
+        }
+        env.events().publish(
+            (symbol_short!("task_str"), symbol_short!("coord_set")),
+            CoordinatorSetEvent { coordinator },
+        );
+        Ok(())
+    }
+
+    pub fn get_coordinator(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Coordinator)
+    }
+
     pub fn contract_version(env: Env) -> String {
         env.storage()
             .instance()
@@ -398,7 +542,9 @@ impl TaskStoreContract {
             prompt_hash: prompt_hash.clone(),
             assigned_agents,
             compressed_dag,
-            status: TaskStatus::Pending,
+            // The caller supplies a non-empty agent list, so the task is born
+            // `Assigned` rather than `Created`/`Queued`.
+            status: TaskStatus::Assigned,
             created_at,
             expires_at,
             quoted_price_stroops,
@@ -412,9 +558,9 @@ impl TaskStoreContract {
             .extend_ttl(&key, ledgers.saturating_sub(1), ledgers);
 
         // Seed the append-only version history and the creator's task index.
-        // A task always begins with exactly one record, at `Pending`.
+        // A task always begins with exactly one record, at `Assigned`.
         index_creator_task(&env, &submitter, &task_id, expires_at);
-        append_version(&env, &task_id, TaskStatus::Pending, &submitter, expires_at);
+        append_version(&env, &task_id, TaskStatus::Assigned, &submitter, expires_at);
 
         env.events().publish(
             (symbol_short!("task_meta"), symbol_short!("created")),
@@ -451,12 +597,21 @@ impl TaskStoreContract {
 
         let key = DataKey::Task(task_id.clone());
         let mut metadata = read_metadata(&env, &task_id)?;
-        if !metadata.assigned_agents.contains(&agent) {
-            return Err(Error::NotAssignedAgent);
-        }
-        if !can_transition(metadata.status, new_status) {
-            return Err(Error::InvalidStatusTransition);
-        }
+
+        // The creator and the configured coordinator may drive any transition on
+        // their own task; agents may drive the task they were assigned.
+        let creator: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TaskCreator(task_id.clone()));
+        ensure_can_update(
+            &env,
+            &agent,
+            creator.as_ref(),
+            Some(&metadata.assigned_agents),
+            Error::NotAssignedAgent,
+        )?;
+        ensure_transition(metadata.status, new_status)?;
 
         let old_status = metadata.status;
         metadata.status = new_status;
@@ -468,10 +623,10 @@ impl TaskStoreContract {
         append_version(&env, &task_id, new_status, &agent, metadata.expires_at);
 
         // Every successful transition emits exactly one lifecycle event:
-        // terminal transitions (-> Completed / -> Failed) emit `finalized`,
-        // everything else emits `updated` — never both.
+        // terminal transitions (-> Completed / -> Failed / -> Cancelled) emit
+        // `finalized`, everything else emits `updated`.
         let timestamp = env.ledger().timestamp();
-        if is_terminal(new_status) {
+        if new_status.is_terminal() {
             env.events().publish(
                 (symbol_short!("task_meta"), symbol_short!("finalized")),
                 TaskFinalizedEvent {
@@ -500,24 +655,168 @@ impl TaskStoreContract {
         Ok(())
     }
 
+    // ── Budget-based task lifecycle ──────────────────────────────────────────
+
+    /// Register a new task and seed its version history.
+    ///
+    /// The task starts at [`TaskStatus::Created`] with exactly one history
+    /// record attributed to `creator`. The budget is committed here and is
+    /// immutable for the lifetime of the record; the contract does not escrow
+    /// it, it only records what the creator committed to.
+    ///
+    /// `budget_xlm` is denominated in stroops (1 XLM = 10_000_000 stroops), the
+    /// same unit as `quoted_price_stroops`, and must not be negative.
+    pub fn create_task(
+        env: Env,
+        task_id: BytesN<32>,
+        creator: Address,
+        prompt_hash: BytesN<32>,
+        budget_xlm: i128,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        creator.require_auth();
+
+        if budget_xlm < 0 {
+            return Err(Error::InvalidBudget);
+        }
+
+        let key = DataKey::LifecycleTask(task_id.clone());
+        if env.storage().persistent().has(&key) {
+            return Err(Error::AlreadyExists);
+        }
+
+        let created_at = env.ledger().timestamp();
+        let expires_at = lifecycle_expires_at(created_at);
+
+        // Seed the audit trail and the creator's index first, so the record can
+        // be written once with a `version` that already matches the history.
+        index_creator_task(&env, &creator, &task_id, expires_at);
+        let version = append_version(&env, &task_id, TaskStatus::Created, &creator, expires_at);
+
+        let record = TaskRecord {
+            task_id: task_id.clone(),
+            creator: creator.clone(),
+            prompt_hash: prompt_hash.clone(),
+            budget_xlm,
+            status: TaskStatus::Created,
+            created_at,
+            updated_at: created_at,
+            version,
+        };
+        env.storage().persistent().set(&key, &record);
+
+        let ledgers = remaining_ledgers(&env, expires_at);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, ledgers.saturating_sub(1), ledgers);
+
+        env.events().publish(
+            (symbol_short!("task_life"), symbol_short!("created")),
+            LifecycleTaskCreatedEvent {
+                version: TASK_LIFECYCLE_EVENT_VERSION,
+                task_id,
+                creator,
+                prompt_hash,
+                budget_xlm,
+                created_at,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Move a task to `new_status`, appending one version record.
+    ///
+    /// `updater` must be the task's creator or the coordinator configured by
+    /// the admin; anything else is rejected with
+    /// [`Error::NotAuthorizedUpdater`]. The transition itself must be admitted
+    /// by the state machine, so a terminal task can never move again and no
+    /// caller can skip execution by jumping straight to `Completed`.
+    pub fn update_status(
+        env: Env,
+        task_id: BytesN<32>,
+        new_status: TaskStatus,
+        updater: Address,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        updater.require_auth();
+
+        let key = DataKey::LifecycleTask(task_id.clone());
+        let mut record = read_record(&env, &task_id)?;
+        ensure_can_update(
+            &env,
+            &updater,
+            Some(&record.creator),
+            None,
+            Error::NotAuthorizedUpdater,
+        )?;
+        ensure_transition(record.status, new_status)?;
+
+        let from_status = record.status;
+        let timestamp = env.ledger().timestamp();
+        record.status = new_status;
+        record.updated_at = timestamp;
+        record.version = append_version(
+            &env,
+            &task_id,
+            new_status,
+            &updater,
+            lifecycle_expires_at(record.created_at),
+        );
+        env.storage().persistent().set(&key, &record);
+
+        env.events().publish(
+            (symbol_short!("task_life"), symbol_short!("status")),
+            LifecycleStatusChangedEvent {
+                version: TASK_LIFECYCLE_EVENT_VERSION,
+                task_id,
+                record_version: record.version,
+                from_status,
+                to_status: new_status,
+                updater,
+                updated_at: timestamp,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Return the full task record together with its version history.
+    ///
+    /// Returns `Error::NotFound` for an unknown task and `Error::Expired` once
+    /// the retention window has passed. The `history` field is identical to
+    /// `get_history(task_id)`; it is included so a caller can render the full
+    /// audit trail from a single read.
+    pub fn get_task(env: Env, task_id: BytesN<32>) -> Result<TaskWithHistory, Error> {
+        let task = read_record(&env, &task_id)?;
+        let history = read_history(&env, &task_id);
+        Ok(TaskWithHistory { task, history })
+    }
+
+    /// Return the current status of a budget-based task.
+    pub fn get_task_lifecycle_status(env: Env, task_id: BytesN<32>) -> Result<TaskStatus, Error> {
+        Ok(read_record(&env, &task_id)?.status)
+    }
+
     // ── Version history & creator index ───────────────────────────────────────
 
     /// Returns the append-only version history for `task_id`, oldest record
     /// first.
     ///
-    /// The first record is always the one written at creation
-    /// (`status: Pending`, `updater: the submitter`); every accepted
-    /// `update_task_status` call appends exactly one further record. Records
-    /// are never modified or deleted, so this is the task's audit trail.
+    /// The first record is always the one written at creation (`Created` for a
+    /// [`TaskRecord`], `Assigned` for a [`TaskMetadata`]); every accepted status
+    /// update appends exactly one further record. Records are never modified or
+    /// deleted, so this is the task's audit trail, and it covers tasks created
+    /// through either submission path.
     ///
     /// No transaction hash is included, because a Soroban contract cannot read
     /// the hash of its own invoking transaction. See [`TaskVersionRecord`] for
     /// how indexers are expected to recover it.
     ///
     /// Returns `Error::NotFound` for an unknown task and `Error::Expired` once
-    /// the task's retention window has passed, matching `get_task_metadata`.
+    /// the task's retention window has passed.
     pub fn get_history(env: Env, task_id: BytesN<32>) -> Result<Vec<TaskVersionRecord>, Error> {
-        read_metadata(&env, &task_id)?;
+        require_live_task(&env, &task_id)?;
         Ok(read_history(&env, &task_id))
     }
 
@@ -634,7 +933,7 @@ mod test {
         assert_eq!(metadata.task_id, fixture.task_id);
         assert_eq!(metadata.prompt_hash, fixture.prompt_hash);
         assert_eq!(metadata.assigned_agents.get(0), Some(fixture.agent));
-        assert_eq!(metadata.status, TaskStatus::Pending);
+        assert_eq!(metadata.status, TaskStatus::Assigned);
         assert_eq!(
             metadata.expires_at,
             metadata.created_at + u64::from(DEFAULT_TTL_DAYS) * SECONDS_PER_DAY
@@ -676,12 +975,64 @@ mod test {
         let fixture = fixture();
         store(&fixture, 1);
 
+        // Assigned -> Completed skips execution, so it is not admissible.
         let result = fixture.client.try_update_task_status(
             &fixture.task_id,
             &fixture.agent,
             &TaskStatus::Completed,
         );
         assert_eq!(result, Err(Ok(Error::InvalidStatusTransition)));
+    }
+
+    #[test]
+    fn a_terminal_task_accepts_no_further_transitions() {
+        let fixture = fixture();
+        store(&fixture, 1);
+        fixture
+            .client
+            .update_task_status(&fixture.task_id, &fixture.agent, &TaskStatus::Running);
+        fixture
+            .client
+            .update_task_status(&fixture.task_id, &fixture.agent, &TaskStatus::Completed);
+
+        for status in [
+            TaskStatus::Running,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+        ] {
+            assert_eq!(
+                fixture
+                    .client
+                    .try_update_task_status(&fixture.task_id, &fixture.agent, &status),
+                Err(Ok(Error::InvalidStatusTransition))
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_can_be_cancelled_before_completing() {
+        let fixture = fixture();
+        store(&fixture, 1);
+        fixture
+            .client
+            .update_task_status(&fixture.task_id, &fixture.agent, &TaskStatus::Running);
+
+        fixture
+            .client
+            .update_task_status(&fixture.task_id, &fixture.agent, &TaskStatus::Cancelled);
+
+        // Read the event buffer before the follow-up read, which would replace it.
+        let events = fixture.env.events().all();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events.get(0).unwrap().1,
+            (symbol_short!("task_meta"), symbol_short!("finalized")).into_val(&fixture.env)
+        );
+
+        assert_eq!(
+            fixture.client.get_task_status(&fixture.task_id),
+            TaskStatus::Cancelled
+        );
     }
 
     #[test]
@@ -792,7 +1143,7 @@ mod test {
         let fixture = fixture();
         store(&fixture, 1);
 
-        // Pending -> Completed is not a valid transition (must pass through
+        // Assigned -> Completed is not a valid transition (must pass through
         // Running first) and is rejected before any event is published.
         let _ = fixture.client.try_update_task_status(
             &fixture.task_id,
@@ -867,6 +1218,50 @@ mod test {
         // Reads should still work when paused.
         let metadata = fixture.client.get_task_metadata(&fixture.task_id);
         assert_eq!(metadata.task_id, fixture.task_id);
+    }
+
+    // ── Coordinator configuration ─────────────────────────────────────────────
+
+    #[test]
+    fn set_coordinator_stores_and_clears_the_address() {
+        let fixture = fixture();
+        let coordinator = Address::generate(&fixture.env);
+        fixture.client.set_coordinator(&Some(coordinator.clone()));
+        assert_eq!(fixture.client.get_coordinator(), Some(coordinator));
+
+        fixture.client.set_coordinator(&None);
+        assert_eq!(fixture.client.get_coordinator(), None);
+    }
+
+    #[test]
+    fn set_coordinator_emits_event() {
+        let fixture = fixture();
+        fixture
+            .client
+            .set_coordinator(&Some(Address::generate(&fixture.env)));
+
+        let events = fixture.env.events().all();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events.get(0).unwrap().1,
+            (symbol_short!("task_str"), symbol_short!("coord_set")).into_val(&fixture.env)
+        );
+    }
+
+    #[test]
+    fn set_coordinator_requires_the_admin_signature() {
+        let fixture = fixture();
+        let admin = fixture.client.get_admin().unwrap();
+
+        // `mock_all_auths` authorizes everything, so assert the contract asked
+        // for exactly the admin's authorization on this call.
+        fixture
+            .client
+            .set_coordinator(&Some(Address::generate(&fixture.env)));
+
+        let invocations = fixture.env.auths();
+        let last = invocations.last().unwrap();
+        assert_eq!(last.0, admin);
     }
 
     // ── Admin / set_oracle_manager ────────────────────────────────────────────

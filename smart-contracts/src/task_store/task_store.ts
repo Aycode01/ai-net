@@ -1,19 +1,30 @@
 /**
  * TypeScript SDK wrapper for the Task Store Soroban contract.
  *
- * Provides a typed client interface for the on-chain task metadata store that
- * manages the task lifecycle state machine and optional oracle price stamping.
+ * Provides a typed client interface for the on-chain task store, which holds two
+ * kinds of task and an append-only audit trail for both:
+ *
+ *  - **DAG tasks** — `store_task_metadata` records a full execution graph with a
+ *    pre-assigned agent list, and starts at {@link TaskStatus.Assigned}.
+ *  - **Budget tasks** — `create_task` records only a creator, a prompt hash and a
+ *    budget, and starts at {@link TaskStatus.Created}.
+ *
+ * Every accepted status change appends a {@link TaskVersionRecord}, so the
+ * complete history of a task can be reconstructed from the chain alone.
  *
  * Key operations:
- *  - `storeTask`        – create a new task, optionally resolving a price via oracle
- *  - `updateTaskStatus` – advance the task through its lifecycle states
- *  - `finalizeTask`     – mark a task as completed or failed
- *  - `getTask`          – fetch task metadata (read-only)
- *  - `getTaskStatus`    – fetch just the status (read-only)
- *  - `getHistory`       – fetch the append-only version history (read-only)
- *  - `getTaskCreator`   – fetch the address that created a task (read-only)
- *  - `getTasksByCreator`– paginated list of a creator's task ids (read-only)
- *  - `setOracleManager` – configure the oracle manager for price resolution
+ *  - `storeTask`            – create a DAG task, optionally resolving a price
+ *  - `createTask`           – create a budget-based task
+ *  - `updateTaskStatus`     – advance a DAG task (assigned agent, creator or coordinator)
+ *  - `updateStatus`         – advance a budget task (creator or coordinator)
+ *  - `getTask`              – fetch a budget task with its full history (read-only)
+ *  - `getTaskStatus`        – fetch a DAG task's status (read-only)
+ *  - `getTaskLifecycleStatus` – fetch a budget task's status (read-only)
+ *  - `getHistory`           – fetch the append-only version history (read-only)
+ *  - `getTaskCreator`       – fetch the address that created a task (read-only)
+ *  - `getTasksByCreator`    – paginated list of a creator's task ids (read-only)
+ *  - `setCoordinator`       – configure the coordinator allowed to move tasks
+ *  - `setOracleManager`     – configure the oracle manager for price resolution
  *
  * Mirrors the Rust contract interface in contracts/task_store/src/lib.rs.
  *
@@ -34,14 +45,69 @@ export interface AssembledTransaction<T> {
 // Domain types (mirrors task_store/src/types.rs)
 // ---------------------------------------------------------------------------
 
-/** Task lifecycle states */
+/**
+ * Task lifecycle states.
+ *
+ * The numeric values are the on-chain discriminants and must match
+ * `TaskStatus` in contracts/task_store/src/types.rs exactly — a task's status is
+ * encoded in its history and in `task_life` / `task_meta` events, so these
+ * numbers are part of the contract's public interface.
+ */
 export enum TaskStatus {
-  Pending = 0,
-  Running = 1,
-  Completed = 2,
-  Failed = 3,
+  /** Created, no queue or agent yet. Budget tasks start here. */
+  Created = 0,
+  /** Accepted and waiting for an agent to pick the task up. */
+  Queued = 1,
+  /** An agent owns the task. DAG tasks start here. */
+  Assigned = 2,
+  /** An agent is executing the task. */
+  Running = 3,
+  /** Terminal: finished successfully. */
+  Completed = 4,
+  /** Terminal: finished unsuccessfully. */
+  Failed = 5,
+  /** Terminal: withdrawn before completion. */
+  Cancelled = 6,
 }
 
+/** Statuses from which no further transition is allowed. */
+export const TERMINAL_TASK_STATUSES: readonly TaskStatus[] = [
+  TaskStatus.Completed,
+  TaskStatus.Failed,
+  TaskStatus.Cancelled,
+];
+
+/** Whether `status` is terminal, i.e. the task can no longer change. */
+export function isTerminalStatus(status: TaskStatus): boolean {
+  return TERMINAL_TASK_STATUSES.includes(status);
+}
+
+/**
+ * The legal transitions of the lifecycle state machine.
+ *
+ * A transition absent from this map is rejected on-chain with
+ * `InvalidStatusTransition`, so this table is the single source of truth for
+ * "can this task move to that state next?".
+ */
+export const ALLOWED_TASK_TRANSITIONS: Readonly<Partial<Record<TaskStatus, readonly TaskStatus[]>>> =
+  {
+    [TaskStatus.Created]: [TaskStatus.Queued, TaskStatus.Assigned, TaskStatus.Cancelled, TaskStatus.Failed],
+    [TaskStatus.Queued]: [TaskStatus.Assigned, TaskStatus.Running, TaskStatus.Cancelled, TaskStatus.Failed],
+    [TaskStatus.Assigned]: [TaskStatus.Running, TaskStatus.Cancelled, TaskStatus.Failed],
+    [TaskStatus.Running]: [TaskStatus.Completed, TaskStatus.Failed, TaskStatus.Cancelled],
+  };
+
+/** Whether a task in `from` may legally move to `to`. */
+export function canTransition(from: TaskStatus, to: TaskStatus): boolean {
+  return (ALLOWED_TASK_TRANSITIONS[from] ?? []).includes(to);
+}
+
+/** Human-readable name of a status, e.g. `'Running'`. */
+export function taskStatusName(status: TaskStatus): string {
+  return TaskStatus[status] ?? `Unknown(${status})`;
+}
+
+/** Metadata for a DAG task, as stored by `store_task_metadata`. */
 export interface TaskMetadata {
   taskId: Uint8Array;
   submitter: string;
@@ -54,6 +120,36 @@ export interface TaskMetadata {
   expiresAt: bigint;
   /** Price in stroops resolved via oracle at task creation time, if configured */
   quotedPriceStroops?: bigint;
+}
+
+/**
+ * A budget-based task, as stored by `create_task`.
+ *
+ * Unlike {@link TaskMetadata} this carries no agent list and no DAG: the
+ * coordinator drives it from `Created` through the lifecycle states.
+ */
+export interface TaskRecord {
+  taskId: Uint8Array;
+  creator: string;
+  promptHash: Uint8Array;
+  /**
+   * Budget in stroops.
+   *
+   * The contract field is named `budget_xlm` but is denominated in stroops, so
+   * 1 XLM is `10_000_000`. Zero is allowed; negative values are rejected.
+   */
+  budgetXlm: bigint;
+  status: TaskStatus;
+  createdAt: bigint;
+  updatedAt: bigint;
+  /** Number of accepted transitions so far; 1 means the task was just created. */
+  version: number;
+}
+
+/** A task paired with its complete, ordered audit trail. */
+export interface TaskWithHistory {
+  task: TaskRecord;
+  history: TaskVersionRecord[];
 }
 
 export interface StoreTaskInput {
@@ -73,12 +169,15 @@ export interface StoreTaskInput {
  *
  * Records are append-only: `seq` starts at 1 for the record written at task
  * creation and increases by one per accepted status transition. Reading them in
- * order yields every status the task has ever held.
+ * order yields every status the task has ever held. Rejected transitions — an
+ * illegal jump, an unauthorized updater, a paused contract — append nothing.
  *
  * There is deliberately no `txHash` field. A Soroban contract cannot read the
  * hash of the transaction that invoked it — the SDK exposes no host function for
  * that — so no value stored here could be contract-verified. Join these records
- * against the `task_meta` lifecycle events to recover the `tx_hash` off-chain.
+ * against the `task_meta` and `task_life` lifecycle events to recover the
+ * `tx_hash` off-chain; each event is emitted by exactly one transition, so the
+ * join is unambiguous.
  */
 export interface TaskVersionRecord {
   /** Monotonic sequence number, 1-based. */
@@ -88,7 +187,7 @@ export interface TaskVersionRecord {
   timestamp: bigint;
   /** Ledger sequence number of the transition. */
   ledgerSequence: number;
-  /** Submitter for the creation record, assigned agent for a transition. */
+  /** Creator for the creation record, then whoever authorized the transition. */
   updater: string;
 }
 
@@ -115,7 +214,9 @@ export interface TaskPage {
 export interface TaskStoreContractClient {
   initialize(args: { admin: string }): AssembledTransaction<void>;
 
-  store_task(args: {
+  // --- DAG tasks ---
+
+  store_task_metadata(args: {
     submitter: string;
     task_id: Uint8Array;
     prompt_hash: Uint8Array;
@@ -125,9 +226,36 @@ export interface TaskStoreContractClient {
     price_pair?: string;
   }): AssembledTransaction<void>;
 
-  get_task(task_id: Uint8Array): AssembledTransaction<TaskMetadata>;
+  get_task_metadata(task_id: Uint8Array): AssembledTransaction<TaskMetadata>;
 
   get_task_status(task_id: Uint8Array): AssembledTransaction<TaskStatus>;
+
+  update_task_status(args: {
+    task_id: Uint8Array;
+    agent: string;
+    new_status: TaskStatus;
+  }): AssembledTransaction<void>;
+
+  // --- Budget tasks ---
+
+  create_task(args: {
+    task_id: Uint8Array;
+    creator: string;
+    prompt_hash: Uint8Array;
+    budget_xlm: bigint;
+  }): AssembledTransaction<void>;
+
+  update_status(args: {
+    task_id: Uint8Array;
+    new_status: TaskStatus;
+    updater: string;
+  }): AssembledTransaction<void>;
+
+  get_task(task_id: Uint8Array): AssembledTransaction<TaskWithHistory>;
+
+  get_task_lifecycle_status(task_id: Uint8Array): AssembledTransaction<TaskStatus>;
+
+  // --- Shared audit trail ---
 
   get_history(task_id: Uint8Array): AssembledTransaction<TaskVersionRecord[]>;
 
@@ -139,22 +267,19 @@ export interface TaskStoreContractClient {
     limit: number;
   }): AssembledTransaction<TaskPage>;
 
-  update_task_status(args: {
-    task_id: Uint8Array;
-    agent: string;
-    new_status: TaskStatus;
-  }): AssembledTransaction<void>;
+  // --- Administration ---
 
-  finalize_task(args: {
-    task_id: Uint8Array;
-    agent: string;
-    success: boolean;
-  }): AssembledTransaction<void>;
+  set_coordinator(args: { coordinator: string | null }): AssembledTransaction<void>;
 
-  set_oracle_manager(args: {
-    admin: string;
-    oracle_manager: string;
-  }): AssembledTransaction<void>;
+  get_coordinator(): AssembledTransaction<string | null>;
+
+  set_oracle_manager(args: { oracle_manager: string | null }): AssembledTransaction<void>;
+
+  pause(): AssembledTransaction<void>;
+
+  unpause(): AssembledTransaction<void>;
+
+  is_paused(): AssembledTransaction<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,13 +314,20 @@ export class TaskStoreSDK {
     return this.client.initialize({ admin }).signAndSend();
   }
 
+  // -------------------------------------------------------------------------
+  // DAG tasks
+  // -------------------------------------------------------------------------
+
   /**
-   * Store task metadata on-chain. If `pricePair` is provided and an oracle
+   * Store DAG task metadata on-chain. If `pricePair` is provided and an oracle
    * manager is configured, the current market price is stamped immutably.
+   *
+   * The task starts at {@link TaskStatus.Assigned} because the submitting
+   * transaction already names the agents that will run it.
    */
   async storeTask(input: StoreTaskInput): Promise<void> {
     return this.client
-      .store_task({
+      .store_task_metadata({
         submitter: input.submitter,
         task_id: input.taskId,
         prompt_hash: input.promptHash,
@@ -208,24 +340,117 @@ export class TaskStoreSDK {
   }
 
   /**
-   * Fetch task metadata by task ID (read-only).
+   * Fetch DAG task metadata by task ID (read-only).
    */
-  async getTask(taskId: Uint8Array): Promise<TaskMetadata> {
-    return this.client.get_task(taskId).simulate();
+  async getTaskMetadata(taskId: Uint8Array): Promise<TaskMetadata> {
+    return this.client.get_task_metadata(taskId).simulate();
   }
 
   /**
-   * Fetch only the task status (read-only, cheaper simulation).
+   * Fetch only a DAG task's status (read-only, cheaper simulation).
    */
   async getTaskStatus(taskId: Uint8Array): Promise<TaskStatus> {
     return this.client.get_task_status(taskId).simulate();
   }
 
   /**
+   * Advance a DAG task in the lifecycle state machine.
+   *
+   * `updater` may be the task's creator or one of its assigned agents; the
+   * contract rejects anyone else. Terminal tasks accept no further transitions.
+   */
+  async updateTaskStatus(args: {
+    taskId: Uint8Array;
+    updater: string;
+    newStatus: TaskStatus;
+  }): Promise<void> {
+    return this.client
+      .update_task_status({
+        task_id: args.taskId,
+        agent: args.updater,
+        new_status: args.newStatus,
+      })
+      .signAndSend();
+  }
+
+  // -------------------------------------------------------------------------
+  // Budget tasks
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a budget-based task. The task starts at {@link TaskStatus.Created}
+   * and is retained for the contract's default TTL, which cannot be overridden.
+   *
+   * @example
+   * ```ts
+   * await sdk.createTask({
+   *   taskId,
+   *   creator: 'GSUB...',
+   *   promptHash,
+   *   budgetXlm: 5_000_000n, // 5 XLM in stroops
+   * });
+   * ```
+   */
+  async createTask(args: {
+    taskId: Uint8Array;
+    creator: string;
+    promptHash: Uint8Array;
+    budgetXlm: bigint;
+  }): Promise<void> {
+    return this.client
+      .create_task({
+        task_id: args.taskId,
+        creator: args.creator,
+        prompt_hash: args.promptHash,
+        budget_xlm: args.budgetXlm,
+      })
+      .signAndSend();
+  }
+
+  /**
+   * Advance a budget task in the lifecycle state machine.
+   *
+   * `updater` must be the task's creator or the configured coordinator. Illegal
+   * jumps and terminal re-entry are rejected without writing a version.
+   */
+  async updateStatus(args: {
+    taskId: Uint8Array;
+    newStatus: TaskStatus;
+    updater: string;
+  }): Promise<void> {
+    return this.client
+      .update_status({
+        task_id: args.taskId,
+        new_status: args.newStatus,
+        updater: args.updater,
+      })
+      .signAndSend();
+  }
+
+  /**
+   * Fetch a budget task together with its complete audit trail (read-only).
+   */
+  async getTask(taskId: Uint8Array): Promise<TaskWithHistory> {
+    return this.client.get_task(taskId).simulate();
+  }
+
+  /**
+   * Fetch only a budget task's status (read-only, cheaper simulation).
+   */
+  async getTaskLifecycleStatus(taskId: Uint8Array): Promise<TaskStatus> {
+    return this.client.get_task_lifecycle_status(taskId).simulate();
+  }
+
+  // -------------------------------------------------------------------------
+  // Shared audit trail
+  // -------------------------------------------------------------------------
+
+  /**
    * Fetch a task's append-only version history, oldest record first (read-only).
    *
-   * The first record is the one written at creation (`Pending`, attributed to the
-   * submitter); each accepted `updateTaskStatus` appends exactly one more.
+   * Works for both task kinds. The first record is the one written at creation
+   * (`Assigned` for a DAG task, `Created` for a budget task), attributed to the
+   * submitter or creator; each accepted status change appends exactly one more.
    * Rejected transitions append nothing.
    *
    * Throws if the task is unknown or past its retention window.
@@ -234,7 +459,7 @@ export class TaskStoreSDK {
    * ```ts
    * const history = await sdk.getHistory(taskId);
    * for (const record of history) {
-   *   console.log(record.seq, TaskStatus[record.status], record.updater);
+   *   console.log(record.seq, taskStatusName(record.status), record.updater);
    * }
    * ```
    */
@@ -244,6 +469,8 @@ export class TaskStoreSDK {
 
   /**
    * Fetch the address that created a task, or `null` if unknown (read-only).
+   *
+   * Works for both task kinds.
    */
   async getTaskCreator(taskId: Uint8Array): Promise<string | null> {
     return this.client.get_task_creator(taskId).simulate();
@@ -277,49 +504,46 @@ export class TaskStoreSDK {
       .simulate();
   }
 
+  // -------------------------------------------------------------------------
+  // Administration
+  // -------------------------------------------------------------------------
+
   /**
-   * Advance the task status in the lifecycle state machine.
+   * Configure the coordinator address permitted to move tasks on top of their
+   * own actions, or pass `null` to revoke that authority (admin only).
    */
-  async updateTaskStatus(args: {
-    taskId: Uint8Array;
-    agent: string;
-    newStatus: TaskStatus;
-  }): Promise<void> {
-    return this.client
-      .update_task_status({
-        task_id: args.taskId,
-        agent: args.agent,
-        new_status: args.newStatus,
-      })
-      .signAndSend();
+  async setCoordinator(coordinator: string | null): Promise<void> {
+    return this.client.set_coordinator({ coordinator }).signAndSend();
   }
 
   /**
-   * Finalise a task as completed or failed. This is the terminal state transition.
+   * Fetch the configured coordinator, or `null` if none is set (read-only).
    */
-  async finalizeTask(args: {
-    taskId: Uint8Array;
-    agent: string;
-    success: boolean;
-  }): Promise<void> {
-    return this.client
-      .finalize_task({
-        task_id: args.taskId,
-        agent: args.agent,
-        success: args.success,
-      })
-      .signAndSend();
+  async getCoordinator(): Promise<string | null> {
+    return this.client.get_coordinator().simulate();
   }
 
   /**
-   * Configure the oracle manager contract address (admin only).
+   * Configure the oracle manager contract address, or pass `null` to clear it
+   * (admin only).
    */
-  async setOracleManager(args: {
-    admin: string;
-    oracleManager: string;
-  }): Promise<void> {
-    return this.client
-      .set_oracle_manager({ admin: args.admin, oracle_manager: args.oracleManager })
-      .signAndSend();
+  async setOracleManager(oracleManager: string | null): Promise<void> {
+    return this.client.set_oracle_manager({ oracle_manager: oracleManager }).signAndSend();
+  }
+
+  /** Halt task creation and status changes (admin only). */
+  async pause(): Promise<void> {
+    return this.client.pause().signAndSend();
+  }
+
+  /** Resume task creation and status changes (admin only). */
+  async unpause(): Promise<void> {
+    return this.client.unpause().signAndSend();
+  }
+
+  /** Whether the contract is currently paused (read-only). */
+  async isPaused(): Promise<boolean> {
+    return this.client.is_paused().simulate();
   }
 }
+

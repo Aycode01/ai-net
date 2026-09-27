@@ -7,9 +7,9 @@ pub const LEDGERS_PER_DAY: u32 = 17_280;
 
 /// Safety ceiling on the number of version records retained per task.
 ///
-/// The lifecycle state machine admits at most three transitions
-/// (`Pending -> Running -> Completed | Failed`), so this bound is not reachable
-/// through `update_task_status`; it exists so that a future relaxation of the
+/// The lifecycle state machine admits at most six transitions from
+/// `Created` (see `TaskStatus`), so a task can never hold more than seven
+/// records. The bound sits just above that so that a future relaxation of the
 /// transition table cannot silently turn `TaskHistory` into an unbounded
 /// per-task vector.
 pub const MAX_HISTORY_RECORDS: u32 = 8;
@@ -34,13 +34,38 @@ pub const TASK_LIFECYCLE_EVENT_VERSION: u32 = 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum TaskStatus {
-    Pending = 0,
-    Running = 1,
-    Completed = 2,
-    Failed = 3,
+    /// The task exists but has not been offered to the network yet.
+    Created = 0,
+    /// The task is in the queue awaiting an agent.
+    Queued = 1,
+    /// At least one agent has been assigned to the task.
+    Assigned = 2,
+    /// An assigned agent is executing the task.
+    Running = 3,
+    /// Terminal: the task finished successfully.
+    Completed = 4,
+    /// Terminal: the task finished unsuccessfully.
+    Failed = 5,
+    /// Terminal: the task was called off before it completed.
+    Cancelled = 6,
 }
 
-/// Stored state for a single task.
+impl TaskStatus {
+    /// A status no further transition may leave.
+    ///
+    /// Terminal states are absorbing: `Completed`, `Failed` and `Cancelled` all
+    /// reject every outgoing transition with
+    /// [`Error::InvalidStatusTransition`](crate::Error::InvalidStatusTransition).
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        )
+    }
+}
+
+/// Stored state for a single task submitted through the DAG-based
+/// `store_task_metadata` entrypoint.
 ///
 /// `quoted_price_stroops` is `None` when no OracleManager is configured at the
 /// time the task was submitted.  When an OracleManager _is_ configured and
@@ -64,6 +89,46 @@ pub struct TaskMetadata {
     pub price_pair: Option<Symbol>,
 }
 
+/// Stored state for a single task submitted through the budget-based
+/// `create_task` entrypoint.
+///
+/// This is the record returned by `get_task`, and the record the
+/// `get_history` / `get_tasks_by_creator` audit-trail helpers are written
+/// against. It carries no DAG and no assigned-agent list: assignment is a
+/// status transition, and the addresses that drove each transition live in the
+/// version history.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskRecord {
+    pub task_id: BytesN<32>,
+    /// Address that called `create_task`. Also the index key used by
+    /// `get_tasks_by_creator`.
+    pub creator: Address,
+    /// SHA-256 of the prompt. The prompt itself is never stored on-chain.
+    pub prompt_hash: BytesN<32>,
+    /// Budget the creator committed to the task, in stroops
+    /// (1 XLM = 10_000_000 stroops). Immutable after creation.
+    pub budget_xlm: i128,
+    pub status: TaskStatus,
+    pub created_at: u64,
+    /// Timestamp of the most recent accepted transition.
+    pub updated_at: u64,
+    /// Number of records in this task's version history. Starts at `1`, from the
+    /// record written by `create_task`.
+    pub version: u32,
+}
+
+/// A [`TaskRecord`] together with its complete version history, as returned by
+/// `get_task`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskWithHistory {
+    pub task: TaskRecord,
+    /// Every status the task has ever held, oldest first. Same contents as
+    /// `get_history(task_id)`.
+    pub history: Vec<TaskVersionRecord>,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -71,11 +136,22 @@ pub enum DataKey {
     Version,
     /// Task metadata record, keyed by task id.
     Task(BytesN<32>),
+    /// Budget-based task record written by `create_task`, keyed by task id.
+    ///
+    /// Held separately from [`DataKey::Task`] so the two submission paths —
+    /// `store_task_metadata` and `create_task` — never share a storage slot and
+    /// therefore cannot overwrite one another.
+    LifecycleTask(BytesN<32>),
     /// Admin address — the only address permitted to call `set_oracle_manager`,
-    /// `pause`, `unpause` and `upgrade`.
+    /// `set_coordinator`, `pause`, `unpause` and `upgrade`.
     Admin,
     /// Optional OracleManager contract address used to resolve quoted prices.
     OracleManager,
+    /// Optional coordinator address, set by the admin.
+    ///
+    /// Alongside the task creator, this is the only role permitted to drive
+    /// `update_status` transitions on another party's task.
+    Coordinator,
     /// Emergency-stop flag; `true` blocks all state-mutating entrypoints.
     Paused,
     /// Address that created a task, keyed by task id.
@@ -109,11 +185,16 @@ pub struct TaskCreatedEvent {
     pub quoted_price_stroops: Option<i128>,
 }
 
-/// Emitted for a successful non-terminal status transition (currently only
-/// `Pending -> Running`), under topics `(task_meta, updated)`. Terminal
-/// transitions (`-> Completed` / `-> Failed`) emit [`TaskFinalizedEvent`]
-/// instead — never both — so each transition emits exactly one lifecycle
-/// event. See `docs/TASK_LIFECYCLE_EVENTS.md`.
+/// Emitted for a successful non-terminal status transition, under topics
+/// `(task_meta, updated)`. Terminal transitions (`-> Completed` / `-> Failed` /
+/// `-> Cancelled`) emit [`TaskFinalizedEvent`] instead - never both - so each
+/// transition emits exactly one lifecycle event. See
+/// `docs/TASK_STORE_EVENTS.md`.
+/// Emitted for a successful non-terminal status transition (e.g.
+/// `Assigned -> Running`), under topics `(task_meta, updated)`. Terminal
+/// transitions (`-> Completed` / `-> Failed` / `-> Cancelled`) emit
+/// [`TaskFinalizedEvent`] instead, never both, so each transition emits exactly
+/// one lifecycle event. See `docs/TASK_STORE_EVENTS.md`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskUpdatedEvent {
@@ -125,9 +206,10 @@ pub struct TaskUpdatedEvent {
     pub updated_at: u64,
 }
 
-/// Emitted for a successful transition into a terminal status (`Completed`
-/// or `Failed`), under topics `(task_meta, finalized)`. `final_status` is
-/// always one of those two values. See `docs/TASK_LIFECYCLE_EVENTS.md`.
+/// Emitted for a successful transition into a terminal status (`Completed`,
+/// `Failed` or `Cancelled`), under topics `(task_meta, finalized)`.
+/// `final_status` is always one of those three values. See
+/// `docs/TASK_STORE_EVENTS.md`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskFinalizedEvent {
@@ -139,12 +221,55 @@ pub struct TaskFinalizedEvent {
     pub finalized_at: u64,
 }
 
+/// Emitted exactly once per successful `create_task` call, under topics
+/// `(task_life, created)`. See `docs/TASK_STORE_EVENTS.md`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleTaskCreatedEvent {
+    pub version: u32,
+    pub task_id: BytesN<32>,
+    pub creator: Address,
+    pub prompt_hash: BytesN<32>,
+    /// Budget committed by the creator, in stroops.
+    pub budget_xlm: i128,
+    pub created_at: u64,
+}
+
+/// Emitted for every accepted `update_status` transition, under topics
+/// `(task_life, status)`. Exactly one event per accepted transition, whether or
+/// not the new status is terminal — a terminal transition is distinguishable by
+/// `to_status.is_terminal()`. See `docs/TASK_STORE_EVENTS.md`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleStatusChangedEvent {
+    pub version: u32,
+    pub task_id: BytesN<32>,
+    /// Version number of the history record this transition appended.
+    pub record_version: u32,
+    pub from_status: TaskStatus,
+    pub to_status: TaskStatus,
+    /// Creator for the creator-driven case, coordinator for the delegated one.
+    pub updater: Address,
+    pub updated_at: u64,
+}
+
+/// Emitted when the admin changes the coordinator address.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoordinatorSetEvent {
+    /// The new coordinator; `None` means it was cleared.
+    pub coordinator: Option<Address>,
+}
+
 /// One immutable entry in a task's version history.
 ///
 /// Records are append-only: an entry is never mutated or removed, and `seq` is
 /// a monotonically increasing counter starting at `1` for the record written at
 /// task creation. Reading the history in order therefore yields every status the
 /// task has ever held, which is the audit trail this contract provides.
+///
+/// The history is keyed by task id alone, so `get_history` serves tasks created
+/// through either `create_task` or `store_task_metadata`.
 ///
 /// # Why there is no `tx_hash` here
 ///
@@ -172,12 +297,15 @@ pub struct TaskVersionRecord {
     /// Ledger sequence number of the transition. Available on-chain, unlike a
     /// transaction hash, and uniquely orders records across tasks.
     pub ledger_sequence: u32,
-    /// Address that produced the transition: the submitter for the creation
-    /// record, the assigned agent for a status update.
+    /// Address that produced the transition: the creator for the creation
+    /// record, and the `agent` / `updater` of the call that caused it.
     pub updater: Address,
 }
 
 /// One page of a creator's task index, returned by `get_tasks_by_creator`.
+///
+/// The index is populated by both `create_task` and `store_task_metadata`, so a
+/// creator sees every task they submitted through either path.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskPage {
@@ -223,4 +351,9 @@ pub enum Error {
     /// resolved to a usable price (stale feed and no fallback). The task is
     /// rejected rather than accepted at an unknown cost.
     OraclePriceUnavailable = 16,
+    /// `update_status` was called by neither the task creator nor the
+    /// configured coordinator.
+    NotAuthorizedUpdater = 17,
+    /// `create_task` was given a negative `budget_xlm`.
+    InvalidBudget = 18,
 }
