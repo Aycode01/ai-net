@@ -13,7 +13,17 @@ import { createLogger } from '../../utils/logger';
 import { runWithTraceContext } from '../../services/traceContext';
 import { getConfig } from '../../config';
 
-const STREAM_PATH = /^\/tasks\/([^/?]+)\/stream(?:\?.*)?$/;
+const STREAM_PATH = /^\/(?:api\/)?tasks\/([^/?]+)\/stream(?:\?.*)?$/;
+
+/**
+ * Build the canonical advertised WebSocket stream URL for a task.
+ * Both `/tasks/:id/stream` and `/api/tasks/:id/stream` are accepted by the
+ * upgrade handler (see STREAM_PATH above), but the API always advertises the
+ * `/api/tasks/:id/stream` form so it is consistent with every other REST link.
+ */
+export function taskStreamUrl(taskId: string): string {
+  return `/api/tasks/${taskId}/stream`;
+}
 
 const logger = createLogger({ module: 'ws-stream' });
 
