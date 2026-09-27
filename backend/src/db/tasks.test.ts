@@ -23,13 +23,18 @@ function makeDb(): Database.Database {
       updatedAt       TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS task_events (
-      id        INTEGER PRIMARY KEY AUTOINCREMENT,
-      taskId    TEXT    NOT NULL,
-      type      TEXT    NOT NULL,
-      nodeId    TEXT,
-      payload   TEXT,
-      timestamp TEXT    NOT NULL
+      global_seq  INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_seq    INTEGER NOT NULL,
+      version     INTEGER NOT NULL DEFAULT 1,
+      type        TEXT    NOT NULL,
+      task_id     TEXT    NOT NULL,
+      node_id     TEXT,
+      occurred_at TEXT    NOT NULL,
+      payload     TEXT,
+      UNIQUE (task_id, task_seq)
     );
+    CREATE INDEX IF NOT EXISTS idx_events_task_seq
+      ON task_events (task_id, task_seq ASC);
   `);
   return db;
 }
