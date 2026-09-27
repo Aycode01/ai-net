@@ -114,3 +114,11 @@ pub struct DisputeAppealedEvent {
     pub dispute_id: Symbol,
     pub appellant: Address,
 }
+
+/// Event: AdminChanged
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminChangedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}

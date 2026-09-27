@@ -95,3 +95,11 @@ pub struct ServiceCancelledEvent {
     pub booking_id: Symbol,
     pub refund_amount: i128,
 }
+
+/// Event emitted when admin is transferred.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminChangedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
