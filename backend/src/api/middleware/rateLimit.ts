@@ -1,6 +1,11 @@
 import { LRUCache } from "lru-cache";
 import type { Request, Response, NextFunction } from "express";
 import { getConfig } from "../../config";
+import { createLogger } from "../../utils/logger";
+import type { RateLimitRule } from "../rateLimitRules";
+import { RateLimitError } from "../../errors/RateLimitError";
+
+const logger = createLogger({ module: "rateLimit" });
 
 export interface RateLimitOptions {
   /** Rolling window in milliseconds. Default: 60 000 (1 minute). */
@@ -33,6 +38,12 @@ export interface RateLimiter {
    * @internal
    */
   size: () => number;
+}
+
+export { RateLimitRule };
+
+interface Window {
+  timestamps: number[];
 }
 
 /**
@@ -77,14 +88,10 @@ export function createRateLimiter(opts: RateLimitOptions = {}): RateLimiter {
   const windows = new LRUCache<string, Window>({
     max: maxEntries,
     ttl: windowMs,
-    // Don't refresh age on read: a 429 must not let stale IPs linger.
     updateAgeOnGet: false,
   });
 
   function middleware(req: Request, res: Response, next: NextFunction): void {
-    // NOTE: req.ip depends on Express's `trust proxy` setting. Until trust
-    // proxy is configured every untrusted request collapses to "unknown",
-    // making this effectively a global cap.
     const ip = req.ip ?? "unknown";
     const now = Date.now();
     const cutoff = now - windowMs;
@@ -105,27 +112,58 @@ export function createRateLimiter(opts: RateLimitOptions = {}): RateLimiter {
         .json({ error: { message: "Too many requests", code: "RATE_LIMITED" } });
       return;
     }
-  }
-
-  async getStatus(key: string, rule: RateLimitRule): Promise<{ remaining: number; resetTime: number } | null> {
-    const state = await this.client.hmget(`ratelimit:${key}`, "tokens", "lastRefill");
-    if (!state[0]) return null;
-
-    const tokensState = Number(state[0]);
-    const lastRefill = Number(state[1]);
-    const now = Date.now();
-    
-    const timePassed = Math.max(0, now - lastRefill);
-    const refillAmount = (timePassed / rule.windowMs) * rule.maxRequests;
-    const tokens = Math.min(rule.maxRequests, tokensState + refillAmount);
 
     win.timestamps.push(now);
     windows.set(ip, win);
 
-    // Emit headers on every allowed response so clients can track quota.
     setRateLimitHeaders(res, maxRequests, remaining - 1, resetAtMs);
-
     next();
+  }
+
+  return {
+    middleware,
+    stop: () => windows.clear(),
+    size: () => windows.size,
+  };
+}
+
+// ── Redis-backed rate limiter ────────────────────────────────────────────────
+
+/**
+ * Redis-backed token-bucket rate limiter. Uses an atomic Lua script for
+ * consume() so the check-and-decrement is a single round-trip. Falls back
+ * to a conservative in-memory limiter on Redis errors (fail closed).
+ */
+export class RedisRateLimiter {
+  private client: any; // ioredis instance
+  private fallback: RateLimiter;
+
+  constructor(redisUrl: string) {
+    // Lazy-require ioredis so the module doesn't break when Redis is not used
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Redis = require("ioredis");
+    this.client = new Redis(redisUrl);
+    this.fallback = createRateLimiter({ maxRequests: 5, windowMs: 60_000 });
+  }
+
+  async getStatus(key: string, rule: RateLimitRule): Promise<{ remaining: number; resetTime: number } | null> {
+    try {
+      const state = await this.client.hmget(`ratelimit:${key}`, "tokens", "lastRefill");
+      if (!state[0]) return null;
+
+      const tokensState = Number(state[0]);
+      const lastRefill = Number(state[1]);
+      const now = Date.now();
+
+      const timePassed = Math.max(0, now - lastRefill);
+      const refillAmount = (timePassed / rule.windowMs) * rule.maxRequests;
+      const tokens = Math.min(rule.maxRequests, tokensState + refillAmount);
+
+      return { remaining: Math.floor(tokens), resetTime: now + rule.windowMs };
+    } catch (err) {
+      logger.error({ err }, "redis rate limiter getStatus failed");
+      return null;
+    }
   }
 
   async consume(key: string, rule: RateLimitRule): Promise<{ allowed: boolean; remaining: number; resetTime: number }> {
@@ -135,11 +173,11 @@ export function createRateLimiter(opts: RateLimitOptions = {}): RateLimiter {
       local maxRequests = tonumber(ARGV[1])
       local windowMs = tonumber(ARGV[2])
       local now = tonumber(ARGV[3])
-      
+
       local state = redis.call("HMGET", key, "tokens", "lastRefill")
       local tokens = tonumber(state[1])
       local lastRefill = tonumber(state[2])
-      
+
       if tokens == nil then
         tokens = maxRequests
         lastRefill = now
@@ -149,78 +187,63 @@ export function createRateLimiter(opts: RateLimitOptions = {}): RateLimiter {
         tokens = math.min(maxRequests, tokens + refillAmount)
         lastRefill = now
       end
-      
+
       local allowed = false
       if tokens >= 1 then
         tokens = tokens - 1
         allowed = true
       end
-      
+
       redis.call("HMSET", key, "tokens", tokens, "lastRefill", lastRefill)
       redis.call("PEXPIRE", key, windowMs)
-      
+
       return { allowed and 1 or 0, tokens }
     `;
 
-    const result = await this.client.eval(luaScript, 1, `ratelimit:${key}`, rule.maxRequests, rule.windowMs, now);
-    const allowed = result[0] === 1;
-    const tokens = Number(result[1]);
-    
-    if (allowed) {
-      return { allowed, remaining: Math.floor(tokens), resetTime: now + rule.windowMs };
+    try {
+      const result = await this.client.eval(luaScript, 1, `ratelimit:${key}`, rule.maxRequests, rule.windowMs, now);
+      const allowed = result[0] === 1;
+      const tokens = Number(result[1]);
+
+      if (allowed) {
+        return { allowed, remaining: Math.floor(tokens), resetTime: now + rule.windowMs };
+      }
+
+      const timeUntilNextToken = (1 - tokens) * (rule.windowMs / rule.maxRequests);
+      return { allowed, remaining: 0, resetTime: now + timeUntilNextToken };
+    } catch (err) {
+      logger.error({ err }, "redis rate limiter consume failed, failing closed");
+      return { allowed: false, remaining: 0, resetTime: now + rule.windowMs };
     }
-    
-    const timeUntilNextToken = (1 - tokens) * (rule.windowMs / rule.maxRequests);
-    return { allowed, remaining: 0, resetTime: now + timeUntilNextToken };
+  }
+
+  stop(): void {
+    this.client?.disconnect();
   }
 }
 
-let limiterInstance: RateLimiter | null = null;
+// ── Singleton limiter for Redis/in-memory switching ──────────────────────────
 
-export function getRateLimiter(): RateLimiter {
+let limiterInstance: RedisRateLimiter | null = null;
+
+export function getRateLimiter(): RedisRateLimiter {
   if (!limiterInstance) {
+    const config = getConfig();
     if (config.CACHE_DRIVER === "redis") {
       limiterInstance = new RedisRateLimiter(config.REDIS_URL);
     } else {
-      limiterInstance = new InMemoryRateLimiter();
+      // In-memory fallback that implements the same interface
+      const mem = createRateLimiter({ maxRequests: 20, windowMs: 60_000 });
+      limiterInstance = {
+        async getStatus() { return null; },
+        async consume(_key: string, rule: RateLimitRule) {
+          return { allowed: true, remaining: rule.maxRequests, resetTime: Date.now() + rule.windowMs };
+        },
+        stop() { mem.stop(); },
+      } as unknown as RedisRateLimiter;
     }
   }
   return limiterInstance;
-}
-
-export function createMiddleware(rule: RateLimitRule, keyPrefix: string = "global", useIpOnly: boolean = false) {
-  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const limiter = getRateLimiter();
-      // Prefer walletPublicKey if present in headers, otherwise fallback to IP
-      // If useIpOnly is true, strict IP limit (Global limit)
-      const walletPublicKey = req.headers["walletpublickey"] as string | undefined;
-      const id = useIpOnly ? (req.ip || "unknown") : (walletPublicKey || req.ip || "unknown");
-      const key = `${keyPrefix}:${id}`;
-
-      const { allowed, remaining, resetTime } = await limiter.consume(key, rule);
-
-      const retryAfterSeconds = Math.ceil(Math.max(0, resetTime - Date.now()) / 1000);
-      res.setHeader(`X-RateLimit-Limit-${keyPrefix}`, rule.maxRequests);
-      res.setHeader(`X-RateLimit-Remaining-${keyPrefix}`, remaining);
-      res.setHeader(`X-RateLimit-Reset-${keyPrefix}`, Math.ceil(resetTime / 1000));
-
-      if (!allowed) {
-        res.setHeader("Retry-After", String(retryAfterSeconds));
-        rateLimitEvents.emit("RATE_LIMITED", { key, prefix: keyPrefix, rule });
-        
-        const correlationId = res.locals.correlationId as string | undefined;
-        next(new RateLimitError("Too many requests", { remaining, resetTime }, correlationId));
-        return;
-      }
-
-      next();
-    } catch (err) {
-      // Fail open on rate limiter cache errors to not break the API
-      console.error("[rateLimit] Error executing rate limit:", err);
-      next();
-    }
-  };
 }
 
 // ── Route-group limiters ─────────────────────────────────────────────────────

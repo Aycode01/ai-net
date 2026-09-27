@@ -24,9 +24,12 @@
 
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
-import { join } from 'path';
-import { validateEvent } from './schemaRegistry';
+import { mkdirSync } from 'fs';
+import { dirname, isAbsolute, join } from 'path';
 import type { AppEvent } from './eventTypes';
+import type { EventArchive } from './eventArchive';
+import { createEventArchive } from './eventArchive';
+import { getConfig } from '../config';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -93,6 +96,16 @@ export interface EventStore {
    * Returns a Map keyed by taskId, value = max taskSeq stored for that task.
    */
   maxTaskSeqPerTask(): Map<string, number>;
+
+  /**
+   * Retention archive sharing this store's database file.
+   *
+   * Holds `task_event_archive` (full-fidelity copies of purged events) and
+   * `task_event_summary` (the materialized per-task/per-node projection).
+   * Because it shares the connection, archive + purge happen in a single
+   * transaction — see `EventArchive.compactTask`.
+   */
+  archive: EventArchive;
 
   /** Release the underlying database connection. */
   close(): void;
@@ -173,7 +186,10 @@ function applyDDL(db: import('better-sqlite3').Database): void {
  *
  * @param db  An existing better-sqlite3 `Database` instance, or a file path
  *            string.  Defaults to an in-memory database — suitable for a
- *            long-running server and for unit tests alike.
+ *            long-running server and for unit tests alike.  Production wiring
+ *            goes through {@link getEventStore} so the log is actually durable;
+ *            a store left on `:memory:` discards the whole event log on restart,
+ *            which also makes the retention job a no-op.
  */
 export function createEventStore(db?: Database.Database | string): EventStore {
   const database =
@@ -184,6 +200,9 @@ export function createEventStore(db?: Database.Database | string): EventStore {
   database.pragma('journal_mode = WAL');
   database.pragma('busy_timeout = 5000');
   applyDDL(database);
+
+  // The archive shares this connection so archive + purge are atomic.
+  const archive = createEventArchive(database);
 
   // ---------------------------------------------------------------------------
   // Prepared statements
@@ -310,8 +329,66 @@ export function createEventStore(db?: Database.Database | string): EventStore {
       return result;
     },
 
+    archive,
+
     close(): void {
       database.close();
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Process-wide accessor
+// ---------------------------------------------------------------------------
+
+let _eventStore: EventStore | null = null;
+let _eventStoreConnection: Database.Database | null = null;
+
+/** Absolute path (or `:memory:`) the event store is configured to use. */
+export function getEventStorePath(): string {
+  const configured = getConfig().EVENT_STORE_PATH;
+  if (configured === ':memory:' || isAbsolute(configured)) return configured;
+  return join(process.cwd(), configured);
+}
+
+/**
+ * Lazily open the shared, process-wide event store.
+ *
+ * Follows the same accessor convention as `getTaskDb()` / `getDb()`: the
+ * connection is created on first use and reused thereafter, so the EventBus,
+ * the HTTP/WebSocket layer and the retention service all address the same
+ * database file.  This is what makes the log durable across restarts and what
+ * gives `EventBus` real `maxTaskSeqPerTask()` data to rehydrate from.
+ */
+export function getEventStore(): EventStore {
+  if (!_eventStore) {
+    const filePath = getEventStorePath();
+    if (filePath !== ':memory:') {
+      mkdirSync(dirname(filePath), { recursive: true });
+    }
+    // Open the connection here rather than letting createEventStore do it, so
+    // the same handle stays available for maintenance pragmas.
+    const connection = new Database(filePath);
+    connection.pragma('journal_mode = WAL');
+    connection.pragma('busy_timeout = 5000');
+    _eventStoreConnection = connection;
+    _eventStore = createEventStore(connection);
+  }
+  return _eventStore;
+}
+
+/**
+ * The raw connection behind {@link getEventStore}, for maintenance passes that
+ * need SQLite pragmas (`DbMaintenanceService`).  Null until the store is opened.
+ */
+export function getEventStoreConnection(): Database.Database | null {
+  return _eventStoreConnection;
+}
+
+export function closeEventStore(): void {
+  if (_eventStore) {
+    _eventStore.close();
+  }
+  _eventStoreConnection = null;
+  _eventStore = null;
 }

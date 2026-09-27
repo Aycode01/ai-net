@@ -1,39 +1,130 @@
--- Event store schema reference for the task_events table.
+-- Event store schema for append-only event sourcing log.
 --
--- ⚠️  THIS FILE IS DOCUMENTATION ONLY — it does NOT create any tables.
+-- This table is the single source of truth for all task lifecycle events.
+-- Rows are never updated or deleted — only appended. The `global_seq` column
+-- (AUTOINCREMENT) provides a globally-ordered cursor across all tasks, while
+-- `task_seq` provides a per-task cursor for stream resume (?lastEventId).
 --
--- The authoritative task_events DDL lives exclusively in the migration system:
+-- NOTE: This DDL uses SQLite syntax (AUTOINCREMENT, TEXT for ISO-8601 dates).
+-- It is not compatible with PostgreSQL or other databases without adaptation.
 --
---   backend/src/db/migrations/tasks/002_create_task_events_table.up.sql
---     → creates the legacy schema B (id, taskId, type, nodeId, payload, timestamp)
+-- Apply with:
+--   better-sqlite3: db.exec(fs.readFileSync('backend/src/db/events.sql', 'utf8'))
+
+CREATE TABLE IF NOT EXISTS task_events (
+  -- Globally unique, monotonically-increasing row identifier.
+  -- Used for cross-task ordering and change-data-capture.
+  global_seq   INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- Per-task monotonic cursor starting at 0. Assigned by the EventBus before
+  -- the event is stored so WebSocket clients can resume from ?lastEventId.
+  task_seq     INTEGER NOT NULL,
+
+  -- Schema version for this event record. Increment when the payload shape
+  -- changes; readers can branch on version for backward compatibility.
+  version      INTEGER NOT NULL DEFAULT 1,
+
+  -- Discriminator — one of the EventType literals defined in eventTypes.ts.
+  type         TEXT    NOT NULL,
+
+  -- The task this event belongs to.
+  task_id      TEXT    NOT NULL,
+
+  -- The DAG node this event relates to (NULL for task-level events).
+  node_id      TEXT,
+
+  -- ISO-8601 wall-clock time when the event was created by the emitter.
+  occurred_at  TEXT    NOT NULL,
+
+  -- JSON-serialised event-specific payload (may be NULL for simple signals).
+  payload      TEXT,
+
+  -- Enforce uniqueness of (task_id, task_seq) so duplicate appends are
+  -- detected immediately rather than silently creating duplicate rows.
+  UNIQUE (task_id, task_seq)
+);
+
+-- Primary query: fetch all events for a task in order (full replay).
+CREATE INDEX IF NOT EXISTS idx_events_task_seq
+  ON task_events (task_id, task_seq ASC);
+
+-- Time-range queries: find events within a wall-clock window.
+CREATE INDEX IF NOT EXISTS idx_events_occurred_at
+  ON task_events (occurred_at ASC);
+
+-- Type filter: project a specific event type across all tasks (e.g. all
+-- PaymentLocked events for billing reconciliation).
+CREATE INDEX IF NOT EXISTS idx_events_type
+  ON task_events (type, occurred_at ASC);
+
+-- Retention candidate scan: lets `GROUP BY task_id` with `MAX(occurred_at)`
+-- stream instead of building a temp b-tree, so the compaction pass does not
+-- degrade as the live table grows.
+CREATE INDEX IF NOT EXISTS idx_events_task_occurred
+  ON task_events (task_id, occurred_at ASC);
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Retention archive (issue #383)
 --
---   backend/src/db/migrations/tasks/005_replace_task_events_schema.up.sql
---     → transforms schema B into the canonical schema A (below)
+-- These two tables deliberately live in the SAME database file as
+-- `task_events` above. better-sqlite3 provides real ACID transactions within
+-- one file and none across files, so sharing the file is what lets the
+-- retention job archive and purge in a single all-or-nothing transaction
+-- rather than leaving a data-loss window between two writes.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Full-fidelity copies of purged events. UNIQUE (task_id, task_seq) makes a
+-- repeated compaction pass a no-op instead of a constraint violation, and
+-- means a finished task's complete timeline stays queryable after the live
+-- rows are removed. node_id is '' for task-level events (COALESCE'd on
+-- insert) rather than NULL.
+CREATE TABLE IF NOT EXISTS task_event_archive (
+  global_seq  INTEGER NOT NULL,
+  task_seq    INTEGER NOT NULL,
+  version     INTEGER NOT NULL DEFAULT 1,
+  type        TEXT    NOT NULL,
+  task_id     TEXT    NOT NULL,
+  node_id     TEXT    NOT NULL DEFAULT '',
+  occurred_at TEXT    NOT NULL,
+  payload     TEXT,
+  archived_at TEXT    NOT NULL,
+  UNIQUE (task_id, task_seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_task
+  ON task_event_archive (task_id, task_seq ASC);
+
+CREATE INDEX IF NOT EXISTS idx_archive_occurred_at
+  ON task_event_archive (occurred_at ASC);
+
+-- The materialized/compacted projection: one row per (task, DAG node) with
+-- per-type counters and timing. This is the shape that keeps the live table
+-- able to plateau.
 --
--- Production databases receive schema A by running these migrations in order.
--- In-memory and test databases use the same two migration files (applied by
--- createEventStore() in src/events/eventStore.ts).
---
--- Do NOT add CREATE TABLE / CREATE INDEX statements to this file.  Any DDL
--- change must go through a new numbered migration so that deployed databases
--- can be upgraded safely and checksums stay consistent.
---
--- ─── Schema A (canonical) ────────────────────────────────────────────────
---
--- CREATE TABLE task_events (
---   global_seq  INTEGER PRIMARY KEY AUTOINCREMENT,  -- cross-task ordering
---   task_seq    INTEGER NOT NULL,                   -- per-task cursor (EventBus)
---   version     INTEGER NOT NULL DEFAULT 1,         -- payload schema version
---   type        TEXT    NOT NULL,                   -- event discriminator
---   task_id     TEXT    NOT NULL,                   -- owning task
---   node_id     TEXT,                               -- DAG node (NULL = task-level)
---   occurred_at TEXT    NOT NULL,                   -- ISO-8601 wall-clock time
---   payload     TEXT,                               -- JSON payload (may be NULL)
---   UNIQUE (task_id, task_seq)
--- );
---
--- CREATE INDEX idx_events_task_seq    ON task_events (task_id, task_seq ASC);
--- CREATE INDEX idx_events_occurred_at ON task_events (occurred_at ASC);
--- CREATE INDEX idx_events_type        ON task_events (type, occurred_at ASC);
---
--- See also: docs/architecture/index.md §5, docs/EVENTS.md
+-- node_id is '' rather than NULL for task-level rows because SQLite treats
+-- NULLs as distinct in a rowid-table PRIMARY KEY, which would break
+-- deduplication and ON CONFLICT DO UPDATE for those rows.
+CREATE TABLE IF NOT EXISTS task_event_summary (
+  task_id              TEXT    NOT NULL,
+  node_id              TEXT    NOT NULL DEFAULT '',
+  event_count          INTEGER NOT NULL,
+  cnt_task_created     INTEGER NOT NULL DEFAULT 0,
+  cnt_node_started     INTEGER NOT NULL DEFAULT 0,
+  cnt_node_completed   INTEGER NOT NULL DEFAULT 0,
+  cnt_node_failed      INTEGER NOT NULL DEFAULT 0,
+  cnt_payment_locked   INTEGER NOT NULL DEFAULT 0,
+  cnt_payment_released INTEGER NOT NULL DEFAULT 0,
+  cnt_task_completed   INTEGER NOT NULL DEFAULT 0,
+  cnt_task_failed      INTEGER NOT NULL DEFAULT 0,
+  first_occurred_at    TEXT    NOT NULL,
+  last_occurred_at     TEXT    NOT NULL,
+  duration_ms          INTEGER NOT NULL DEFAULT 0,
+  final_task_seq       INTEGER NOT NULL,
+  terminal_status      TEXT,
+  compacted_at         TEXT    NOT NULL,
+  PRIMARY KEY (task_id, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_summary_compacted_at
+  ON task_event_summary (compacted_at ASC);

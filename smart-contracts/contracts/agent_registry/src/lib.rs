@@ -48,7 +48,8 @@ use events::{
     AdminChangedEvent, AgentDeregisteredEvent, AgentRegisteredEvent, AnalyticsRecordedEvent,
     ErrorReportedEvent, ErrorResolvedEvent, LeaderboardUpdatedEvent, OperationApproved,
     OperationCancelled, OperationExecuted, OperationProposed, RegistryInitializedEvent,
-    SlaBonusAwardedEvent, SlaSetEvent, SlaViolationDetectedEvent,
+    ReputationDecayed, ReputationUpdated, SlaBonusAwardedEvent, SlaSetEvent,
+    SlaViolationDetectedEvent,
 };
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, String, Symbol,
@@ -124,6 +125,27 @@ pub const MAX_PAGE_SIZE: u32 = 50;
 pub const DEFAULT_SUBSCRIPTION_PERIOD_SECS: u64 = 2_592_000;
 /// Minimum accepted subscription billing period (1 hour).
 pub const MIN_SUBSCRIPTION_PERIOD_SECS: u64 = 3_600;
+
+// ─── On-chain reputation constants (issue #244) ──────────────────────────────
+
+/// Fixed-point scale for reputation scores: 1_000_000 == 100%.
+/// Scores are stored as `u64` integers; all math uses `u128` intermediates.
+pub const REPUTATION_SCALE: u64 = 1_000_000;
+/// Maximum accepted component input (percent scale).
+pub const MAX_REPUTATION_INPUT: u32 = 100;
+/// Default decay: 5% per weekly epoch.
+pub const DEFAULT_DECAY_PCT: u32 = 5;
+/// Default epoch length: 7 days = 604_800 seconds.
+pub const DEFAULT_EPOCH_SECS: u64 = 604_800;
+/// Loop guard: lazy decay applies at most this many epochs per read.
+/// Beyond it the score is set to 0 to bound CPU instructions.
+pub const MAX_DECAY_EPOCHS: u64 = 100;
+/// Reputation component weights (sum to 100):
+/// 40% success rate + 30% quality + 20% uptime + 10% price fairness.
+pub const REPUTATION_W_SUCCESS: u32 = 40;
+pub const REPUTATION_W_QUALITY: u32 = 30;
+pub const REPUTATION_W_UPTIME: u32 = 20;
+pub const REPUTATION_W_PRICE: u32 = 10;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -293,6 +315,13 @@ pub enum DataKey {
     AuditConfig,
     /// Rolling operation counter for one caller.
     CallerActivity(Address),
+    // Reputation keys (issue #244)
+    /// Coordinator worker authorized to post reputation updates (admin fallback).
+    Coordinator,
+    /// Stored reputation record for one agent.
+    Reputation(Symbol),
+    /// Tunable decay schedule (instance storage).
+    ReputationConfig,
 }
 
 /// Per-item result for batch registration.
@@ -543,6 +572,100 @@ fn min_bond(env: &Env) -> i128 {
         .instance()
         .get(&DataKey::MinBond)
         .unwrap_or(DEFAULT_MIN_BOND_STROOPS)
+}
+
+// ─── On-chain reputation helpers (issue #244) ────────────────────────────────
+
+/// Read the decay schedule, falling back to 5% per weekly epoch.
+fn reputation_config(env: &Env) -> ReputationConfig {
+    env.storage()
+        .instance()
+        .get(&DataKey::ReputationConfig)
+        .unwrap_or(ReputationConfig {
+            decay_pct: DEFAULT_DECAY_PCT,
+            epoch_secs: DEFAULT_EPOCH_SECS,
+        })
+}
+
+/// Authorize a reputation writer: the configured coordinator when set, with
+/// the admin (single or multisig) always accepted as a fallback.
+/// `require_auth` is invoked exactly once for the caller.
+fn require_coordinator_or_admin(env: &Env, caller: &Address) -> Result<(), Error> {
+    caller.require_auth();
+    if let Some(coordinator) = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::Coordinator)
+    {
+        if &coordinator == caller {
+            return Ok(());
+        }
+    }
+    if is_admin(env, caller) {
+        return Ok(());
+    }
+    Err(Error::Unauthorized)
+}
+
+/// Clamp one component score to the [0, 100] percent scale.
+fn clamp_reputation_input(value: u32) -> u32 {
+    value.min(MAX_REPUTATION_INPUT)
+}
+
+/// Weighted score in fixed-point (`REPUTATION_SCALE` == 100%):
+/// 40% success + 30% quality + 20% uptime + 10% price fairness.
+/// `u128` intermediates eliminate overflow; the result saturates to `u64`.
+fn reputation_score_fp(input: &ReputationInput) -> u64 {
+    let weighted: u128 = REPUTATION_W_SUCCESS as u128
+        * clamp_reputation_input(input.success_rate) as u128
+        + REPUTATION_W_QUALITY as u128 * clamp_reputation_input(input.quality) as u128
+        + REPUTATION_W_UPTIME as u128 * clamp_reputation_input(input.uptime) as u128
+        + REPUTATION_W_PRICE as u128 * clamp_reputation_input(input.price_fairness) as u128;
+    // `weighted` is 0..=10_000 (percent × 100); scale to fixed-point.
+    // The divisor is a nonzero constant; `checked_div` keeps the
+    // zero-division-safe pattern explicit.
+    let scaled = weighted
+        .saturating_mul(REPUTATION_SCALE as u128)
+        .checked_div(10_000)
+        .unwrap_or(0);
+    scaled.min(u64::MAX as u128) as u64
+}
+
+/// Apply lazy decay for whole elapsed epochs.
+/// Returns `(score, last_updated, epochs)`.
+///
+/// - `last_updated` advances strictly by `epochs * epoch_secs` so the
+///   remainder towards the next epoch is preserved (no drift).
+/// - At most `MAX_DECAY_EPOCHS` loop iterations run; beyond that the score
+///   is set to 0 to bound CPU instructions on long-dormant agents.
+fn apply_reputation_decay(
+    score: u64,
+    last_updated: u64,
+    now: u64,
+    config: &ReputationConfig,
+) -> (u64, u64, u64) {
+    if config.epoch_secs == 0 {
+        return (score, last_updated, 0);
+    }
+    let epochs = now.saturating_sub(last_updated) / config.epoch_secs;
+    if epochs == 0 {
+        return (score, last_updated, 0);
+    }
+    let advanced = last_updated.saturating_add(epochs.saturating_mul(config.epoch_secs));
+    if epochs > MAX_DECAY_EPOCHS {
+        return (0, advanced, epochs);
+    }
+    let keep = 100u128.saturating_sub(config.decay_pct.min(100) as u128);
+    let mut current = score as u128;
+    let mut remaining = epochs;
+    while remaining > 0 {
+        current = current.saturating_mul(keep).checked_div(100).unwrap_or(0);
+        if current == 0 {
+            break;
+        }
+        remaining -= 1;
+    }
+    (current.min(u64::MAX as u128) as u64, advanced, epochs)
 }
 
 #[contractimpl]
@@ -2438,6 +2561,216 @@ impl AgentRegistryContract {
         };
 
         Some((metrics, compliance))
+    }
+
+    // ── On-chain reputation (issue #244) ─────────────────────────────────────
+
+    /// Designate the coordinator worker authorized to post reputation updates.
+    /// Admin-only; the admin remains authorized as a fallback so automation
+    /// never needs master admin keys, but admin access is never locked out.
+    pub fn set_coordinator(env: Env, coordinator: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::Coordinator, &coordinator);
+        Ok(())
+    }
+
+    /// Return the configured coordinator, if any.
+    pub fn get_coordinator(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Coordinator)
+    }
+
+    /// Update the decay schedule. `epoch_secs` must be > 0 and
+    /// `decay_pct` must be ≤ 100; anything else is `InvalidConfig`.
+    pub fn set_reputation_config(env: Env, decay_pct: u32, epoch_secs: u64) -> Result<(), Error> {
+        require_admin(&env)?;
+        if epoch_secs == 0 || decay_pct > MAX_REPUTATION_INPUT {
+            return Err(Error::InvalidConfig);
+        }
+        env.storage().instance().set(
+            &DataKey::ReputationConfig,
+            &ReputationConfig {
+                decay_pct,
+                epoch_secs,
+            },
+        );
+        Ok(())
+    }
+
+    /// Return the active decay schedule (defaults: 5% per weekly epoch).
+    pub fn get_reputation_config(env: Env) -> ReputationConfig {
+        reputation_config(&env)
+    }
+
+    /// Score an agent after task completion. Callable by the coordinator (or
+    /// admin fallback). The agent must be registered; component scores are
+    /// clamped to [0, 100] and combined 40/30/20/10 into fixed-point.
+    pub fn update_reputation(
+        env: Env,
+        caller: Address,
+        agent_id: Symbol,
+        input: ReputationInput,
+    ) -> Result<u64, Error> {
+        require_not_paused(&env)?;
+        require_coordinator_or_admin(&env, &caller)?;
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Agent(agent_id.clone()))
+        {
+            return Err(Error::NotFound);
+        }
+
+        let score = reputation_score_fp(&input);
+        let now = env.ledger().timestamp();
+        let key = DataKey::Reputation(agent_id.clone());
+        env.storage().persistent().set(
+            &key,
+            &ReputationScore {
+                agent_id: agent_id.clone(),
+                score,
+                last_updated: now,
+            },
+        );
+        extend_ttl_for_existing_key(&env, &key);
+
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("rep_upd")),
+            ReputationUpdated {
+                agent_id,
+                score,
+                updated_at: now,
+            },
+        );
+
+        Ok(score)
+    }
+
+    /// Return the current score with its last-update timestamp, applying lazy
+    /// decay for whole elapsed epochs. Decay is computed on read (no timer);
+    /// when epochs elapsed, the record is written back and `ReputationDecayed`
+    /// is emitted. Unknown agents are `NotFound`; registered agents without a
+    /// record yet report a zero score stamped at `now`.
+    pub fn get_reputation(env: Env, agent_id: Symbol) -> Result<ReputationScore, Error> {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Agent(agent_id.clone()))
+        {
+            return Err(Error::NotFound);
+        }
+
+        let key = DataKey::Reputation(agent_id.clone());
+        let now = env.ledger().timestamp();
+        let mut record: ReputationScore =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(ReputationScore {
+                    agent_id: agent_id.clone(),
+                    score: 0,
+                    last_updated: now,
+                });
+
+        let config = reputation_config(&env);
+        let (decayed, advanced, epochs) =
+            apply_reputation_decay(record.score, record.last_updated, now, &config);
+        if epochs > 0 {
+            let old_score = record.score;
+            record.score = decayed;
+            record.last_updated = advanced;
+            env.storage().persistent().set(&key, &record);
+            extend_ttl_for_existing_key(&env, &key);
+
+            env.events().publish(
+                (symbol_short!("registry"), symbol_short!("rep_dec")),
+                ReputationDecayed {
+                    agent_id: agent_id.clone(),
+                    old_score,
+                    new_score: decayed,
+                    epochs,
+                },
+            );
+        }
+
+        Ok(record)
+    }
+
+    /// Score multiple agents atomically. The whole batch is validated (every
+    /// agent registered) before any write commits; any failure aborts all
+    /// writes while still reporting per-item results.
+    pub fn batch_update_reputation(
+        env: Env,
+        caller: Address,
+        updates: Vec<ReputationUpdate>,
+    ) -> Vec<BatchResult> {
+        let mut results: Vec<BatchResult> = Vec::new(&env);
+
+        if require_not_paused(&env).is_err() {
+            for _ in 0..updates.len() {
+                results.push_back(BatchResult::Err(Error::ContractPaused as u32));
+            }
+            return results;
+        }
+
+        // Single caller: authorize exactly once.
+        if require_coordinator_or_admin(&env, &caller).is_err() {
+            for _ in 0..updates.len() {
+                results.push_back(BatchResult::Err(Error::Unauthorized as u32));
+            }
+            return results;
+        }
+
+        // ── Phase 1: validate everything ─────────────────────────────────────
+        let mut all_ok = true;
+        for i in 0..updates.len() {
+            let update = updates.get(i).unwrap();
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::Agent(update.agent_id.clone()))
+            {
+                results.push_back(BatchResult::Ok(update.agent_id.clone()));
+            } else {
+                results.push_back(BatchResult::Err(Error::NotFound as u32));
+                all_ok = false;
+            }
+        }
+
+        if !all_ok || updates.is_empty() {
+            return results;
+        }
+
+        // ── Phase 2: commit ──────────────────────────────────────────────────
+        let now = env.ledger().timestamp();
+        let mut ttl_keys: Vec<DataKey> = Vec::new(&env);
+        for i in 0..updates.len() {
+            let update = updates.get(i).unwrap();
+            let score = reputation_score_fp(&update.input);
+            let key = DataKey::Reputation(update.agent_id.clone());
+            env.storage().persistent().set(
+                &key,
+                &ReputationScore {
+                    agent_id: update.agent_id.clone(),
+                    score,
+                    last_updated: now,
+                },
+            );
+            ttl_keys.push_back(key);
+
+            env.events().publish(
+                (symbol_short!("registry"), symbol_short!("rep_upd")),
+                ReputationUpdated {
+                    agent_id: update.agent_id.clone(),
+                    score,
+                    updated_at: now,
+                },
+            );
+        }
+        extend_ttl_batch_existing(&env, &ttl_keys);
+
+        results
     }
 
     // ── Cross-chain identity bridging (issue #259) ───────────────────────────
