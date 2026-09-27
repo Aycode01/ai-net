@@ -14,6 +14,18 @@ import { CommandPalette } from './components/common/CommandPalette'
 import { useCommandPalette } from './hooks/useCommandPalette'
 import './components/common/Toast.css'
 
+const RouteLoadingFallback: React.FC = () => (
+  <div className="p-8 text-center text-text-muted">Loading...</div>
+)
+
+const DashboardPage = lazy(() => import('./pages/DashboardPage'))
+const WalletPage = lazy(() => import('./pages/WalletPage'))
+const AgentsPage = lazy(() => import('./pages/AgentsPage'))
+const NewTaskPage = lazy(() => import('./pages/NewTaskPage'))
+const TaskHistoryPage = lazy(() => import('./pages/TaskHistoryPage'))
+const TaskDetailPage = lazy(() => import('./pages/TaskDetailPage'))
+const RendererDemoPage = lazy(() => import('./pages/RendererDemoPage'))
+
 // Lives INSIDE <Router> and the theme/wallet providers: useCommandPalette()
 // calls useNavigate(), useTheme() and useWallet(), which all require their
 // context providers to be mounted above this component.

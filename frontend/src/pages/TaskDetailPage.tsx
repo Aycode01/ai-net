@@ -3,6 +3,8 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 
 import { useTaskMonitor } from '../hooks/useTaskMonitor';
+import ReactFlow, { Background, Controls, Handle, Position } from 'reactflow';
+import 'reactflow/dist/style.css';
 import { TaskDetailTimeline } from '../components/dashboard/TaskDetailTimeline';
 import { PaymentTimeline } from '../components/dashboard/PaymentTimeline';
 import { Skeleton, SkeletonText } from '../components/common/Skeleton';
