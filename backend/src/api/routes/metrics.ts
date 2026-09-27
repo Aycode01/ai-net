@@ -8,6 +8,7 @@
  */
 
 import { Router, Request, Response, NextFunction } from "express";
+import { adminAuthMiddleware } from "../middleware/auth";
 import { metricsService, MetricsService } from "../../services/metrics";
 
 export interface MetricsRouterOptions {
@@ -68,7 +69,7 @@ export function createMetricsRouter(options: MetricsRouterOptions = {}): Router 
   /**
    * Safe metrics reset.
    */
-  router.post("/reset", (_req: Request, res: Response): void => {
+  router.post("/reset", adminAuthMiddleware, (_req: Request, res: Response): void => {
     service.resetPrometheusMetrics();
     res.status(200).json({ status: "ok", message: "Metrics reset successfully" });
   });

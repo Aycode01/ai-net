@@ -12,6 +12,7 @@ import { AgentCleanupService } from "./services/agentCleanup";
 import { createAgentDb, getAgentDb, closeAgentDb } from "./db/agents";
 import { closeDb } from "./db/index";
 import { closeAuthDb } from "./db/auth";
+import { closeTaskDb, getTaskDb, createTaskDb } from "./db/tasks";
 import { closeJobDb } from "./queue";
 import { closeTaskDb, createTaskDb, getTaskDb } from "./db/tasks";
 import { closeEventStore, getEventStore } from "./events/eventStore";
@@ -86,30 +87,14 @@ async function main() {
     });
 
     // ── Graceful shutdown ──────────────────────────────────────────────────────
-    const shutdown = (signal: string) => {
-      logger.info({ signal }, "received shutdown signal");
-      const timeout = setTimeout(() => {
-        logger.error({ signal }, "forced shutdown after timeout");
-        process.exit(1);
-      }, 10_000);
-
-      cleanupService.stop();
-      reconciliationService.stop();
-      maintenanceService.stop();
-      errorRegistryMaintenance.stop();
-      eventRetention.stop();
-      globalAgentRegistry.shutdown();
-      stopAgentSync();
-
-      httpServer.close(() => {
-        clearTimeout(timeout);
-        logger.info({ signal }, "server closed");
-        process.exit(0);
-      });
-    };
-
-    process.on("SIGTERM", () => shutdown("SIGTERM"));
-    process.on("SIGINT", () => shutdown("SIGINT"));
+    setupGracefulShutdown(httpServer, close, config, {
+      cleanupService,
+      reconciliationService,
+      maintenanceService,
+      errorRegistryMaintenance,
+        eventRetention,
+      globalAgentRegistry,
+    });
 
   } catch (error) {
     logger.error({ err: error }, "failed to start server");
@@ -120,6 +105,9 @@ async function main() {
 export interface GracefulShutdownExtras {
   cleanupService?: { stop(): void };
   reconciliationService?: { stop(): void };
+  maintenanceService?: { stop(): void };
+  errorRegistryMaintenance?: { stop(): void };
+  eventRetention?: { stop(): void };
   globalAgentRegistry?: { shutdown(): void };
 }
 
@@ -166,10 +154,12 @@ export function setupGracefulShutdown(
         });
       });
 
-      logger.info("stopping agent sync service");
+      logger.info("stopping background services");
       stopAgentSync();
       extras.cleanupService?.stop();
       extras.reconciliationService?.stop();
+      extras.maintenanceService?.stop();
+      extras.errorRegistryMaintenance?.stop();
       extras.globalAgentRegistry?.shutdown();
 
       logger.info("failing running tasks");
