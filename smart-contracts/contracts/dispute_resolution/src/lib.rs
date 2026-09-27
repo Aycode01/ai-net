@@ -108,6 +108,29 @@ impl DisputeResolutionContract {
         Ok(())
     }
 
+    /// Admin: transfer admin rights. Requires authorization from both current and new admin.
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        let old_admin = require_admin(&env)?;
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("adm_chng")),
+            AdminChangedEvent {
+                old_admin,
+                new_admin,
+            },
+        );
+        Ok(())
+    }
+
+    /// Returns the current admin address.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// Admin: pause.
     pub fn pause(env: Env) -> Result<(), Error> {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);

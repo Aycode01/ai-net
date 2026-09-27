@@ -117,3 +117,11 @@ pub struct DisputeResolvedEvent {
     pub agent_payment: i128,
     pub bond_slashed: i128,
 }
+
+/// Event: AdminChanged
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminChangedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}

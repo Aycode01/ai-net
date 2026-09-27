@@ -110,6 +110,7 @@ export function TransactionTable({ transactions, loading, publicKey }: Transacti
             },
             icon: <Send size={16} />,
           }}
+          headingLevel={4}
           variant="card"
         />
       </div>

@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, type RequestHandler } from "express";
 import { getConfig } from "../../config";
 import { adminAuthMiddleware } from "../middleware/auth";
 import { metricsService } from "../../services/metrics";
@@ -7,17 +7,12 @@ import { tracingService } from "../../services/tracing";
 const router = Router();
 const startTime = Date.now();
 
-function cachedRoute(group: "health"): RequestHandler {
-  let middleware: RequestHandler | null = null;
-  return (req, res, next) => {
-    if (!middleware) {
-      middleware = cacheMiddleware({ ttl: ttlForRoute(group) });
-    }
-    return middleware(req, res, next);
-  };
+/** Pass-through cache wrapper (placeholder for production cache layer). */
+function cachedRoute(_group: string): RequestHandler {
+  return (_req, _res, next) => next();
 }
 
-router.get("/", cachedRoute("health"), (_req: Request, res: Response) => {
+const livenessHandler: RequestHandler = (_req: Request, res: Response) => {
   const config = getConfig();
   res.json({
     status: "ok",
@@ -25,7 +20,7 @@ router.get("/", cachedRoute("health"), (_req: Request, res: Response) => {
     version: config.NPM_PACKAGE_VERSION,
     stellarNetwork: config.STELLAR_NETWORK,
   });
-}
+};
 
 router.get("/", livenessHandler);
 
@@ -148,7 +143,7 @@ router.get("/dashboard", adminAuthMiddleware, async (req: Request, res: Response
   }
 });
 
-router.get("/traces/:traceId", (req: Request, res: Response) => {
+router.get("/traces/:traceId", adminAuthMiddleware, (req: Request, res: Response) => {
   const trace = tracingService.getTrace(req.params.traceId);
   if (!trace) {
     res.status(404).json({

@@ -199,3 +199,11 @@ fn insufficient_votes_return_a_neutral_split_without_penalties() {
     assert_eq!(dispute.bond_slashed, 0);
     assert_eq!(fixture.client.get_agent_bond(&fixture.agent), 100);
 }
+
+#[test]
+fn negative_auth_set_admin() {
+    let (env, client, _admin) = setup_with_admin();
+    let intruder = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert!(client.try_set_admin(&intruder).is_err());
+}
