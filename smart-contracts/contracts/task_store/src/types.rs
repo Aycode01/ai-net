@@ -47,13 +47,14 @@ pub struct TaskMetadata {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    /// Admin address — the only address permitted to call admin functions.
     Admin,
     Version,
     Task(BytesN<32>),
-    /// Admin address — the only address permitted to call `set_oracle_manager`.
-    Admin,
     /// Optional OracleManager contract address used to resolve quoted prices.
     OracleManager,
+    /// Whether the contract is paused.
+    Paused,
 }
 
 /// Emitted exactly once per successful `store_task_metadata` call, under
@@ -127,4 +128,7 @@ pub enum Error {
     NotInitialized = 11,
     Unauthorized = 12,
     UpgradeFailed = 13,
+    ContractPaused = 14,
+    MissingPricePair = 15,
+    OraclePriceUnavailable = 16,
 }

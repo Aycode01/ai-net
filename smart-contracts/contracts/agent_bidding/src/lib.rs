@@ -214,6 +214,18 @@ fn scaled_ratio(numerator: i128, denominator: i128) -> Result<i128, Error> {
         .ok_or(Error::ArithmeticOverflow)
 }
 
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::ContractPaused);
+    }
+    Ok(())
+}
+
 // ─── Contract ────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -256,7 +268,13 @@ impl AgentBiddingContract {
             .set(&DataKey::Version, &new_version);
         env.events().publish(
             (symbol_short!("bidding"), symbol_short!("upgraded")),
-            (old_version, new_version, new_wasm_hash, admin, env.ledger().sequence()),
+            (
+                old_version,
+                new_version,
+                new_wasm_hash,
+                admin,
+                env.ledger().sequence(),
+            ),
         );
         Ok(())
     }

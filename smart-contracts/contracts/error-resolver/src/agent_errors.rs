@@ -19,6 +19,7 @@ pub enum DataKey {
     Quorum,
     PendingOps,
     AuditLog,
+    Paused,
 }
 
 /// A pending allowlist operation awaiting quorum approvals.
@@ -67,6 +68,7 @@ pub enum ContractError {
     AlreadyApproved = 6,
     OpNotFound = 7,
     SignerNotFound = 8,
+    ContractPaused = 9,
 }
 
 #[contract]

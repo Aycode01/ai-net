@@ -154,18 +154,18 @@ fn book_agent_success() {
     let owner = Address::generate(&env);
     let client_addr = Address::generate(&env);
 
-#[test]
-fn set_oracle_manager_emits_event() {
-    let f = fixture();
-    let mgr = Address::generate(&f.env);
-    f.client.set_oracle_manager(&Some(mgr));
+    #[test]
+    fn set_oracle_manager_emits_event() {
+        let f = fixture();
+        let mgr = Address::generate(&f.env);
+        f.client.set_oracle_manager(&Some(mgr));
 
-    let events = f.env.events().all();
-    let found = events
-        .iter()
-        .any(|(_, t, _)| t == (symbol_short!("market"), symbol_short!("ora_set")).into_val(&f.env));
-    assert!(found);
-}
+        let events = f.env.events().all();
+        let found = events.iter().any(|(_, t, _)| {
+            t == (symbol_short!("market"), symbol_short!("ora_set")).into_val(&f.env)
+        });
+        assert!(found);
+    }
 
     let booking_id = Symbol::new(&env, "bk1");
     client.book_agent(
