@@ -144,7 +144,10 @@ export class JobWorker {
         if (!job) break;
 
         // Atomically mark job as active
-        this.store.updateStatus(job.id, "active");
+        const updated = this.store.updateStatus(job.id, "active", {
+          expectedStatus: ["pending", "failed"],
+        });
+        if (!updated) continue;
         this.activeJobsCount++;
 
         // Execute job in background
@@ -182,6 +185,7 @@ export class JobWorker {
       this.store.updateStatus(job.id, "completed", {
         progress: 100,
         completedAt: now,
+        expectedStatus: "active",
       });
 
       logger.info({ jobId: job.id, taskId: job.taskId }, "job completed successfully");
@@ -201,6 +205,7 @@ export class JobWorker {
           attempts,
           lastError: errorMessage,
           nextRunAt,
+          expectedStatus: "active",
         });
 
         logger.warn(
@@ -222,6 +227,7 @@ export class JobWorker {
           attempts,
           lastError: errorMessage,
           failedAt: now,
+          expectedStatus: "active",
         });
 
         logger.error(

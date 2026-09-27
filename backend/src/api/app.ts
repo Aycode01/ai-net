@@ -132,8 +132,6 @@ export function createApp(opts: AppOptions = {}): {
   const releasePayment: PaymentReleaseFn =
     opts.releasePayment ?? createPaymentReleaseFn(tryLoadStellarRelease());
 
-  const eventStore = opts.eventStore ?? getEventStore();
-
   const jobQueue = opts.queue ?? getGlobalJobQueue();
   const jobWorker =
     opts.jobWorker ??

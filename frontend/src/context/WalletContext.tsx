@@ -5,6 +5,7 @@ import {
   isFreighterAvailable as checkFreighterAvailable,
   connectWithFreighter as freighterConnect,
 } from '../services/freighter'
+import { getStoredWalletPublicKey, WALLET_PUBKEY_KEY } from '../services/api'
 
 export type ConnectionMethod = 'freighter' | 'secret-key'
 
@@ -35,7 +36,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const { t } = useTranslation()
 
   const [publicKey, setPublicKey] = useState<string | null>(() => {
-    return localStorage.getItem('wallet_pubkey') || localStorage.getItem('walletAddress')
+    return getStoredWalletPublicKey()
   })
   const [keypair, setKeypair] = useState<Keypair | null>(null)
   const [connectionMethod, setConnectionMethod] = useState<ConnectionMethod | null>(() => {
@@ -82,8 +83,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setKeypair(kp)
       setPublicKey(pubKey)
       setConnectionMethod('secret-key')
-      localStorage.setItem('wallet_pubkey', pubKey)
-      localStorage.setItem('walletAddress', pubKey)
+      localStorage.setItem(WALLET_PUBKEY_KEY, pubKey)
       localStorage.setItem('wallet_connection_method', 'secret-key')
     } catch (error: unknown) {
       throw new InvalidKeypairError(
@@ -97,8 +97,7 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setKeypair(null)
     setPublicKey(pubKey)
     setConnectionMethod('freighter')
-    localStorage.setItem('wallet_pubkey', pubKey)
-    localStorage.setItem('walletAddress', pubKey)
+    localStorage.setItem(WALLET_PUBKEY_KEY, pubKey)
     localStorage.setItem('wallet_connection_method', 'freighter')
   }
 
@@ -106,9 +105,10 @@ export const WalletProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setPublicKey(null)
     setKeypair(null)
     setConnectionMethod(null)
-    localStorage.removeItem('wallet_pubkey')
-    localStorage.removeItem('walletAddress')
+    localStorage.removeItem(WALLET_PUBKEY_KEY)
     localStorage.removeItem('wallet_connection_method')
+    localStorage.removeItem('wallet_auth_token')
+    localStorage.removeItem('wallet_signature')
   }
 
   useEffect(() => {

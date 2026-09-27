@@ -1,4 +1,4 @@
-import { NetworkStats, TaskResponse, AgentRecord } from '../types/api';
+import { NetworkStats, AgentRecord } from '../types/api';
 import { progressStart, progressDone, progressError } from '../context/RouteProgressContext';
 
 export class ApiError extends Error {
@@ -20,9 +20,32 @@ const notifyToast = (message: string, type: 'success' | 'error' | 'warning' | 'i
   window.dispatchEvent(new CustomEvent('app-toast', { detail: { message, type, duration } }));
 };
 
+export const WALLET_PUBKEY_KEY = 'wallet_pubkey';
+export const WALLET_AUTH_TOKEN_KEY = 'wallet_auth_token';
+
+/**
+ * Retrieves the stored wallet public key and performs a one-time migration
+ * from the legacy 'walletAddress' key to 'wallet_pubkey'.
+ */
+export function getStoredWalletPublicKey(): string | null {
+  if (typeof localStorage === 'undefined') return null;
+  const legacy = localStorage.getItem('walletAddress');
+  const current = localStorage.getItem(WALLET_PUBKEY_KEY);
+
+  if (legacy && !current) {
+    localStorage.setItem(WALLET_PUBKEY_KEY, legacy);
+  }
+  if (legacy) {
+    localStorage.removeItem('walletAddress');
+  }
+
+  return localStorage.getItem(WALLET_PUBKEY_KEY);
+}
+
 const getAuthHeader = (): Record<string, string> => {
-  const pubKey = localStorage.getItem('wallet_pubkey') || localStorage.getItem('walletAddress');
-  return pubKey ? { 'Authorization': `Bearer ${pubKey}` } : {};
+  if (typeof localStorage === 'undefined') return {};
+  const token = localStorage.getItem(WALLET_AUTH_TOKEN_KEY) || localStorage.getItem('wallet_signature');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

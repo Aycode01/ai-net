@@ -27,6 +27,7 @@ import { readFileSync } from 'fs';
 import { mkdirSync } from 'fs';
 import { dirname, isAbsolute, join } from 'path';
 import type { AppEvent } from './eventTypes';
+import { validateEvent } from './schemaRegistry';
 import type { EventArchive } from './eventArchive';
 import { createEventArchive } from './eventArchive';
 import { getConfig } from '../config';

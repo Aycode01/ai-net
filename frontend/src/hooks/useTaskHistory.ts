@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { TaskResponse, NodeStatus } from '../types/api';
-import { apiClient } from '../services/api';
+import { apiClient, getStoredWalletPublicKey } from '../services/api';
 
 // ─── Filter types ────────────────────────────────────────────────────────────
 
@@ -201,10 +201,7 @@ export function useTaskHistory(
     setLoading(true);
     setError(null);
     try {
-      const walletAddress =
-        localStorage.getItem('wallet_pubkey') ||
-        localStorage.getItem('walletAddress') ||
-        '';
+      const walletAddress = getStoredWalletPublicKey() || '';
 
       if (!walletAddress) {
         setAllTasks([]);
