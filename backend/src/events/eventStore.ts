@@ -22,6 +22,10 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import type { AppEvent } from './eventTypes';
+import { validateEvent } from './schemaRegistry';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger({ component: 'eventStore' });
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -119,13 +123,12 @@ function rowToStoredEvent(row: EventRow): StoredEvent {
   };
 
   const payload = row.payload != null ? JSON.parse(row.payload) : undefined;
+  const extra = {
+    ...(row.node_id != null ? { nodeId: row.node_id } : {}),
+    ...(payload !== undefined ? { payload } : {}),
+  };
 
-  // nodeId is only present on node-level events; omit the key when absent so
-  // the type narrowing in eventTypes.ts stays clean.
-  if (row.node_id != null) {
-    return { ...base, nodeId: row.node_id, payload } as StoredEvent;
-  }
-  return { ...base, payload } as StoredEvent;
+  return { ...base, ...extra } as StoredEvent;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +232,11 @@ export function createEventStore(db?: Database.Database | string): EventStore {
 
   return {
     append(event: AppEvent): StoredEvent {
+      const validation = validateEvent(event);
+      if (!validation.valid) {
+        log.warn({ errors: validation.errors, type: event.type }, 'Event validation notice');
+      }
+
       // taskSeq is stamped by the EventBus before this is called; fall back to
       // 0 only as a defensive measure so the insert never fails on a missing
       // value.
