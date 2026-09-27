@@ -65,6 +65,7 @@ export const RecentTasksTable: React.FC<Props> = ({ walletAddress, loading }) =>
         to: '/tasks/new',
         icon: <Plus size={16} />,
       }}
+      headingLevel={2}
       variant="compact"
     />
   );

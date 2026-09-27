@@ -16,6 +16,7 @@ export interface EmptyStateProps {
   primaryAction?: EmptyStateAction;
   secondaryAction?: EmptyStateAction;
   variant?: 'default' | 'card' | 'compact';
+  headingLevel?: 1 | 2 | 3 | 4 | 5 | 6;
   className?: string;
   'data-testid'?: string;
 }
@@ -27,15 +28,12 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
   primaryAction,
   secondaryAction,
   variant = 'default',
+  headingLevel = 3,
   className = '',
   'data-testid': dataTestId = 'empty-state',
 }) => {
   const navigationContext = useContext(UNSAFE_NavigationContext);
-  let navigate: ReturnType<typeof useNavigate> | null = null;
-  if (navigationContext) {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    navigate = useNavigate();
-  }
+  const navigate = useNavigate();
 
   const handleActionClick = (action: EmptyStateAction, e: React.MouseEvent) => {
     if (action.onClick) {
@@ -43,11 +41,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
     }
     if (action.to) {
       e.preventDefault();
-      if (navigate) {
-        navigate(action.to);
-      } else {
-        window.location.href = action.to;
-      }
+      navigate(action.to);
     }
   };
 
@@ -57,6 +51,8 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
       : variant === 'compact'
       ? styles.compactVariant
       : '';
+
+  const Heading = (`h${headingLevel}` as keyof JSX.IntrinsicElements) as React.ElementType;
 
   return (
     <div
@@ -70,7 +66,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
         </div>
       )}
 
-      <h3 className={styles.title}>{title}</h3>
+      <Heading className={styles.title}>{title}</Heading>
 
       {description && (
         <div className={styles.description}>

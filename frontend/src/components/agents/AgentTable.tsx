@@ -76,6 +76,7 @@ export function AgentTable({
             to: '/tasks/new',
             icon: <Plus size={16} />,
           }}
+          headingLevel={2}
           data-testid="agents-empty"
         />
       ) : (
