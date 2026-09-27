@@ -41,9 +41,10 @@ router.get("/live", livenessHandler);
 
 router.get("/deep", cachedRoute("health"), async (_req: Request, res: Response) => {
   const config = getConfig();
+  const timeoutMs = config.HEALTH_PROBE_TIMEOUT_MS;
   const [veniceStatus, horizonStatus] = await Promise.all([
-    checkVenice(config.VENICE_API_KEY),
-    checkHorizon(config.STELLAR_HORIZON_URL),
+    checkVenice(config.VENICE_API_KEY, timeoutMs),
+    checkHorizon(config.STELLAR_HORIZON_URL, timeoutMs),
   ]);
 
   const allOk = veniceStatus === "ok" && horizonStatus === "ok";
@@ -159,7 +160,7 @@ router.get("/traces/:traceId", adminAuthMiddleware, (req: Request, res: Response
 async function checkVenice(apiKey: string, timeoutMs = 5000): Promise<"ok" | "unreachable"> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch("https://api.venice.ai/api/v1/models", {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: controller.signal,
@@ -174,7 +175,7 @@ async function checkVenice(apiKey: string, timeoutMs = 5000): Promise<"ok" | "un
 async function checkHorizon(url: string, timeoutMs = 5000): Promise<"ok" | "unreachable"> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
     return response.ok ? "ok" : "unreachable";
