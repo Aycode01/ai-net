@@ -1437,7 +1437,6 @@ impl AgentRegistryContract {
         extend_ttl_batch_existing(&env, &ttl_keys);
         records
     }
-
     /// Cursor-based paginated agent listing with upper bound on page size (issue #339).
     ///
     /// - `cursor`: Starting registration sequence index (defaults to 0 if `None`).
@@ -1708,6 +1707,42 @@ impl AgentRegistryContract {
                 total_matches_found: 0,
                 cache_hits: 0,
             })
+    }
+
+    /// Return a cursor-paginated list of agent records for a given capability.
+    pub fn lookup_agents_paginated(
+        env: Env,
+        capability: Symbol,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<AgentRecord>, Error> {
+        if limit == 0 || limit > 50 {
+            return Err(Error::InvalidAuditRange);
+        }
+
+        let all = Self::lookup_agents(env.clone(), capability);
+        let total = all.len();
+
+        if total == 0 {
+            if offset != 0 {
+                return Err(Error::InvalidAuditRange);
+            }
+            return Ok(Vec::new(&env));
+        }
+
+        if offset >= total {
+            return Err(Error::InvalidAuditRange);
+        }
+
+        let mut page = Vec::new(&env);
+        let end = (offset + limit).min(total);
+        for i in offset..end {
+            if let Some(record) = all.get(i) {
+                page.push_back(record);
+            }
+        }
+
+        Ok(page)
     }
 
     pub fn deregister_agent(env: Env, agent_id: Symbol) -> Result<(), Error> {

@@ -108,11 +108,12 @@ use soroban_sdk::{
 /// Threshold (ledgers remaining) below which we extend.
 const TTL_THRESHOLD: u32 = 100_000;
 /// Target TTL after extension (~31 days at 5s ledgers).
-const TTL_EXTEND_TO: u32 = 535_680;
 const CONTRACT_VERSION: &str = "1.0.0";
 
-/// Maximum page size accepted by [`AgentBiddingContract::get_bidders`].
-const MAX_PAGE_SIZE: u32 = 50;
+/// Maximum number of bidders allowed per auction.
+pub const MAX_BIDDERS_PER_AUCTION: u32 = 100;
+/// Maximum page size for paginated queries.
+pub const MAX_PAGE_SIZE: u32 = 50;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -439,6 +440,9 @@ impl AgentBiddingContract {
             .persistent()
             .get(&bidders_key)
             .unwrap_or_else(|| Vec::new(&env));
+        if bidders.len() >= MAX_BIDDERS_PER_AUCTION {
+            return Err(Error::MaxBiddersReached);
+        }
         bidders.push_back(bidder.clone());
         env.storage().persistent().set(&bidders_key, &bidders);
         extend_ttl_for_key(&env, &bidders_key);
@@ -1102,6 +1106,46 @@ impl AgentBiddingContract {
             page.push_back(bidders.get(i).unwrap());
         }
         page
+    }
+
+    /// Return a cursor-paginated list of bidder addresses for a task.
+    pub fn get_bidders_paginated(
+        env: Env,
+        task_id: Symbol,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Address>, Error> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(Error::InvalidAuditRange);
+        }
+
+        let bidders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bidders(task_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = bidders.len();
+
+        if total == 0 {
+            if offset != 0 {
+                return Err(Error::InvalidAuditRange);
+            }
+            return Ok(Vec::new(&env));
+        }
+
+        if offset >= total {
+            return Err(Error::InvalidAuditRange);
+        }
+
+        let mut page = Vec::new(&env);
+        let end = (offset + limit).min(total);
+        for i in offset..end {
+            if let Some(bidder) = bidders.get(i) {
+                page.push_back(bidder);
+            }
+        }
+
+        Ok(page)
     }
 }
 

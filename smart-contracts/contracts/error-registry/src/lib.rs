@@ -297,8 +297,14 @@ impl ErrorRegistryContract {
             .persistent()
             .get(&code_key)
             .unwrap_or_else(|| Vec::new(&env));
+        if code_ids.len() >= MAX_CODE_INDEX_SIZE {
+            return Err(Error::MaxCapacityReached);
+        }
         code_ids.push_back(error_id.clone());
         env.storage().persistent().set(&code_key, &code_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&code_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         let mut all_ids: Vec<BytesN<32>> = env
             .storage()
@@ -309,8 +315,14 @@ impl ErrorRegistryContract {
         env.storage()
             .persistent()
             .set(&DataKey::AllErrorIds, &all_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::AllErrorIds, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         env.storage().persistent().set(&error_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&error_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         env.events().publish(
             (symbol_short!("errreg"), symbol_short!("submitted")),
@@ -322,6 +334,12 @@ impl ErrorRegistryContract {
 
     pub fn get_error(env: Env, error_id: BytesN<32>) -> Option<ErrorRecord> {
         let now = env.ledger().timestamp();
+        let key = DataKey::Record(error_id);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
         env.storage()
             .persistent()
             .get(&DataKey::Record(error_id))
