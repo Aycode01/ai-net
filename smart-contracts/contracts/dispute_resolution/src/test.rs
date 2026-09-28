@@ -207,3 +207,60 @@ fn negative_auth_set_admin() {
     env.mock_auths(&[]);
     assert!(client.try_set_admin(&intruder).is_err());
 }
+
+#[test]
+fn evidence_index_zero_survives_submission() {
+    let fixture = setup();
+    file(&fixture);
+    
+    let hash0 = BytesN::from_array(&fixture.env, &[1u8; 32]);
+    let hash1 = BytesN::from_array(&fixture.env, &[2u8; 32]);
+    let hash2 = BytesN::from_array(&fixture.env, &[3u8; 32]);
+    
+    // Submit 3 pieces of evidence
+    let id0 = fixture
+        .client
+        .submit_evidence(&fixture.task_id, &fixture.filer, &hash0);
+    let id1 = fixture
+        .client
+        .submit_evidence(&fixture.task_id, &fixture.agent, &hash1);
+    let id2 = fixture
+        .client
+        .submit_evidence(&fixture.task_id, &fixture.filer, &hash2);
+    
+    // Verify evidence IDs are sequential
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    
+    // Verify count is correct
+    assert_eq!(fixture.client.get_evidence_count(&fixture.task_id), 3);
+    
+    // CRITICAL: Verify evidence #0 is retrievable and has correct data
+    let evidence0 = fixture.client.get_evidence(&fixture.task_id, &0).unwrap();
+    assert_eq!(evidence0.evidence_id, 0);
+    assert_eq!(evidence0.evidence_hash, hash0);
+    assert_eq!(evidence0.submitter, fixture.filer);
+    assert_eq!(evidence0.dispute_id, fixture.task_id);
+    
+    // Verify evidence #1 and #2 are also retrievable
+    let evidence1 = fixture.client.get_evidence(&fixture.task_id, &1).unwrap();
+    assert_eq!(evidence1.evidence_id, 1);
+    assert_eq!(evidence1.evidence_hash, hash1);
+    assert_eq!(evidence1.submitter, fixture.agent);
+    
+    let evidence2 = fixture.client.get_evidence(&fixture.task_id, &2).unwrap();
+    assert_eq!(evidence2.evidence_id, 2);
+    assert_eq!(evidence2.evidence_hash, hash2);
+    assert_eq!(evidence2.submitter, fixture.filer);
+}
+
+fn setup_with_admin() -> (Env, DisputeResolutionContractClient<'static>, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(DisputeResolutionContract, ());
+    let client = DisputeResolutionContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    (env, client, admin)
+}
