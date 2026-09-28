@@ -2,19 +2,28 @@
  * @vitest-environment jsdom
  */
 
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { useWallet } from '../../context/WalletContext';
+import { signTransactionWithFreighter } from '../../services/freighter';
 import { SendXLMForm } from './SendXLMForm';
+
+const { showToast } = vi.hoisted(() => ({ showToast: vi.fn() }));
+
+const connectedWallet = {
+  publicKey: 'GBRPYHIL2CI3WHZDTOOQFC6EB4PSQUMACTUN4QE2LBNVQWSRUCF6XX2H',
+  keypair: { publicKey: () => 'GBRPYHIL2CI3WHZDTOOQFC6EB4PSQUMACTUN4QE2LBNVQWSRUCF6XX2H' },
+  connected: true,
+  connectionMethod: 'secret-key',
+};
+
+// The form only reads these four fields, so a partial wallet is enough.
+const mockWallet = (wallet: Record<string, unknown>) =>
+  vi.mocked(useWallet).mockReturnValue(wallet as unknown as ReturnType<typeof useWallet>);
 
 // Mock wallet context
 vi.mock('../../context/WalletContext', () => ({
-  useWallet: vi.fn(() => ({
-    publicKey: 'GBRPYHIL2CI3WHZDTOOQFC6EB4PSQUMACTUN4QE2LBNVQWSRUCF6XX2H',
-    keypair: { publicKey: () => 'GBRPYHIL2CI3WHZDTOOQFC6EB4PSQUMACTUN4QE2LBNVQWSRUCF6XX2H' },
-    connected: true,
-    connectionMethod: 'secret-key',
-  })),
+  useWallet: vi.fn(),
 }));
 
 // Mock wallet balance hook
@@ -28,10 +37,8 @@ vi.mock('../../hooks/useWalletBalance', () => ({
 }));
 
 // Mock toast hook
-vi.mock('../../hooks/useToast', () => ({
-  useToast: vi.fn(() => ({
-    showToast: vi.fn(),
-  })),
+vi.mock('../../context/ToastContext', () => ({
+  useToast: () => ({ showToast }),
 }));
 
 // Mock freighter service
@@ -41,7 +48,18 @@ vi.mock('../../services/freighter', () => ({
 
 // Mock Stellar SDK
 vi.mock('@stellar/stellar-sdk', () => ({
-  TransactionBuilder: vi.fn(),
+  TransactionBuilder: vi.fn(() => {
+    const builder = {
+      addOperation: vi.fn(() => builder),
+      addMemo: vi.fn(() => builder),
+      setTimeout: vi.fn(() => builder),
+      build: vi.fn(() => ({
+        sign: vi.fn(),
+        toEnvelope: () => ({ toXDR: () => 'signed-xdr' }),
+      })),
+    };
+    return builder;
+  }),
   Operation: { payment: vi.fn(() => ({})) },
   Asset: { native: vi.fn(() => ({})) },
   BASE_FEE: '100',
@@ -49,7 +67,7 @@ vi.mock('@stellar/stellar-sdk', () => ({
   Memo: { text: vi.fn(() => ({})) },
   Horizon: {
     Server: vi.fn(() => ({
-      loadAccount: vi.fn(),
+      loadAccount: vi.fn(() => Promise.resolve({})),
     })),
   },
   Keypair: {
@@ -61,23 +79,15 @@ vi.mock('@stellar/stellar-sdk', () => ({
   Transaction: vi.fn(),
 }));
 
-// Mock wallet schema
-vi.mock('../../schemas/wallet', () => ({
-  walletTransferSchema: {
-    shape: { amount: {} },
-    extend: vi.fn(function() { return this; }),
-  },
-}));
-
 describe('SendXLMForm Component', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockWallet(connectedWallet);
   });
 
   describe('Disconnected State', () => {
     it('shows disconnected message when wallet is not connected', () => {
-      const { useWallet } = require('../../context/WalletContext');
-      useWallet.mockReturnValue({
+      mockWallet({
         publicKey: null,
         keypair: null,
         connected: false,
@@ -123,14 +133,20 @@ describe('SendXLMForm Component', () => {
       expect(amountInput.disabled).toBe(false);
       expect(sendBtn.disabled).toBe(false);
 
+      // Keep the Horizon submission pending so the form stays in its submitting state
+      global.fetch = vi.fn(() => new Promise<Response>(() => {}));
+
       // Fill and submit form
       fireEvent.change(destInput, { target: { value: 'GBRPYHIL2CI3WHZDTOOQFC6EB4PSQUMACTUN4QE2LBNVQWSRUCF6XX2H' } });
       fireEvent.change(amountInput, { target: { value: '10' } });
       fireEvent.click(sendBtn);
+      fireEvent.click(await screen.findByRole('button', { name: /confirm & send/i }));
 
-      // After submission, button should show "Sending"
+      // While the payment is being submitted, the form is locked
       await waitFor(() => {
         expect(sendBtn).toHaveAttribute('disabled');
+        expect(destInput.disabled).toBe(true);
+        expect(amountInput.disabled).toBe(true);
       });
     });
   });
@@ -145,10 +161,8 @@ describe('SendXLMForm Component', () => {
       fireEvent.change(destInput, { target: { value: 'invalid-address' } });
       fireEvent.click(sendBtn);
 
-      await waitFor(() => {
-        const errorRole = screen.queryByRole('alert');
-        expect(errorRole).toBeInTheDocument();
-      });
+      expect(await screen.findByText('Invalid Stellar address')).toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
     it('shows error for amount exceeding balance', async () => {
@@ -174,10 +188,7 @@ describe('SendXLMForm Component', () => {
       const sendBtn = screen.getByRole('button', { name: /send/i });
       fireEvent.click(sendBtn);
 
-      await waitFor(() => {
-        const errorRole = screen.queryByRole('alert');
-        expect(errorRole).toBeInTheDocument();
-      });
+      expect(await screen.findByText('Destination address is required')).toBeInTheDocument();
     });
 
     it('shows error for zero or negative amount', async () => {
@@ -477,6 +488,78 @@ describe('SendXLMForm Component', () => {
     });
   });
 
+  describe('Toasts', () => {
+    const submitPayment = async () => {
+      fireEvent.change(screen.getByLabelText(/destination/i), {
+        target: { value: 'GBRPYHIL2CI3WHZDTOOQFC6EB4PSQUMACTUN4QE2LBNVQWSRUCF6XX2H' },
+      });
+      fireEvent.change(screen.getByLabelText(/amount/i), { target: { value: '10' } });
+      fireEvent.click(screen.getByRole('button', { name: /send/i }));
+      fireEvent.click(await screen.findByRole('button', { name: /confirm & send/i }));
+    };
+
+    it('shows a success toast once the payment is submitted', async () => {
+      global.fetch = vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ hash: 'tx-hash' }),
+        } as Response)
+      );
+
+      render(<SendXLMForm />);
+      await submitPayment();
+
+      await waitFor(() => {
+        expect(showToast).toHaveBeenCalledWith(
+          'Payment sent successfully!',
+          'success',
+          expect.objectContaining({ duration: 8000 }),
+        );
+      });
+      expect(showToast).not.toHaveBeenCalledWith(expect.anything(), 'error', expect.anything());
+    });
+
+    it('shows an error toast with the Horizon result code when submission fails', async () => {
+      global.fetch = vi.fn(() =>
+        Promise.resolve({
+          ok: false,
+          status: 400,
+          json: () => Promise.resolve({ extras: { result_codes: { transaction: 'tx_bad_seq' } } }),
+        } as Response)
+      );
+
+      render(<SendXLMForm />);
+      await submitPayment();
+
+      await waitFor(() => {
+        expect(showToast).toHaveBeenCalledWith(
+          'tx_bad_seq',
+          'error',
+          expect.objectContaining({ duration: 7000 }),
+        );
+      });
+      expect(showToast).not.toHaveBeenCalledWith(expect.anything(), 'success', expect.anything());
+    });
+
+    it('does not submit or toast when the destination address is invalid', async () => {
+      global.fetch = vi.fn();
+
+      render(<SendXLMForm />);
+
+      fireEvent.change(screen.getByLabelText(/destination/i), {
+        target: { value: 'GNOTAREALADDRESS' },
+      });
+      fireEvent.change(screen.getByLabelText(/amount/i), { target: { value: '10' } });
+      fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+      expect(await screen.findByText('Invalid Stellar address')).toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(showToast).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Accessibility', () => {
     it('has accessible form labels', () => {
       render(<SendXLMForm />);
@@ -518,13 +601,14 @@ describe('SendXLMForm Component', () => {
 
   describe('Freighter Integration', () => {
     it('uses freighter signing when connectionMethod is freighter', async () => {
-      const { useWallet } = require('../../context/WalletContext');
-      useWallet.mockReturnValue({
+      mockWallet({
         publicKey: 'GBRPYHIL2CI3WHZDTOOQFC6EB4PSQUMACTUN4QE2LBNVQWSRUCF6XX2H',
         keypair: null,
         connected: true,
         connectionMethod: 'freighter',
       });
+      // Leave the Freighter signature pending so the signing state is visible
+      vi.mocked(signTransactionWithFreighter).mockReturnValue(new Promise<string>(() => {}));
 
       render(<SendXLMForm />);
 
@@ -536,9 +620,11 @@ describe('SendXLMForm Component', () => {
       fireEvent.change(amountInput, { target: { value: '10' } });
       fireEvent.click(sendBtn);
 
+      fireEvent.click(await screen.findByRole('button', { name: /confirm & send/i }));
+
       await waitFor(() => {
-        const confirmBtn = screen.getByRole('button', { name: /confirm & send/i });
-        expect(confirmBtn.textContent).toContain('Signing with Freighter');
+        expect(signTransactionWithFreighter).toHaveBeenCalledWith('signed-xdr', connectedWallet.publicKey);
+        expect(document.getElementById('btn-confirm-payment')).toHaveTextContent('Signing with Freighter');
       });
     });
   });
