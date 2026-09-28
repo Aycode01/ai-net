@@ -81,11 +81,9 @@ export interface AppOptions {
   /** Enable background queue worker (default: true) */
   enableQueueWorker?: boolean;
   /**
-   * How long close() waits for in-flight jobs to finish before closing the
-   * HTTP/WS server anyway. Default: 10000 (10s). A job still running when
-   * this elapses is left in the queue's "active" state — the next worker
-   * start (see JobWorker.start()/recoverIncompleteJobs()) resets it to
-   * "pending" and retries it, rather than losing the work.
+   * How long close() waits before the worker logs that jobs remain active.
+   * Default: 10000 (10s). The server and database connections stay open until
+   * those jobs finish so their final task/event writes are not interrupted.
    */
   jobWorkerStopTimeoutMs?: number;
 }
@@ -341,12 +339,14 @@ export function createApp(opts: AppOptions = {}): {
   }));
 
   function close(callback?: () => void): void {
-    // Drain first: wait for in-flight jobs to finish (bounded by
-    // jobWorkerStopTimeoutMs) before we stop accepting connections. A job
-    // still active when the drain window elapses is NOT force-failed — it
-    // stays "active" in the store and is picked back up by the next
-    // JobWorker.start() via recoverIncompleteJobs().
-    jobWorker.stop(opts.jobWorkerStopTimeoutMs ?? 10_000).finally(() => {
+    // Stop new claims, then keep database handles available until active jobs settle.
+    const drainWorker = async () => {
+      await jobWorker.stop(opts.jobWorkerStopTimeoutMs ?? 10_000);
+      while (jobWorker.getActiveCount() > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    drainWorker().finally(() => {
       heartbeatService.stop();
       // Stop the watchdog before the server goes away, and clear the cost flush
       // timer last so any final in-flight spend still gets written.
