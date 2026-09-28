@@ -50,6 +50,7 @@ pub enum DataKey {
     Admin,
     Paused,
     Version,
+    Paused,
     Task(BytesN<32>),
     /// Optional OracleManager contract address used to resolve quoted prices.
     OracleManager,
