@@ -68,69 +68,25 @@ Emitted when an agent is deregistered and removed from the contract index.
 
 ---
 
-# Dispute Resolution Contract Events
+## Admin Changed Events
 
-This section details Soroban events emitted by the `dispute_resolution` smart contract.
+Emitted when contract administration rights are transferred via `set_admin`.
 
-## Event Topics
+### Event Topics & Payloads
 
-All dispute resolution events share the first topic (`dispute`) to group dispute-related operations. The second topic indicates the specific operation type.
-
----
-
-### 1. Dispute Filed
-
-Emitted when a dispute is filed.
-
-- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
-- **Topic 2**: `Symbol::new(env, "filed")`
-- **Data (Structure)**: `DisputeFiledEvent`
-
----
-
-### 2. Evidence Submitted
-
-Emitted when evidence is submitted for a dispute.
-
-- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
-- **Topic 2**: `Symbol::new(env, "evidence")`
-- **Data (Structure)**: `EvidenceSubmittedEvent`
-
----
-
-### 3. Vote Cast
-
-Emitted when an assigned juror casts a vote on a dispute.
-
-- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
-- **Topic 2**: `Symbol::new(env, "vote_cast")`
-- **Data (Structure)**: `VoteCastEvent`
+- **Data (Structure)**: `AdminChangedEvent`
   ```rust
-  pub struct VoteCastEvent {
-      pub dispute_id: Symbol,     // Identifier of the dispute
-      pub juror: Address,         // Address of voting juror
-      pub side: VoteSide,         // Side voted for (0 = Client, 1 = Agent)
-      pub timestamp: u64,         // Ledger timestamp when vote was cast
+  pub struct AdminChangedEvent {
+      pub old_admin: Address,     // Address of outgoing admin
+      pub new_admin: Address,     // Address of incoming admin
   }
   ```
 
----
-
-### 4. Dispute Resolved
-
-Emitted when a dispute is resolved after voting.
-
-- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
-- **Topic 2**: `Symbol::new(env, "resolved")`
-- **Data (Structure)**: `DisputeResolvedEvent`
-
----
-
-### 5. Dispute Appealed
-
-Emitted when a resolved dispute is appealed.
-
-- **Topic 1**: `Symbol::new(env, "dispute")` (Short symbol: `dispute`)
-- **Topic 2**: `Symbol::new(env, "appealed")`
-- **Data (Structure)**: `DisputeAppealedEvent`
+| Contract | Topic 1 | Topic 2 | Payload |
+|---|---|---|---|
+| `oracle_manager` | `Symbol::new(env, "mgr")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `price_oracle` | `Symbol::new(env, "oracle")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `agent_marketplace` | `Symbol::new(env, "market")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `dispute_resolution` | `Symbol::new(env, "dispute")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `agent_registry` | `Symbol::new(env, "registry")` | `Symbol::new(env, "adm_chngd")` | `AdminChangedEvent` |
 

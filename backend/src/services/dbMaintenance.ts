@@ -252,7 +252,30 @@ function emptyMetrics(): DbMaintenanceMetrics {
  * databases the application actually persists to.
  */
 export function defaultMaintenanceDatabases(): MaintenanceDb[] {
+  // The event store is included so WAL checkpointing and vacuum cover the table
+  // that grows fastest (issue #383).  It is skipped when configured as
+  // `:memory:`, since there is no file to checkpoint and nothing to back up.
+  const eventStorePath = require("../events/eventStore").getEventStorePath() as string;
+  const eventStoreDb: MaintenanceDb[] =
+    eventStorePath === ":memory:"
+      ? []
+      : [
+          {
+            name: "events",
+            path: eventStorePath,
+            getConnection: () => {
+              const { getEventStoreConnection } = require("../events/eventStore") as typeof import("../events/eventStore");
+              const connection = getEventStoreConnection();
+              if (!connection) {
+                throw new Error("event store connection requested before the store was opened");
+              }
+              return connection;
+            },
+          },
+        ];
+
   return [
+    ...eventStoreDb,
     {
       name: "payments",
       path: path.join(process.cwd(), "payments.db"),
