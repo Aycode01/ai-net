@@ -76,8 +76,13 @@ export interface EventStore {
   /**
    * Events for a task with `taskSeq` strictly greater than `afterSeq`.
    * Used for cursor-based WebSocket stream resume.
+   *
+   * `limit` caps how many rows are returned in a single read, so a caller that
+   * needs to drain a large backlog can page through it instead of materialising
+   * the whole gap in one statement. Omitting it keeps the original unbounded
+   * behaviour for the replay/archive callers that genuinely want everything.
    */
-  listByTaskSince(taskId: string, afterSeq: number): StoredEvent[];
+  listByTaskSince(taskId: string, afterSeq: number, limit?: number): StoredEvent[];
 
   /**
    * All events whose `occurred_at` falls within [from, to] (ISO-8601 strings,
@@ -230,6 +235,16 @@ export function createEventStore(db?: Database.Database | string): EventStore {
     ORDER BY task_seq ASC
   `);
 
+  // Bounded variant of the cursor query. Stream flushes page through the
+  // backlog with this so a single read never materialises an arbitrarily large
+  // gap (see TaskStreamHub).
+  const listByTaskSinceLimitedStmt = database.prepare(`
+    SELECT * FROM task_events
+    WHERE task_id = ? AND task_seq > ?
+    ORDER BY task_seq ASC
+    LIMIT ?
+  `);
+
   const listByTimeRangeStmt = database.prepare(`
     SELECT * FROM task_events
     WHERE occurred_at >= ? AND occurred_at <= ?
@@ -311,8 +326,12 @@ export function createEventStore(db?: Database.Database | string): EventStore {
       return (listByTaskStmt.all(taskId) as EventRow[]).map(rowToStoredEvent);
     },
 
-    listByTaskSince(taskId: string, afterSeq: number): StoredEvent[] {
-      return (listByTaskSinceStmt.all(taskId, afterSeq) as EventRow[]).map(rowToStoredEvent);
+    listByTaskSince(taskId: string, afterSeq: number, limit?: number): StoredEvent[] {
+      const rows =
+        limit === undefined
+          ? (listByTaskSinceStmt.all(taskId, afterSeq) as EventRow[])
+          : (listByTaskSinceLimitedStmt.all(taskId, afterSeq, limit) as EventRow[]);
+      return rows.map(rowToStoredEvent);
     },
 
     listByTimeRange({ from, to }: TimeRangeOptions): StoredEvent[] {
