@@ -6,6 +6,7 @@ import type { ReputationBreakdown } from "../services/qualityScorer.types";
 import { createPool, type SqlitePool } from "./pool";
 import { decodeCursor, encodeCursor, type CursorPage } from "./cursor";
 import { createErrorRegistryStore, getErrorDb } from "./errorRegistry";
+import { safeJsonArray } from "../utils/safeJson";
 
 const MIGRATIONS_DIR = path.join(__dirname, "migrations", "agents");
 
@@ -269,7 +270,7 @@ export function createAgentDb(db: Database.Database): AgentDb {
       if (!row) return undefined;
       return {
         ...row,
-        capabilities: JSON.parse(row.capabilities),
+        capabilities: safeJsonArray(row.capabilities, "agents.findById", row.id),
         status: row.status ?? 'offline',
         reputationScore: Number(row.reputationScore ?? 2.5),
         bondAmountXLM: Number(row.bondAmountXLM ?? 0),
@@ -292,7 +293,13 @@ export function createAgentDb(db: Database.Database): AgentDb {
         params.push(filters.maxPriceXLM);
       }
       if (filters?.capability !== undefined) {
-        query += " AND EXISTS (SELECT 1 FROM json_each(capabilities) WHERE value = ?)";
+        // Rows whose `capabilities` column is not valid JSON are skipped
+        // instead of aborting the whole query (#645). `json_each` is handed a
+        // sanitized document so even an eager planner cannot reach the bad
+        // value.
+        query +=
+          " AND json_valid(capabilities)" +
+          " AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(capabilities) THEN capabilities ELSE '[]' END) WHERE value = ?)";
         params.push(filters.capability);
       }
       if (filters?.status !== undefined) {
@@ -303,7 +310,7 @@ export function createAgentDb(db: Database.Database): AgentDb {
       const rows = db.prepare(query).all(...params) as any[];
       return rows.map(row => ({
         ...row,
-        capabilities: JSON.parse(row.capabilities),
+        capabilities: safeJsonArray(row.capabilities, "agents.list", row.id),
         status: row.status ?? 'offline',
         reputationScore: Number(row.reputationScore ?? 2.5),
         bondAmountXLM: Number(row.bondAmountXLM ?? 0),
@@ -328,7 +335,13 @@ export function createAgentDb(db: Database.Database): AgentDb {
         params.push(options.maxPriceXLM);
       }
       if (options.capability !== undefined) {
-        conditions.push("EXISTS (SELECT 1 FROM json_each(capabilities) WHERE value = ?)");
+        // Rows whose `capabilities` column is not valid JSON are skipped
+        // instead of aborting the whole query (#645). `json_each` is handed a
+        // sanitized document so even an eager planner cannot reach the bad
+        // value.
+        conditions.push(
+          "json_valid(capabilities) AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(capabilities) THEN capabilities ELSE '[]' END) WHERE value = ?)",
+        );
         params.push(options.capability);
       }
       if (options.status !== undefined) {
@@ -364,7 +377,7 @@ export function createAgentDb(db: Database.Database): AgentDb {
 
       const agents: AgentRecord[] = pageRows.map((row) => ({
         ...row,
-        capabilities: JSON.parse(row.capabilities),
+        capabilities: safeJsonArray(row.capabilities, "agents.listCursor", row.id),
         status: row.status ?? 'offline',
       }));
 
