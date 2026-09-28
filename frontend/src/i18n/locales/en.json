@@ -340,6 +340,7 @@
   "a11y.loadingDashboard": "Loading dashboard",
   "a11y.loadingWallet": "Loading wallet",
   "a11y.loadingAgentRegistry": "Loading agent registry",
+  "a11y.loadingPage": "Loading page",
   "a11y.languageSwitcher": "Language",
   "a11y.switchToLanguage": "Switch to {{language}}",
   "a11y.filterByCapability": "Filter by capability",

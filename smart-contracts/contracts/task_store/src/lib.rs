@@ -110,18 +110,7 @@ fn is_terminal(status: TaskStatus) -> bool {
     matches!(status, TaskStatus::Completed | TaskStatus::Failed)
 }
 
-fn read_admin(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotInitialized)
-}
 
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin = read_admin(env)?;
-    admin.require_auth();
-    Ok(admin)
-}
 
 /// Call `OracleManager::resolve_price(pair)` via a low-level cross-contract
 /// call and return the resolved price in stroops on success, or `None` on any
@@ -171,6 +160,8 @@ impl TaskStoreContract {
         env.storage()
             .instance()
             .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
+        env.events()
+            .publish((symbol_short!("task_meta"), symbol_short!("init")), admin);
         Ok(())
     }
 
@@ -181,6 +172,32 @@ impl TaskStoreContract {
 
     pub fn admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// Pause the contract. Only admin can call this.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("task_meta"), symbol_short!("paused")), ());
+        Ok(())
+    }
+
+    /// Unpause the contract. Only admin can call this.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("task_meta"), symbol_short!("unpaused")), ());
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn set_oracle_manager(env: Env, oracle_manager: Option<Address>) -> Result<(), Error> {
@@ -226,33 +243,6 @@ impl TaskStoreContract {
             ),
         );
         Ok(())
-    }
-
-    /// Pause the contract. Only admin can call this.
-    pub fn pause(env: Env) -> Result<(), Error> {
-        require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((symbol_short!("task_meta"), symbol_short!("paused")), ());
-        Ok(())
-    }
-
-    /// Unpause the contract. Only admin can call this.
-    pub fn unpause(env: Env) -> Result<(), Error> {
-        require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((symbol_short!("task_meta"), symbol_short!("unpaused")), ());
-        Ok(())
-    }
-
-    /// Returns whether the contract is currently paused.
-    pub fn is_paused(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-    }
     }
 
     pub fn store_task_metadata(
@@ -650,14 +640,6 @@ mod test {
         assert!(!fixture.client.is_paused());
     }
 
-    #[test]
-    fn pause_blocks_store_task_metadata() {
-        let fixture = fixture();
-        let agents = Vec::from_array(&fixture.env, [fixture.agent.clone()]);
-        let dag = Bytes::from_slice(&fixture.env, &[0x78, 0x9c, 0x03, 0x00]);
-
-        fixture.client.pause();
-
     // ── Admin / set_oracle_manager ────────────────────────────────────────────
 
     #[test]
@@ -675,7 +657,7 @@ mod test {
         fixture.client.initialize(&admin);
         assert_eq!(
             fixture.client.try_initialize(&admin),
-            Err(Ok(Error::AlreadyInitialized))
+            Err(Ok(Error::AlreadyExists))
         );
     }
 
@@ -828,9 +810,10 @@ mod test {
             &agents,
             &dag,
             &1u32,
-            &None,
+            &Some(pair),
         );
-        assert_eq!(result, Err(Ok(Error::ContractPaused)));
+
+        assert_eq!(result, Err(Ok(Error::OraclePriceUnavailable)));
     }
 
     #[test]
@@ -1023,6 +1006,5 @@ mod test {
                 .quoted_price_stroops,
             Some(20_000_000i128)
         );
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
     }
 }

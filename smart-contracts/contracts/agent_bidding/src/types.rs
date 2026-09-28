@@ -246,12 +246,12 @@ pub struct Escrow {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
-    /// Admin address allowed to upgrade this contract.
+    /// Contract admin address.
     Admin,
-    /// Current semantic contract version.
-    Version,
     /// Whether the contract is paused.
     Paused,
+    /// Current semantic contract version.
+    Version,
     /// Stores the root [`Auction`] record for a task.
     Auction(Symbol),
     /// Stores a single [`SealedBid`] for a given (task, bidder) pair.
