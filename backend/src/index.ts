@@ -14,7 +14,6 @@ import { closeDb } from "./db/index";
 import { closeAuthDb } from "./db/auth";
 import { closeTaskDb, getTaskDb, createTaskDb } from "./db/tasks";
 import { closeJobDb } from "./queue";
-import { closeTaskDb, createTaskDb, getTaskDb } from "./db/tasks";
 import { closeEventStore, getEventStore } from "./events/eventStore";
 import { createDefaultReconciliationService } from "./services/reconciliation";
 import { DbMaintenanceService, defaultMaintenanceDatabases } from "./services/dbMaintenance";

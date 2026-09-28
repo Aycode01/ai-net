@@ -78,8 +78,6 @@ router.get("/ready", async (_req: Request, res: Response) => {
       taskDb.prepare("SELECT 1").get();
     } catch {
       checks.tasks = "error";
-    } finally {
-      (tasksModule.closeTaskDb as Function)();
     }
 
     try {
@@ -87,8 +85,6 @@ router.get("/ready", async (_req: Request, res: Response) => {
       paymentDb.prepare("SELECT 1").get();
     } catch {
       checks.payments = "error";
-    } finally {
-      (paymentsModule.closeDb as Function)();
     }
 
     try {
@@ -96,8 +92,6 @@ router.get("/ready", async (_req: Request, res: Response) => {
       jobDb.prepare("SELECT 1").get();
     } catch (error) {
       (checks as any).queue = "error";
-    } finally {
-      (queueModule.closeJobDb as Function)();
     }
   } catch (error) {
     res.status(500).json({ status: "error", checks, error: String(error) });
@@ -159,7 +153,7 @@ router.get("/traces/:traceId", adminAuthMiddleware, (req: Request, res: Response
 async function checkVenice(apiKey: string, timeoutMs = 5000): Promise<"ok" | "unreachable"> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch("https://api.venice.ai/api/v1/models", {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: controller.signal,
@@ -174,7 +168,7 @@ async function checkVenice(apiKey: string, timeoutMs = 5000): Promise<"ok" | "un
 async function checkHorizon(url: string, timeoutMs = 5000): Promise<"ok" | "unreachable"> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
     return response.ok ? "ok" : "unreachable";
