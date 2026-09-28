@@ -18,6 +18,7 @@
  * which remain reportable but are never auto-remediated.
  */
 
+import { isSettledPaymentStatus } from "../db/index";
 import type { PaymentRecord, PaymentStatus } from "../db/index";
 import type {
   ClaimableBalanceOnChain,
@@ -384,11 +385,7 @@ export function detectPaymentDrift(
     const status: PaymentStatus = record.status;
 
     // ── Settled records: the claimable balance is expected to be gone ────────
-    if (
-      status === "released" ||
-      status === "refunded" ||
-      status === "orphaned"
-    ) {
+    if (isSettledPaymentStatus(status)) {
       if (onChain) {
         // Scenario 3 — the DB says the money moved but the chain disagrees.
         discrepancies.push(detectUnconfirmedRelease(record, onChain));

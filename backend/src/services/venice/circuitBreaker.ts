@@ -235,9 +235,9 @@ export class CircuitBreaker {
   }
 
   /**
-   * @deprecated Use {@link acquire} — it additionally enforces the `HALF_OPEN`
-   * probe budget. Retained because it reads naturally at call sites that only
-   * care about "may I talk to Venice right now?".
+   * Alias of {@link acquire}, kept for backwards compatibility with the original
+   * single-argument API. Prefer {@link acquire} — it is the same check, named for
+   * what it does (reserve a probe slot, or reject).
    */
   assertClosed(): void {
     this.acquire();
