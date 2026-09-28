@@ -290,8 +290,14 @@ pub enum DataKey {
     BondCooldown(Symbol),
     /// Lifecycle state and balance for an agent's bond.
     Bond(Symbol),
+    /// Marks an identity whose bond fell below the registration minimum after slashing.
+    SlashedBond(Symbol),
     /// Bond value available for protocol rewards.
     BondRewardPool,
+    /// Contract authorized to slash bonds after a verified dispute ruling.
+    DisputeResolver,
+    /// Agent bond is reserved while its single active dispute is unresolved.
+    DisputeBondLock(Symbol),
     MultisigConfig,
     Proposal(u64),
     ProposalIdSequence,
@@ -510,6 +516,19 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
     Ok(admin)
 }
 
+fn require_dispute_resolver(env: &Env, caller: &Address) -> Result<(), Error> {
+    caller.require_auth();
+    let resolver: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::DisputeResolver)
+        .ok_or(Error::NotAdmin)?;
+    if caller != &resolver {
+        return Err(Error::NotAdmin);
+    }
+    Ok(())
+}
+
 fn internal_slash_bond(
     env: &Env,
     agent_id: Symbol,
@@ -558,6 +577,11 @@ fn internal_slash_bond(
         env.storage().persistent().set(&bond_key, &bond_record);
         extend_ttl_for_existing_key(env, &bond_key);
     }
+    if actual_penalty > 0 && remaining < min_bond(env) {
+        let slashed_key = DataKey::SlashedBond(agent_id.clone());
+        env.storage().persistent().set(&slashed_key, &true);
+        extend_ttl_for_existing_key(env, &slashed_key);
+    }
     let reward_pool = bond::reward_pool(env)
         .checked_add(actual_penalty)
         .ok_or(Error::InvalidConfig)?;
@@ -588,6 +612,27 @@ fn require_not_frozen(env: &Env, agent_id: &Symbol) -> Result<(), Error> {
         return Err(Error::AgentFrozen);
     }
 
+    Ok(())
+}
+
+fn validate_registration_bond(env: &Env, record: &AgentRecord) -> Result<(), Error> {
+    let required = min_bond(env);
+    if record.bond_amount < required {
+        return Err(Error::InsufficientBond);
+    }
+
+    let slashed_key = DataKey::SlashedBond(record.id.clone());
+    if env.storage().persistent().has(&slashed_key) {
+        extend_ttl_for_existing_key(env, &slashed_key);
+        let restored = bond::load(env, &record.id)?;
+        if restored.status != bond::BondStatus::Active
+            || restored.amount_stroops < required
+            || restored.owner != record.owner
+            || record.bond_amount < restored.amount_stroops
+        {
+            return Err(Error::InsufficientBond);
+        }
+    }
     Ok(())
 }
 
@@ -1181,11 +1226,7 @@ impl AgentRegistryContract {
             return Err(Error::CapabilityLimitReached);
         }
 
-        // ── Bond validation ──────────────────────────────────────────────────
-        let required = min_bond(&env);
-        if record.bond_amount < required {
-            return Err(Error::InsufficientBond);
-        }
+        validate_registration_bond(&env, &record)?;
 
         let agent_key = DataKey::Agent(record.id.clone());
 
@@ -1198,6 +1239,9 @@ impl AgentRegistryContract {
         extend_ttl_for_existing_key(&env, &cap_key);
         env.storage().persistent().set(&agent_key, &record);
         extend_ttl_for_existing_key(&env, &agent_key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::SlashedBond(record.id.clone()));
         bond::initialize(&env, &record);
 
         let seq = get_registration_sequence(&env);
@@ -1296,6 +1340,12 @@ impl AgentRegistryContract {
                 continue;
             }
 
+            if let Err(error) = validate_registration_bond(&env, &record) {
+                results.push_back(BatchResult::Err(error as u32));
+                all_ok = false;
+                continue;
+            }
+
             // Check frozen state.
             if require_not_frozen(&env, &record.id).is_err() {
                 results.push_back(BatchResult::Err(Error::AgentFrozen as u32));
@@ -1378,6 +1428,9 @@ impl AgentRegistryContract {
 
             env.storage().persistent().set(&agent_key, &record);
             env.storage().persistent().set(&index_key, &record.id);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::SlashedBond(record.id.clone()));
             bond::initialize(&env, &record);
             ttl_keys.push_back(agent_key);
             ttl_keys.push_back(index_key);
@@ -1725,6 +1778,13 @@ impl AgentRegistryContract {
 
     pub fn deregister_agent(env: Env, agent_id: Symbol) -> Result<(), Error> {
         require_not_paused(&env)?;
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::DisputeBondLock(agent_id.clone()))
+        {
+            return Err(Error::DisputePending);
+        }
 
         let cooldown_key = DataKey::BondCooldown(agent_id.clone());
         let current_ledger = env.ledger().sequence();
@@ -1888,9 +1948,28 @@ impl AgentRegistryContract {
         min_bond(&env)
     }
 
+    /// Admin: configure the dispute-resolution contract allowed to slash bonds.
+    pub fn set_dispute_resolver(env: Env, resolver: Address) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        env.storage().instance().set(&DataKey::DisputeResolver, &resolver);
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("dispute")),
+            resolver.clone(),
+        );
+        audit::record(&env, &admin, symbol_short!("dispute"), None, 0);
+        Ok(())
+    }
+
     /// Add collateral to an active agent's bond. The caller must be the owner.
     pub fn deposit_bond(env: Env, agent_id: Symbol, amount_stroops: i128) -> Result<(), Error> {
         require_not_paused(&env)?;
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::DisputeBondLock(agent_id.clone()))
+        {
+            return Err(Error::DisputePending);
+        }
         if amount_stroops < min_bond(&env) {
             return Err(Error::InsufficientBond);
         }
@@ -1928,9 +2007,76 @@ impl AgentRegistryContract {
         Ok(())
     }
 
+    /// Restore a slashed bond. The original owner must replenish the bond
+    /// before the agent identity can be registered again.
+    pub fn restore_slashed_bond(
+        env: Env,
+        agent_id: Symbol,
+        amount_stroops: i128,
+    ) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        if amount_stroops <= 0
+            || !env
+                .storage()
+                .persistent()
+                .has(&DataKey::SlashedBond(agent_id.clone()))
+        {
+            return Err(Error::InsufficientBond);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::DisputeBondLock(agent_id.clone()))
+        {
+            return Err(Error::DisputePending);
+        }
+
+        let mut record = bond::load(&env, &agent_id)?;
+        record.owner.require_auth();
+        if record.status == bond::BondStatus::Cooldown {
+            return Err(Error::CooldownNotElapsed);
+        }
+        let new_amount = record
+            .amount_stroops
+            .checked_add(amount_stroops)
+            .ok_or(Error::InvalidConfig)?;
+        record.amount_stroops = new_amount;
+        record.status = if new_amount >= min_bond(&env) {
+            bond::BondStatus::Active
+        } else {
+            bond::BondStatus::Slashed
+        };
+        record.cooldown_until = None;
+        bond::save(&env, &agent_id, &record);
+
+        let agent_key = DataKey::Agent(agent_id.clone());
+        if let Some(mut agent) = env.storage().persistent().get::<_, AgentRecord>(&agent_key) {
+            agent.bond_amount = new_amount;
+            env.storage().persistent().set(&agent_key, &agent);
+            extend_ttl_for_existing_key(&env, &agent_key);
+        }
+        env.events().publish(
+            (symbol_short!("registry"), symbol_short!("bond_dep")),
+            events::BondDeposited {
+                agent_id,
+                owner: record.owner,
+                amount_stroops,
+                total_stroops: new_amount,
+            },
+        );
+        Ok(new_amount)
+    }
+
     /// Begin the bond cooldown for an agent.
     pub fn initiate_bond_return(env: Env, agent_id: Symbol) -> Result<(), Error> {
         require_not_paused(&env)?;
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::DisputeBondLock(agent_id.clone()))
+        {
+            return Err(Error::DisputePending);
+        }
         let record = bond::load(&env, &agent_id)?;
         record.owner.require_auth();
         if record.status == bond::BondStatus::Cooldown {
@@ -1955,6 +2101,13 @@ impl AgentRegistryContract {
 
     /// Complete the bond return after the configured ledger cooldown.
     pub fn claim_bond(env: Env, agent_id: Symbol) -> Result<i128, Error> {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::DisputeBondLock(agent_id.clone()))
+        {
+            return Err(Error::DisputePending);
+        }
         let mut record = bond::load(&env, &agent_id)?;
         record.owner.require_auth();
         let expiry_ledger = record.cooldown_until.ok_or(Error::CooldownNotElapsed)?;
@@ -1993,6 +2146,13 @@ impl AgentRegistryContract {
     /// Reward an active agent using value accumulated from bond slashes.
     pub fn reward_bond(env: Env, agent_id: Symbol, amount_stroops: i128) -> Result<(), Error> {
         let admin = require_admin(&env)?;
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::DisputeBondLock(agent_id.clone()))
+        {
+            return Err(Error::DisputePending);
+        }
         if amount_stroops <= 0 {
             return Err(Error::InvalidConfig);
         }
@@ -2106,6 +2266,83 @@ impl AgentRegistryContract {
             Some(agent_id),
             penalty_stroops,
         );
+        Ok(())
+    }
+
+    /// Slash a percentage of the bond after a verified dispute resolution.
+    /// Only the configured dispute contract may invoke this entry point.
+    pub fn slash_bond_from_dispute(
+        env: Env,
+        caller: Address,
+        agent_id: Symbol,
+        percentage: u32,
+        reason: String,
+    ) -> Result<i128, Error> {
+        require_dispute_resolver(&env, &caller)?;
+        if percentage == 0 || percentage > 100 || reason.is_empty() {
+            return Err(Error::InvalidConfig);
+        }
+        let lock_key = DataKey::DisputeBondLock(agent_id.clone());
+        if !env.storage().persistent().has(&lock_key) {
+            return Err(Error::NotFound);
+        }
+        let record = bond::load(&env, &agent_id)?;
+        if record.status == bond::BondStatus::Cooldown {
+            return Err(Error::CooldownNotElapsed);
+        }
+        let penalty_stroops = record
+            .amount_stroops
+            .checked_mul(percentage as i128)
+            .ok_or(Error::InvalidConfig)?
+            / 100;
+        let actual_penalty = internal_slash_bond(&env, agent_id, penalty_stroops, reason)?;
+        env.storage().persistent().remove(&lock_key);
+        Ok(actual_penalty)
+    }
+
+    /// Reserve an agent's bond until its dispute is finally resolved.
+    pub fn lock_bond_for_dispute(
+        env: Env,
+        caller: Address,
+        agent_id: Symbol,
+    ) -> Result<(), Error> {
+        require_dispute_resolver(&env, &caller)?;
+        let lock_key = DataKey::DisputeBondLock(agent_id.clone());
+        if env.storage().persistent().has(&lock_key) {
+            return Err(Error::DisputePending);
+        }
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Agent(agent_id.clone()))
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::BondCooldown(agent_id.clone()))
+        {
+            return Err(Error::InsufficientBond);
+        }
+        let bond_record = bond::load(&env, &agent_id)?;
+        if bond_record.status != bond::BondStatus::Active || bond_record.amount_stroops <= 0 {
+            return Err(Error::InsufficientBond);
+        }
+        env.storage().persistent().set(&lock_key, &true);
+        extend_ttl_for_existing_key(&env, &lock_key);
+        Ok(())
+    }
+
+    /// Release a reserved bond after a final ruling that does not slash it.
+    pub fn release_bond_after_dispute(
+        env: Env,
+        caller: Address,
+        agent_id: Symbol,
+    ) -> Result<(), Error> {
+        require_dispute_resolver(&env, &caller)?;
+        let lock_key = DataKey::DisputeBondLock(agent_id);
+        if !env.storage().persistent().has(&lock_key) {
+            return Err(Error::NotFound);
+        }
+        env.storage().persistent().remove(&lock_key);
         Ok(())
     }
 
