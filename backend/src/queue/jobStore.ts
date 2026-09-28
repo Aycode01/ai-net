@@ -358,8 +358,10 @@ export function createJobStore(db: Database.Database): JobStore {
       page?: number;
       pageSize?: number;
     } = {}): { jobs: Job[]; total: number } {
-      const page = filter.page ?? 1;
-      const pageSize = filter.pageSize ?? 50;
+      // Clamp both parameters so callers can never produce an unbounded LIMIT
+      // or a negative OFFSET. Mirrors the clamp in agents.ts listCursor().
+      const page = Math.max(1, Math.floor(filter.page ?? 1) || 1);
+      const pageSize = Math.min(100, Math.max(1, Math.floor(filter.pageSize ?? 50) || 1));
       const offset = (page - 1) * pageSize;
 
       const conditions: string[] = [];
