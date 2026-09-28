@@ -284,7 +284,7 @@ const ResearchReportRenderer: React.FC<Props> = ({ result, searchQuery }) => {
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="external-link"
-                style={{ color: 'var(--accent-cyan, #38bdf8)', textDecoration: 'underline' }}
+                style={{ color: 'var(--accent-info)', textDecoration: 'underline' }}
               >
                 {children}
               </a>
@@ -326,7 +326,7 @@ const ResearchReportRenderer: React.FC<Props> = ({ result, searchQuery }) => {
                 style={{
                   padding: '10px 14px',
                   background: 'rgba(255, 255, 255, 0.08)',
-                  color: 'var(--text-primary, #f5f7fa)',
+                  color: 'var(--text-primary)',
                   fontWeight: 600,
                   textAlign: 'left',
                 }}
@@ -340,7 +340,7 @@ const ResearchReportRenderer: React.FC<Props> = ({ result, searchQuery }) => {
               <td
                 style={{
                   padding: '10px 14px',
-                  color: 'var(--text-primary, #f5f7fa)',
+                  color: 'var(--text-primary)',
                   fontSize: '0.9rem',
                 }}
               >

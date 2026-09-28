@@ -38,7 +38,7 @@ import { metricsRouter } from "./routes/metrics";
 import { createStatsRouter } from "./routes/stats";
 import { createReconciliationRouter, type ReconciliationRouterOptions } from "./routes/reconciliation";
 import { rateLimitMiddleware, registerRateLimitMiddleware, publicLimiter, authedLimiter, adminLimiter } from "./middleware/rateLimit";
-import { authMiddleware } from "./middleware/auth";
+import { authMiddleware, adminAuthMiddleware } from "./middleware/auth";
 import { createCorsMiddleware } from "./middleware/cors";
 import { compressionMiddleware } from "./middleware/compression";
 import { errorHandler } from "./middleware/errorHandler";
@@ -53,6 +53,7 @@ import { createAgentWatchdog } from "../services/agentWatchdog";
 import { flushActiveCosts, setPricingOverrides } from "../services/budget";
 import { createAdminRouter, createAdminQueueRouter } from "./routes/admin";
 import { createFlagsRouter } from "./routes/flags";
+import { createRateLimitRouter } from "./routes/ratelimit";
 import { createVersionsRouter } from "./routes/versions";
 import { createV1TasksRouter } from "./routes/v1/tasks";
 import { createV2TasksRouter } from "./routes/v2/tasks";
@@ -291,6 +292,9 @@ export function createApp(opts: AppOptions = {}): {
 
   // ── Feature-flag admin routes (#425) ───────────────────────────────────────
   app.use("/api/admin/flags", createFlagsRouter());
+
+  // ── Rate limit status endpoint ─────────────────────────────────────────────
+  app.use("/api/ratelimit", adminAuthMiddleware, createRateLimitRouter());
 
   // ── Versioning lifecycle endpoint (#426) ───────────────────────────────────
   app.use("/api/versions", createVersionsRouter());
