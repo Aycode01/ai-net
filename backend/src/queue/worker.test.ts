@@ -1,17 +1,22 @@
-import Database from "better-sqlite3";
 import fs from "fs";
 import os from "os";
 import path from "path";
+// Real SQLite via the built-in `node:sqlite` driver: the default Jest project
+// maps the native `better-sqlite3` addon to an inert stub (see
+// backend/__mocks__/better-sqlite3.js), which cannot execute a claim, a
+// conditional UPDATE or a transaction, so this suite could never assert
+// anything. tests/support/betterSqlite3Shim.ts explains the trade-off.
+import { openSqliteDatabase } from "../../tests/support/betterSqlite3Shim";
 import { createJobStore, type JobStore, type Job } from "./jobStore";
 import { JobWorker } from "./worker";
 import { JobQueue } from "./index";
 
 describe("Background Job Queue & Worker", () => {
-  let db: Database.Database;
+  let db: ReturnType<typeof openSqliteDatabase>;
   let store: JobStore;
 
   beforeEach(() => {
-    db = new Database(":memory:");
+    db = openSqliteDatabase(":memory:");
     store = createJobStore(db);
   });
 
@@ -242,8 +247,8 @@ describe("Background Job Queue & Worker", () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-claim-"));
       const dbPath = path.join(dir, "jobs.sqlite");
 
-      const dbA = new Database(dbPath);
-      const dbB = new Database(dbPath);
+      const dbA = openSqliteDatabase(dbPath);
+      const dbB = openSqliteDatabase(dbPath);
       dbA.pragma("busy_timeout = 5000");
       dbB.pragma("busy_timeout = 5000");
 
@@ -274,8 +279,8 @@ describe("Background Job Queue & Worker", () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-claim-"));
       const dbPath = path.join(dir, "jobs.sqlite");
 
-      const dbA = new Database(dbPath);
-      const dbB = new Database(dbPath);
+      const dbA = openSqliteDatabase(dbPath);
+      const dbB = openSqliteDatabase(dbPath);
       dbA.pragma("busy_timeout = 5000");
       dbB.pragma("busy_timeout = 5000");
 
@@ -504,7 +509,7 @@ describe("Background Job Queue & Worker", () => {
         // handled exactly once: no job left behind, none run twice.
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-workers-"));
         const dbPath = path.join(dir, "jobs.sqlite");
-        const connections: Database.Database[] = [];
+        const connections: Array<ReturnType<typeof openSqliteDatabase>> = [];
         const workers: JobWorker[] = [];
         const handled = new Set<string>();
         let duplicateRuns = 0;
@@ -514,7 +519,7 @@ describe("Background Job Queue & Worker", () => {
 
         try {
           const now = new Date().toISOString();
-          const seeder = new Database(dbPath);
+          const seeder = openSqliteDatabase(dbPath);
           connections.push(seeder);
           const seedStore = createJobStore(seeder);
           for (let i = 0; i < TOTAL_JOBS; i++) {
@@ -524,7 +529,7 @@ describe("Background Job Queue & Worker", () => {
           }
 
           for (let w = 0; w < WORKER_COUNT; w++) {
-            const conn = new Database(dbPath);
+            const conn = openSqliteDatabase(dbPath);
             conn.pragma("busy_timeout = 5000");
             connections.push(conn);
 

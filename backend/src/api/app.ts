@@ -78,9 +78,9 @@ export interface AppOptions {
   /**
    * How long close() waits for in-flight jobs to finish before closing the
    * HTTP/WS server anyway. Default: 10000 (10s). A job still running when
-   * this elapses is left in the queue's "active" state — the next worker
-   * start (see JobWorker.start()/recoverIncompleteJobs()) resets it to
-   * "pending" and retries it, rather than losing the work.
+   * this elapses is left in the queue's "active" state, but `JobWorker.stop()`
+   * releases the lease it held on it, so the next worker start reclaims it via
+   * `recoverIncompleteJobs()` and retries it rather than losing the work.
    */
   jobWorkerStopTimeoutMs?: number;
 }
@@ -138,6 +138,12 @@ export function createApp(opts: AppOptions = {}): {
     new JobWorker({
       jobStore: jobQueue.getStore(),
       handler: createTaskJobHandler(dispatch, releasePayment),
+      // Leases (#648): a claimed job stays owned for JOB_LEASE_TTL_MS unless
+      // this worker renews it every JOB_LEASE_HEARTBEAT_MS. Startup recovery
+      // only reclaims jobs whose lease has lapsed, so a second instance coming
+      // up alongside this one cannot re-queue work that is still running.
+      leaseTtlMs: config.JOB_LEASE_TTL_MS,
+      leaseHeartbeatMs: config.JOB_LEASE_HEARTBEAT_MS,
     });
   jobQueue.setWorker(jobWorker);
 

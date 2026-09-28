@@ -118,6 +118,22 @@ const envSchema = z.object({
   /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
   IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
 
+  // ── Background job queue leases (Issue #648) ─────────────────────────────────
+  /**
+   * How long a worker's claim on a job stays valid without a heartbeat, in
+   * milliseconds. Startup recovery only reclaims `active` jobs whose lease has
+   * expired, so a job a live worker is mid-flight on is never re-queued.
+   * Keep this comfortably above `JOB_LEASE_HEARTBEAT_MS` — the default is three
+   * times the heartbeat interval, so a single late heartbeat cannot make a
+   * running job look abandoned.
+   */
+  JOB_LEASE_TTL_MS: z.coerce.number().int().positive().default(30_000),
+  /**
+   * How often a running worker renews the leases on the jobs it owns, in
+   * milliseconds. Default: 10 s (a third of the default TTL).
+   */
+  JOB_LEASE_HEARTBEAT_MS: z.coerce.number().int().positive().default(10_000),
+
   WS_MAX_CONNECTIONS_PER_CLIENT: z.coerce.number().int().positive().default(5),
   WS_MAX_MESSAGES_PER_MINUTE: z.coerce.number().int().positive().default(100),
   WS_INACTIVITY_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),

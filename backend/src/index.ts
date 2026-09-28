@@ -128,10 +128,11 @@ export interface GracefulShutdownExtras {
  *
  * In-flight tasks are drained (via `closeApp`, which awaits the job
  * worker's stop()) rather than force-failed: anything still running when
- * the drain window elapses stays "active" in the job store and is resumed
- * by the next `JobWorker.start()` (`recoverIncompleteJobs()` resets it to
- * "pending" for retry) — see `docs/e2e-testing.md` and
- * `tests/shutdown.test.ts` for the restart-mid-stream scenario.
+ * the drain window elapses stays "active" in the job store with its lease
+ * released, and is resumed by the next `JobWorker.start()`
+ * (`recoverIncompleteJobs()` reclaims active rows whose lease has expired) —
+ * see `docs/e2e-testing.md` and `tests/shutdown.test.ts` for the
+ * restart-mid-stream scenario.
  */
 export function setupGracefulShutdown(
   httpServer: any,
