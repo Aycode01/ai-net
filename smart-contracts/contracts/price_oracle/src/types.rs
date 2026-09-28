@@ -32,10 +32,20 @@ pub struct PriceResult {
 pub enum DataKey {
     /// Singleton admin address (Instance storage).
     Admin,
+    /// Whether contract is paused (Instance storage).
+    Paused,
     /// Maximum age in seconds before a price is considered stale (Instance storage).
     MaxPriceAge,
     /// Price entry for a given asset pair (Persistent storage).
     Price(Symbol),
+}
+
+/// Event emitted when admin is transferred.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminChangedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
 }
 
 /// Event emitted when a new price is submitted.

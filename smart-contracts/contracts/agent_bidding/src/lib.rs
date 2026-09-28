@@ -125,6 +125,18 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
     Ok(admin)
 }
 
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::ContractPaused);
+    }
+    Ok(())
+}
+
 /// Extend TTL for a single persistent key, but only when it exists.
 fn extend_ttl_for_key(env: &Env, key: &DataKey) {
     if env.storage().persistent().has(key) {

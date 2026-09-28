@@ -304,3 +304,55 @@ pub struct CallerActivity {
     /// Timestamp of this caller's most recent audited operation.
     pub last_seen: u64,
 }
+
+// ─── On-chain reputation (issue #244) ──────────────────────────────────────
+
+/// Stored reputation record for one agent.
+///
+/// `score` is a fixed-point integer: `REPUTATION_SCALE` (1_000_000) == 100%.
+/// All arithmetic uses `u128` intermediates and saturates on overflow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationScore {
+    /// Agent this score belongs to.
+    pub agent_id: Symbol,
+    /// Weighted score in fixed-point (`REPUTATION_SCALE` == 100%).
+    pub score: u64,
+    /// Ledger timestamp of the last update or decay application.
+    pub last_updated: u64,
+}
+
+/// Tunable lazy-decay schedule (instance storage).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationConfig {
+    /// Percentage lost per epoch, [0, 100].
+    pub decay_pct: u32,
+    /// Epoch length in seconds. Must be > 0.
+    pub epoch_secs: u64,
+}
+
+/// Per-task component scores supplied by the coordinator.
+/// Each field is a percentage [0, 100]; out-of-range values are clamped.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationInput {
+    /// Task success rate [0, 100]. Weight: 40%.
+    pub success_rate: u32,
+    /// Response quality score [0, 100]. Weight: 30%.
+    pub quality: u32,
+    /// Uptime score [0, 100]. Weight: 20%.
+    pub uptime: u32,
+    /// Price fairness score [0, 100]. Weight: 10%.
+    pub price_fairness: u32,
+}
+
+/// One item of a batch reputation update.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationUpdate {
+    /// Agent to update.
+    pub agent_id: Symbol,
+    /// Component scores for this agent.
+    pub input: ReputationInput,
+}

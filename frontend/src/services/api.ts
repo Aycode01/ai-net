@@ -123,17 +123,9 @@ export const apiClient = {
 };
 
 export const getStats = async (): Promise<NetworkStats> => {
-  return apiClient.get<NetworkStats>('/api/stats');
-};
-
-export const getRecentTasks = async (walletAddress: string): Promise<TaskResponse[]> => {
-  return apiClient.get<TaskResponse[]>(`/api/wallets/${walletAddress}/tasks?limit=5`);
+  return apiClient.get<NetworkStats>('/api/stats/stats');
 };
 
 export const getAgents = async (): Promise<AgentRecord[]> => {
   return apiClient.get<AgentRecord[]>('/api/agents');
-};
-
-export const getAgentReputation = async (id: string): Promise<import('../types/agent').AgentReputation> => {
-  return apiClient.get<import('../types/agent').AgentReputation>(`/api/agents/${id}/reputation`);
 };
