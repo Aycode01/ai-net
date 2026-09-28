@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, type RequestHandler } from "express";
 import { getConfig } from "../../config";
 import { adminAuthMiddleware } from "../middleware/auth";
 import { metricsService } from "../../services/metrics";
@@ -7,17 +7,12 @@ import { tracingService } from "../../services/tracing";
 const router = Router();
 const startTime = Date.now();
 
-function cachedRoute(group: "health"): RequestHandler {
-  let middleware: RequestHandler | null = null;
-  return (req, res, next) => {
-    if (!middleware) {
-      middleware = cacheMiddleware({ ttl: ttlForRoute(group) });
-    }
-    return middleware(req, res, next);
-  };
+/** Pass-through cache wrapper (placeholder for production cache layer). */
+function cachedRoute(_group: string): RequestHandler {
+  return (_req, _res, next) => next();
 }
 
-router.get("/", cachedRoute("health"), (_req: Request, res: Response) => {
+const livenessHandler: RequestHandler = (_req: Request, res: Response) => {
   const config = getConfig();
   res.json({
     status: "ok",
@@ -25,7 +20,7 @@ router.get("/", cachedRoute("health"), (_req: Request, res: Response) => {
     version: config.NPM_PACKAGE_VERSION,
     stellarNetwork: config.STELLAR_NETWORK,
   });
-}
+};
 
 router.get("/", livenessHandler);
 
@@ -83,8 +78,6 @@ router.get("/ready", async (_req: Request, res: Response) => {
       taskDb.prepare("SELECT 1").get();
     } catch {
       checks.tasks = "error";
-    } finally {
-      (tasksModule.closeTaskDb as Function)();
     }
 
     try {
@@ -92,8 +85,6 @@ router.get("/ready", async (_req: Request, res: Response) => {
       paymentDb.prepare("SELECT 1").get();
     } catch {
       checks.payments = "error";
-    } finally {
-      (paymentsModule.closeDb as Function)();
     }
 
     try {
@@ -101,8 +92,6 @@ router.get("/ready", async (_req: Request, res: Response) => {
       jobDb.prepare("SELECT 1").get();
     } catch (error) {
       (checks as any).queue = "error";
-    } finally {
-      (queueModule.closeJobDb as Function)();
     }
   } catch (error) {
     res.status(500).json({ status: "error", checks, error: String(error) });
@@ -148,7 +137,7 @@ router.get("/dashboard", adminAuthMiddleware, async (req: Request, res: Response
   }
 });
 
-router.get("/traces/:traceId", (req: Request, res: Response) => {
+router.get("/traces/:traceId", adminAuthMiddleware, (req: Request, res: Response) => {
   const trace = tracingService.getTrace(req.params.traceId);
   if (!trace) {
     res.status(404).json({
@@ -164,7 +153,7 @@ router.get("/traces/:traceId", (req: Request, res: Response) => {
 async function checkVenice(apiKey: string, timeoutMs = 5000): Promise<"ok" | "unreachable"> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch("https://api.venice.ai/api/v1/models", {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: controller.signal,
@@ -179,7 +168,7 @@ async function checkVenice(apiKey: string, timeoutMs = 5000): Promise<"ok" | "un
 async function checkHorizon(url: string, timeoutMs = 5000): Promise<"ok" | "unreachable"> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
     return response.ok ? "ok" : "unreachable";

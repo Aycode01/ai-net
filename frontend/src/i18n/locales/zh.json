@@ -313,6 +313,7 @@
   "a11y.loadingDashboard": "正在加载仪表板",
   "a11y.loadingWallet": "正在加载钱包",
   "a11y.loadingAgentRegistry": "正在加载智能体注册表",
+  "a11y.loadingPage": "正在加载页面",
   "a11y.languageSwitcher": "语言",
   "a11y.switchToLanguage": "切换到{{language}}",
   "a11y.filterByCapability": "按能力筛选",

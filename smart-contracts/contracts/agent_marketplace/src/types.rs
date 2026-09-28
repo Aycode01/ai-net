@@ -96,14 +96,10 @@ pub struct ServiceCancelledEvent {
     pub refund_amount: i128,
 }
 
-/// Event data for a completed booking being rated (issue #486).
+/// Event emitted when admin is transferred.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct ServiceRatedEvent {
-    /// Booking that was rated.
-    pub booking_id: Symbol,
-    /// Agent whose aggregate rating was updated.
-    pub agent_id: Symbol,
-    /// Rating applied (1–5).
-    pub rating: u32,
+pub struct AdminChangedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
 }

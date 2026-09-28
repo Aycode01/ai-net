@@ -21,8 +21,14 @@ const envSchema = z.object({
   SOROBAN_RPC_URL: z.string().url().default("https://soroban-testnet.stellar.org"),
   REGISTRY_CONTRACT_ID: z.string().optional(),
   VENICE_API_KEY: z.string().min(1, "VENICE_API_KEY is required"),
+  // Filesystem path to the SQLite database that holds the ai-net schema.
+  // Applied by `npm run db:migrate`, which resolves it via
+  // `resolveDatabasePath()` in src/db/index.ts.
   VENICE_BASE_URL: z.string().url().default("https://api.venice.ai/api/v1"),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required").default("./data/ai-net.db"),
+  // Overrides the location of the versioned migration files. Only needed when
+  // migrations are kept outside the repository's `src/db/migrations` folder.
+  DB_MIGRATIONS_DIR: z.string().optional(),
   STELLAR_COORDINATOR_SECRET: z.string().optional(),
   STELLAR_TEST_SECRET: z.string().optional(),
   ALLOWED_ORIGINS: z.string().default("http://localhost:3000"),
@@ -78,6 +84,40 @@ const envSchema = z.object({
   ERROR_REGISTRY_MAINTENANCE_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   ERROR_REGISTRY_CAP_PER_AGENT: z.coerce.number().int().positive().default(100),
 
+  // ── Event store retention & compaction (Issue #383) ─────────────────────────
+  /**
+   * On-disk path for the append-only event store.  A file path is required for
+   * the retention job to be meaningful — with `:memory:` the whole event log is
+   * discarded on restart, so there is nothing to archive or compact.
+   */
+  EVENT_STORE_PATH: z.string().default("./data/events.db"),
+  /**
+   * Retention window in days.  Events belonging to a *finished* task whose most
+   * recent event is older than this are archived and then purged from the live
+   * `task_events` table.  Days (not row counts) because the boundary is task
+   * age, not table pressure.
+   */
+  EVENT_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
+  /** How often the compaction pass runs, in milliseconds. */
+  EVENT_COMPACTION_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
+  /**
+   * Maximum number of tasks compacted per pass.  Bounds the work (and therefore
+   * the writer-lock hold time) of a single tick so the live event path is not
+   * starved by a large backlog.
+   */
+  EVENT_COMPACTION_BATCH_TASKS: z.coerce.number().int().positive().default(50),
+  /** Master switch for the retention job.  Also disabled when NODE_ENV=test. */
+  EVENT_COMPACTION_ENABLED: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .default("true"),
+
+  // ── Idempotency store (Issue #657) ───────────────────────────────────────────
+  /** How long idempotency keys are retained before they can be replayed. Default: 24 h. */
+  IDEMPOTENCY_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
+  IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
+
   WS_MAX_CONNECTIONS_PER_CLIENT: z.coerce.number().int().positive().default(5),
   WS_MAX_MESSAGES_PER_MINUTE: z.coerce.number().int().positive().default(100),
   WS_INACTIVITY_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
@@ -127,6 +167,10 @@ function withRuntimeDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     nodeEnv === "test"
       ? {
           DATABASE_URL: ":memory:",
+          // Keep the event store off the filesystem under test, mirroring
+          // DATABASE_URL. Tests that need real persistence pass an explicit
+          // path to createEventStore() instead.
+          EVENT_STORE_PATH: ":memory:",
           VENICE_API_KEY: "test-venice-key",
           LOG_LEVEL: "silent",
         }

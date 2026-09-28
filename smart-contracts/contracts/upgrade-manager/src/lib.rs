@@ -199,14 +199,51 @@ fn get_current_version(env: &Env) -> Option<ContractVersion> {
     env.storage().persistent().get(&DataKey::CurrentVersion)
 }
 
-/// Returns `true` when `proposed` sorts strictly after `current`.
-///
-/// [`String`] implements `Ord` via the host's lexicographic byte comparison,
-/// which works identically natively and under `wasm32v1-none`. Version tags are
-/// therefore compared as byte strings, matching the ordering the registry has
-/// always used.
+fn parse_version_tuple(s: &soroban_sdk::String) -> (u32, u32, u32) {
+    let len = s.len() as usize;
+    if len == 0 || len > strutil::MAX_TAG_LEN {
+        return (0, 0, 0);
+    }
+    let mut buf = [0u8; strutil::MAX_TAG_LEN];
+    s.copy_into_slice(&mut buf[..len]);
+    let bytes = &buf[..len];
+
+    let mut parts = [0u32; 3];
+    let mut idx = 0;
+    let mut current_num: u32 = 0;
+    let mut has_digit = false;
+
+    for &b in bytes {
+        if b.is_ascii_digit() {
+            current_num = current_num.saturating_mul(10).saturating_add((b - b'0') as u32);
+            has_digit = true;
+        } else if b == b'.' {
+            if idx < 3 {
+                parts[idx] = if has_digit { current_num } else { 0 };
+                idx += 1;
+            }
+            current_num = 0;
+            has_digit = false;
+        } else {
+            break;
+        }
+    }
+    if idx < 3 && has_digit {
+        parts[idx] = current_num;
+    }
+
+    (parts[0], parts[1], parts[2])
+}
+
+/// Returns `true` when `proposed` is semantically newer than `current`.
 fn is_version_newer(current: &String, proposed: &String) -> bool {
-    proposed > current
+    let t_curr = parse_version_tuple(current);
+    let t_prop = parse_version_tuple(proposed);
+    if t_prop != (0, 0, 0) || t_curr != (0, 0, 0) {
+        t_prop > t_curr
+    } else {
+        proposed > current
+    }
 }
 
 // ─── Contract Implementation ─────────────────────────────────────────────────

@@ -275,6 +275,18 @@ fn set_admin_changes_admin() {
 }
 
 #[test]
+fn clear_multisig_config_negative_auth() {
+    let (env, client, admin) = setup_with_admin();
+    let admins = soroban_sdk::vec![&env, admin.clone()];
+    client.set_multisig_config(&admin, &admins, &1, &0);
+    assert!(client.get_multisig_config().is_some());
+
+    let intruder = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert!(client.try_clear_multisig_config(&intruder).is_err());
+}
+
+#[test]
 fn set_admin_requires_admin_auth() {
     let env = Env::default();
     let contract_id = env.register(AgentRegistryContract, ());
@@ -1147,7 +1159,7 @@ fn slash_bond_reduces_bond_amount() {
     let owner = Address::generate(&env);
     client.register_agent(&make_record(&env, "slashme", "research", owner));
 
-    client.slash_bond(&Symbol::new(&env, "slashme"), &10_000_000_i128);
+    client.slash_bond_amount(&Symbol::new(&env, "slashme"), &10_000_000_i128);
 
     let agents = client.lookup_agents(&Symbol::new(&env, "research"));
     let remaining = agents.get(0).unwrap().bond_amount;
@@ -1160,7 +1172,7 @@ fn slash_bond_floors_at_zero() {
     let owner = Address::generate(&env);
     client.register_agent(&make_record(&env, "floor_agent", "research", owner));
 
-    client.slash_bond(
+    client.slash_bond_amount(
         &Symbol::new(&env, "floor_agent"),
         &(DEFAULT_MIN_BOND_STROOPS + 999_i128),
     );
@@ -1175,11 +1187,11 @@ fn double_slash_does_not_go_negative() {
     let owner = Address::generate(&env);
     client.register_agent(&make_record(&env, "double_slash", "research", owner));
 
-    client.slash_bond(
+    client.slash_bond_amount(
         &Symbol::new(&env, "double_slash"),
         &(DEFAULT_MIN_BOND_STROOPS + 1_i128),
     );
-    client.slash_bond(&Symbol::new(&env, "double_slash"), &1_000_000_i128);
+    client.slash_bond_amount(&Symbol::new(&env, "double_slash"), &1_000_000_i128);
 
     let agents = client.lookup_agents(&Symbol::new(&env, "research"));
     assert_eq!(agents.get(0).unwrap().bond_amount, 0);
@@ -1189,7 +1201,7 @@ fn double_slash_does_not_go_negative() {
 fn slash_bond_on_missing_agent_returns_not_found() {
     let (_env, client, _admin) = setup_with_admin();
     assert_eq!(
-        client.try_slash_bond(&Symbol::new(&_env, "ghost"), &1_000_i128),
+        client.try_slash_bond_amount(&Symbol::new(&_env, "ghost"), &1_000_i128),
         Err(Ok(Error::NotFound))
     );
 }
@@ -1207,7 +1219,7 @@ fn slash_bond_requires_admin() {
     client.register_agent(&make_record(&env, "protected", "research", owner));
 
     env.mock_auths(&[]);
-    let result = client.try_slash_bond(&Symbol::new(&env, "protected"), &1_000_i128);
+    let result = client.try_slash_bond_amount(&Symbol::new(&env, "protected"), &1_000_i128);
     assert!(result.is_err());
 }
 
@@ -2505,4 +2517,334 @@ fn error_mapper_propagation_consistency() {
     let common = client.error_mapper(&already_exists_code);
     assert!(common.is_some());
     assert_eq!(common.unwrap(), CommonExitCode::AlreadyExists);
+}
+
+// ── On-chain reputation (issue #244) ─────────────────────────────────────────
+
+fn full_reputation_input() -> ReputationInput {
+    ReputationInput {
+        success_rate: 100,
+        quality: 100,
+        uptime: 100,
+        price_fairness: 100,
+    }
+}
+
+fn register_reputation_agent(
+    env: &Env,
+    client: &AgentRegistryContractClient<'static>,
+    id: &str,
+) -> Symbol {
+    let owner = Address::generate(env);
+    let record = make_record(env, id, "research", owner);
+    client.register_agent(&record);
+    record.id.clone()
+}
+
+/// Count emitted events whose topic[1] equals `action`.
+fn count_events_with_action(env: &Env, action: Symbol) -> u32 {
+    let events = env.events().all();
+    let mut count = 0u32;
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        let t1 = Symbol::from_val(env, &topics.get(1).unwrap());
+        if t1 == action {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[test]
+fn reputation_perfect_score_is_full_scale() {
+    let (env, client, admin) = setup_with_admin();
+    let agent = register_reputation_agent(&env, &client, "rep1");
+
+    let score = client.update_reputation(&admin, &agent, &full_reputation_input());
+    assert_eq!(score, REPUTATION_SCALE);
+
+    let stored = client.get_reputation(&agent);
+    assert_eq!(stored.agent_id, agent);
+    assert_eq!(stored.score, REPUTATION_SCALE);
+    assert_eq!(stored.last_updated, env.ledger().timestamp());
+
+    // register_agent emits 2 events; update emits (registry, rep_upd) at idx 2.
+    assert_event_topics(
+        &env,
+        2,
+        Symbol::new(&env, "registry"),
+        symbol_short!("rep_upd"),
+    );
+}
+
+#[test]
+fn reputation_weighted_formula() {
+    let (_env, client, admin) = setup_with_admin();
+    let agent = register_reputation_agent(&_env, &client, "repw");
+
+    // 40% success only.
+    let input = ReputationInput {
+        success_rate: 100,
+        quality: 0,
+        uptime: 0,
+        price_fairness: 0,
+    };
+    assert_eq!(client.update_reputation(&admin, &agent, &input), 400_000);
+
+    // 30% quality only.
+    let input = ReputationInput {
+        success_rate: 0,
+        quality: 100,
+        uptime: 0,
+        price_fairness: 0,
+    };
+    assert_eq!(client.update_reputation(&admin, &agent, &input), 300_000);
+
+    // 20% uptime only.
+    let input = ReputationInput {
+        success_rate: 0,
+        quality: 0,
+        uptime: 100,
+        price_fairness: 0,
+    };
+    assert_eq!(client.update_reputation(&admin, &agent, &input), 200_000);
+
+    // 10% price fairness only.
+    let input = ReputationInput {
+        success_rate: 0,
+        quality: 0,
+        uptime: 0,
+        price_fairness: 100,
+    };
+    assert_eq!(client.update_reputation(&admin, &agent, &input), 100_000);
+
+    // Even split.
+    let input = ReputationInput {
+        success_rate: 50,
+        quality: 50,
+        uptime: 50,
+        price_fairness: 50,
+    };
+    assert_eq!(client.update_reputation(&admin, &agent, &input), 500_000);
+}
+
+#[test]
+fn reputation_inputs_clamped_to_percent_scale() {
+    let (_env, client, admin) = setup_with_admin();
+    let agent = register_reputation_agent(&_env, &client, "repc");
+
+    // Out-of-range components clamp to 100: score saturates at full scale.
+    let input = ReputationInput {
+        success_rate: 150,
+        quality: 200,
+        uptime: 300,
+        price_fairness: 400,
+    };
+    assert_eq!(
+        client.update_reputation(&admin, &agent, &input),
+        REPUTATION_SCALE
+    );
+}
+
+#[test]
+fn reputation_zero_inputs_score_zero() {
+    let (_env, client, admin) = setup_with_admin();
+    let agent = register_reputation_agent(&_env, &client, "repz");
+
+    let input = ReputationInput {
+        success_rate: 0,
+        quality: 0,
+        uptime: 0,
+        price_fairness: 0,
+    };
+    assert_eq!(client.update_reputation(&admin, &agent, &input), 0);
+}
+
+#[test]
+fn reputation_unknown_agent_is_not_found() {
+    let (env, client, admin) = setup_with_admin();
+    let ghost = Symbol::new(&env, "ghost");
+    assert_eq!(
+        client.try_update_reputation(&admin, &ghost, &full_reputation_input()),
+        Err(Ok(Error::NotFound))
+    );
+    assert_eq!(client.try_get_reputation(&ghost), Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn reputation_lazy_decay_preserves_epoch_remainder() {
+    let (env, client, admin) = setup_with_admin();
+    let t0 = 1_700_000_000u64;
+    env.ledger().set_timestamp(t0);
+    let agent = register_reputation_agent(&env, &client, "repd");
+    client.update_reputation(&admin, &agent, &full_reputation_input());
+
+    // Advance 2 full epochs plus a remainder: only 2 decays apply.
+    env.ledger()
+        .set_timestamp(t0 + 2 * DEFAULT_EPOCH_SECS + 1_000);
+    let record = client.get_reputation(&agent);
+    // 1_000_000 -> 950_000 -> 902_500 at the 5% default.
+    assert_eq!(record.score, 902_500);
+    // last_updated advances by whole epochs only — no drift.
+    assert_eq!(record.last_updated, t0 + 2 * DEFAULT_EPOCH_SECS);
+
+    assert_event_topics(
+        &env,
+        env.events().all().len() - 1,
+        Symbol::new(&env, "registry"),
+        symbol_short!("rep_dec"),
+    );
+
+    // A second read with no further time passing changes nothing.
+    let before = env.events().all().len();
+    let record2 = client.get_reputation(&agent);
+    assert_eq!(record2, record);
+    assert_eq!(env.events().all().len(), before);
+}
+
+#[test]
+fn reputation_decay_caps_iterations_on_dormant_agents() {
+    let (env, client, admin) = setup_with_admin();
+    let t0 = 1_700_000_000u64;
+    env.ledger().set_timestamp(t0);
+    let agent = register_reputation_agent(&env, &client, "repold");
+    client.update_reputation(&admin, &agent, &full_reputation_input());
+
+    // 250 dormant epochs: score collapses to 0 instead of looping 250 times.
+    env.ledger().set_timestamp(t0 + 250 * DEFAULT_EPOCH_SECS);
+    let record = client.get_reputation(&agent);
+    assert_eq!(record.score, 0);
+    assert_eq!(record.last_updated, t0 + 250 * DEFAULT_EPOCH_SECS);
+}
+
+#[test]
+fn reputation_custom_config_is_honored() {
+    let (env, client, admin) = setup_with_admin();
+    client.set_reputation_config(&10, &86_400);
+    let config = client.get_reputation_config();
+    assert_eq!(config.decay_pct, 10);
+    assert_eq!(config.epoch_secs, 86_400);
+
+    let t0 = 1_700_000_000u64;
+    env.ledger().set_timestamp(t0);
+    let agent = register_reputation_agent(&env, &client, "repcfg");
+    client.update_reputation(&admin, &agent, &full_reputation_input());
+
+    env.ledger().set_timestamp(t0 + 86_400);
+    let record = client.get_reputation(&agent);
+    assert_eq!(record.score, 900_000);
+}
+
+#[test]
+fn reputation_config_rejects_invalid_values() {
+    let (_env, client, _admin) = setup_with_admin();
+    // Zero-length epochs would divide by zero on read.
+    assert_eq!(
+        client.try_set_reputation_config(&5, &0),
+        Err(Ok(Error::InvalidConfig))
+    );
+    // Decay above 100% is meaningless.
+    assert_eq!(
+        client.try_set_reputation_config(&101, &604_800),
+        Err(Ok(Error::InvalidConfig))
+    );
+}
+
+#[test]
+fn reputation_batch_update_is_atomic() {
+    let (env, client, admin) = setup_with_admin();
+    let a1 = register_reputation_agent(&env, &client, "repb1");
+    let a2 = register_reputation_agent(&env, &client, "repb2");
+    let ghost = Symbol::new(&env, "ghost");
+
+    let mut updates = Vec::new(&env);
+    updates.push_back(ReputationUpdate {
+        agent_id: a1.clone(),
+        input: full_reputation_input(),
+    });
+    updates.push_back(ReputationUpdate {
+        agent_id: ghost,
+        input: full_reputation_input(),
+    });
+    updates.push_back(ReputationUpdate {
+        agent_id: a2.clone(),
+        input: full_reputation_input(),
+    });
+
+    let results = client.batch_update_reputation(&admin, &updates);
+    assert_eq!(results.len(), 3);
+    assert_eq!(results.get(0).unwrap(), BatchResult::Ok(a1.clone()));
+    assert_eq!(
+        results.get(1).unwrap(),
+        BatchResult::Err(Error::NotFound as u32)
+    );
+    assert_eq!(results.get(2).unwrap(), BatchResult::Ok(a2.clone()));
+
+    // Atomicity: the unknown agent aborts every write — no rep_upd events.
+    assert_eq!(count_events_with_action(&env, symbol_short!("rep_upd")), 0);
+
+    // All-known batch commits every item.
+    let mut good = Vec::new(&env);
+    good.push_back(ReputationUpdate {
+        agent_id: a1.clone(),
+        input: full_reputation_input(),
+    });
+    good.push_back(ReputationUpdate {
+        agent_id: a2.clone(),
+        input: full_reputation_input(),
+    });
+    let results = client.batch_update_reputation(&admin, &good);
+    assert_eq!(results.len(), 2);
+    assert_eq!(count_events_with_action(&env, symbol_short!("rep_upd")), 2);
+    assert_eq!(client.get_reputation(&a1).score, REPUTATION_SCALE);
+    assert_eq!(client.get_reputation(&a2).score, REPUTATION_SCALE);
+}
+
+#[test]
+fn reputation_coordinator_can_update_without_admin_keys() {
+    let (env, client, admin) = setup_with_admin();
+    let agent = register_reputation_agent(&env, &client, "repcoord");
+    let coordinator = Address::generate(&env);
+    client.set_coordinator(&coordinator);
+    assert_eq!(client.get_coordinator(), Some(coordinator.clone()));
+
+    // Coordinator writes succeed.
+    let score = client.update_reputation(&coordinator, &agent, &full_reputation_input());
+    assert_eq!(score, REPUTATION_SCALE);
+
+    // Admin fallback still works after a coordinator is set.
+    let score = client.update_reputation(&admin, &agent, &full_reputation_input());
+    assert_eq!(score, REPUTATION_SCALE);
+
+    // An unrelated third party is rejected by the storage check.
+    let stranger = Address::generate(&env);
+    assert_eq!(
+        client.try_update_reputation(&stranger, &agent, &full_reputation_input()),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn reputation_non_admin_cannot_set_coordinator() {
+    let env = Env::default();
+    let contract_id = env.register(AgentRegistryContract, ());
+    let client = AgentRegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    env.mock_auths(&[]);
+    let result = client.try_set_coordinator(&Address::generate(&env));
+    assert!(result.is_err());
+}
+
+#[test]
+fn reputation_paused_contract_blocks_updates() {
+    let (env, client, admin) = setup_with_admin();
+    let agent = register_reputation_agent(&env, &client, "reppaused");
+    client.pause();
+    assert_eq!(
+        client.try_update_reputation(&admin, &agent, &full_reputation_input()),
+        Err(Ok(Error::ContractPaused))
+    );
 }

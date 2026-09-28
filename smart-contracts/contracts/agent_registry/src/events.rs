@@ -28,17 +28,11 @@
 //! | `resolve_errors`    | `error_resolved`   | `error_id`, `resolution` — one event per resolved error  |
 //! | `pause`             | `paused`           | `()`                                                     |
 //! | `unpause`           | `unpaused`         | `()`                                                     |
-//! | `freeze_agent`      | `freeze` + `frz_upd` | `agent_id` (freeze), `AgentFrozen` (frz_upd)           |
-//! | `unfreeze_agent`    | `unfreeze` + `frz_upd` | `agent_id` (unfreeze), `AgentResumed` (frz_upd)      |
-//! | `update_pricing`    | `price_upd`        | `(agent_id, new_price)`                                  |
-//! | `set_multisig_config` | `msig_set`       | `MultisigConfigSetEvent`                                 |
-//! | `set_min_bond`      | `minbond`          | `MinBondSetEvent`                                        |
-//! | `set_error_ttl`     | `errttl`           | `ErrorTtlSetEvent`                                       |
-//! | `cleanup_expired_errors` | `errcln`      | `ErrorsCleanedEvent` (when ≥1 removed)                   |
-//! | `set_gas_config`    | `gas_cfg`          | `GasConfigSetEvent`                                      |
-//! | `set_storage_config` | `store_cfg`       | `StorageConfigSetEvent`                                  |
-//! | `execute_operation` (SetGasConfig) | `gcfg_set` | `GasConfigUpdatedEvent`                        |
-//! | `execute_operation` (SetMultisigConfig) | `msig_upd` | `MultisigConfigUpdatedEvent`                   |
+//! | `freeze_agent`    | `freeze`           | `agent_id`                                               |
+//! | `unfreeze_agent`  | `unfreeze`         | `agent_id`                                               |
+//! | `update_pricing`  | `price_upd`        | `(agent_id, new_price)`                                  |
+//! | `update_reputation` / `batch_update_reputation` | `rep_upd` | `agent_id`, `score`, `updated_at`            |
+//! | `get_reputation` (epochs elapsed) | `rep_dec` | `agent_id`, `old_score`, `new_score`, `epochs` |
 
 use crate::{AnomalyKind, TargetChain};
 use soroban_sdk::{contracttype, Address, BytesN, String, Symbol, Vec};
@@ -327,6 +321,47 @@ pub struct BondSlashed {
     pub penalty_stroops: i128,
     /// Remaining bond balance after the slash (≥ 0).
     pub remaining_stroops: i128,
+    /// Policy or dispute reason supplied by the administrator.
+    pub reason: String,
+}
+
+/// Data payload for `(registry, bond_dep)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondDeposited {
+    pub agent_id: Symbol,
+    pub owner: Address,
+    pub amount_stroops: i128,
+    pub total_stroops: i128,
+}
+
+/// Data payload for `(registry, bond_init)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondReturnInitiated {
+    pub agent_id: Symbol,
+    pub owner: Address,
+    pub amount_stroops: i128,
+    pub expiry_ledger: u32,
+}
+
+/// Data payload for `(registry, bond_clm)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondClaimed {
+    pub agent_id: Symbol,
+    pub owner: Address,
+    pub amount_stroops: i128,
+}
+
+/// Data payload for `(registry, bond_rwd)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondRewarded {
+    pub agent_id: Symbol,
+    pub amount_stroops: i128,
+    pub total_stroops: i128,
+    pub admin: Address,
 }
 
 /// Data payload for `(registry, bond_ret)`.
@@ -539,6 +574,40 @@ pub struct AuditLogEntryEvent {
     pub amount_stroops: i128,
     /// Whether the operation crossed the high-value threshold.
     pub high_value: bool,
+}
+
+// ─── On-chain reputation events (issue #244) ─────────────────────────────────
+
+/// Data payload for `(registry, rep_upd)`.
+///
+/// Published by `update_reputation` and once per committed item of
+/// `batch_update_reputation`. `score` is fixed-point (`1_000_000` == 100%).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReputationUpdated {
+    /// Agent that was scored.
+    pub agent_id: Symbol,
+    /// New score in fixed-point.
+    pub score: u64,
+    /// Ledger timestamp the score was written.
+    pub updated_at: u64,
+}
+
+/// Data payload for `(registry, rep_dec)`.
+///
+/// Published by `get_reputation` when whole epochs elapsed since
+/// `last_updated` and lazy decay was applied on read.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReputationDecayed {
+    /// Agent whose score decayed.
+    pub agent_id: Symbol,
+    /// Score before decay.
+    pub old_score: u64,
+    /// Score after decay.
+    pub new_score: u64,
+    /// Whole epochs elapsed.
+    pub epochs: u64,
 }
 
 /// Emitted when an operation trips one of the anomaly checks.

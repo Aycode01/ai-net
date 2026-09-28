@@ -49,7 +49,7 @@ pub struct TaskMetadata {
 pub enum DataKey {
     /// Admin address — the only address permitted to call `set_oracle_manager`.
     Admin,
-    /// Current semantic contract version.
+    Paused,
     Version,
     /// Task metadata, keyed by task id.
     Task(BytesN<32>),
@@ -130,10 +130,7 @@ pub enum Error {
     NotInitialized = 11,
     Unauthorized = 12,
     UpgradeFailed = 13,
-    /// The contract is paused and cannot accept mutations.
     ContractPaused = 14,
-    /// An OracleManager is configured but no `price_pair` was supplied.
     MissingPricePair = 15,
-    /// The configured OracleManager returned no usable price for the pair.
     OraclePriceUnavailable = 16,
 }

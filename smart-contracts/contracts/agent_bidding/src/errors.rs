@@ -74,21 +74,16 @@ pub enum Error {
     AuctionNotAbortable = 25,
     /// An arithmetic operation overflowed while scoring bids.
     ArithmeticOverflow = 26,
-
-    // ── Missing from the failed merge of the pause/upgrade hardening (restored) ──
     /// Contract instance has already been initialized.
     AlreadyInitialized = 27,
-    /// The contract is paused and cannot accept mutations.
+    /// Contract is currently paused.
     ContractPaused = 28,
-    /// The auction is not in the `Reveal` phase yet when claiming a bid refund.
-    /// (Alias of `NotInRevealPhase`, kept as its own code for completeness.)
-    WinnerNotDeterminedDuplicate = 29,
-    /// The winning bidder cannot claim the losing-bidder refund path.
-    WinnerCannotClaimRefund = 30,
-    /// The bid bond has already been refunded via `claim_bid_refund`.
-    RefundAlreadyClaimed = 31,
-    /// The post-deadline claim window (`CLAIM_WINDOW_SECS`) has elapsed.
-    ClaimWindowExpired = 32,
-    /// The bond has already been refunded (idempotency guard for `claim_refund`).
-    AlreadyRefunded = 33,
+    /// Winner cannot claim refund via bond refund path.
+    WinnerCannotClaimRefund = 29,
+    /// Refund has already been claimed for this bidder.
+    RefundAlreadyClaimed = 30,
+    /// Claim window has expired.
+    ClaimWindowExpired = 31,
+    /// Bond has already been refunded.
+    AlreadyRefunded = 32,
 }

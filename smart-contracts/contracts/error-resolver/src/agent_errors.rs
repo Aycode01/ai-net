@@ -86,18 +86,6 @@ fn require_admin(env: &Env) -> Result<Address, ContractError> {
     Ok(admin)
 }
 
-fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    let paused: bool = env
-        .storage()
-        .instance()
-        .get(&DataKey::Paused)
-        .unwrap_or(false);
-    if paused {
-        return Err(ContractError::ContractPaused);
-    }
-    Ok(())
-}
-
 /// Authorizes a cross-contract caller against the allowlist.
 ///
 /// `caller.require_auth()` proves the address is genuinely the direct
@@ -203,7 +191,6 @@ impl ErrorResolverContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
             .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
@@ -454,7 +441,6 @@ impl ErrorResolverContract {
     /// Allowlists a contract address (e.g. agent-registry) to call
     /// `record_error` and `clear_agent_errors`. Admin only.
     pub fn add_authorized_caller(env: Env, caller: Address) -> Result<(), ContractError> {
-        require_not_paused(&env)?;
         require_admin(&env)?;
         let mut allowlist: Vec<Address> = env
             .storage()
@@ -473,7 +459,6 @@ impl ErrorResolverContract {
 
     /// Revokes a previously allowlisted caller. Admin only.
     pub fn remove_authorized_caller(env: Env, caller: Address) -> Result<(), ContractError> {
-        require_not_paused(&env)?;
         require_admin(&env)?;
         let allowlist: Vec<Address> = env
             .storage()
@@ -506,7 +491,6 @@ impl ErrorResolverContract {
     /// allowlisted contract (see `add_authorized_caller`) and must be the
     /// genuine direct invoker of this call.
     pub fn record_error(env: Env, caller: Address, agent_id: Symbol) -> Result<u32, ContractError> {
-        require_not_paused(&env)?;
         require_authorized_caller(&env, &caller)?;
         let key = DataKey::AgentErrorCount(agent_id.clone());
         let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
@@ -535,7 +519,6 @@ impl ErrorResolverContract {
         caller: Address,
         agent_id: Symbol,
     ) -> Result<(), ContractError> {
-        require_not_paused(&env)?;
         require_authorized_caller(&env, &caller)?;
         env.storage()
             .persistent()

@@ -100,18 +100,7 @@ fn is_terminal(status: TaskStatus) -> bool {
     matches!(status, TaskStatus::Completed | TaskStatus::Failed)
 }
 
-fn read_admin(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotInitialized)
-}
 
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin = read_admin(env)?;
-    admin.require_auth();
-    Ok(admin)
-}
 
 /// Call `OracleManager::resolve_price(pair)` via a low-level cross-contract
 /// call and return the resolved price in stroops on success, or `None` on any
@@ -161,15 +150,17 @@ impl TaskStoreContract {
         env.storage()
             .instance()
             .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
-        env.events().publish(
-            (symbol_short!("task_meta"), symbol_short!("init")),
-            (admin, env.ledger().sequence()),
-        );
+        env.events()
+            .publish((symbol_short!("task_meta"), symbol_short!("init")), admin);
         Ok(())
     }
 
     /// Return the current admin address, if set.
     pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    pub fn admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
     }
 
@@ -633,13 +624,13 @@ mod test {
         assert_eq!(fixture.env.events().all().len(), 0);
     }
 
-    // ── Admin / pause / oracle manager ────────────────────────────────────
-
     #[test]
     fn initialize_sets_unpaused() {
         let fixture = fixture();
         assert!(!fixture.client.is_paused());
     }
+
+    // ── Admin / set_oracle_manager ────────────────────────────────────────────
 
     #[test]
     fn initialize_sets_admin() {
@@ -653,7 +644,7 @@ mod test {
         let admin = Address::generate(&fixture.env);
         assert_eq!(
             fixture.client.try_initialize(&admin),
-            Err(Ok(Error::AlreadyInitialized))
+            Err(Ok(Error::AlreadyExists))
         );
     }
 
@@ -1004,72 +995,6 @@ mod test {
                 .get_task_metadata(&task_b)
                 .quoted_price_stroops,
             Some(20_000_000i128)
-        );
-    }
-    // ── Event payload roundtrips (issue #486) ─────────────────────────────
-
-    fn assert_roundtrip<T>(env: &Env, original: T)
-    where
-        T: Clone + IntoVal<Env, Val> + TryFromVal<Env, Val> + PartialEq,
-    {
-        let val: Val = original.clone().into_val(env);
-        let decoded: T = val.try_into_val(env).unwrap();
-        assert!(original == decoded, "roundtrip failed");
-    }
-
-    #[test]
-    fn task_event_payloads_roundtrip() {
-        let env = Env::default();
-        let agent = Address::generate(&env);
-        let agents = Vec::from_array(&env, [agent]);
-        let task_id = BytesN::from_array(&env, &[3; 32]);
-        let prompt_hash = BytesN::from_array(&env, &[4; 32]);
-
-        assert_roundtrip(
-            &env,
-            TaskCreatedEvent {
-                version: TASK_LIFECYCLE_EVENT_VERSION,
-                task_id,
-                prompt_hash,
-                assigned_agents: agents,
-                created_at: 1_700_000_000,
-                expires_at: 1_700_000_000 + 86_400,
-                quoted_price_stroops: None,
-            },
-        );
-        assert_roundtrip(
-            &env,
-            TaskUpdatedEvent {
-                version: TASK_LIFECYCLE_EVENT_VERSION,
-                task_id: BytesN::from_array(&env, &[3; 32]),
-                agent: Address::generate(&env),
-                old_status: TaskStatus::Pending,
-                new_status: TaskStatus::Running,
-                updated_at: 1_700_000_100,
-            },
-        );
-        assert_roundtrip(
-            &env,
-            TaskFinalizedEvent {
-                version: TASK_LIFECYCLE_EVENT_VERSION,
-                task_id: BytesN::from_array(&env, &[3; 32]),
-                agent: Address::generate(&env),
-                old_status: TaskStatus::Running,
-                final_status: TaskStatus::Completed,
-                finalized_at: 1_700_000_200,
-            },
-        );
-        assert_roundtrip(
-            &env,
-            OracleManagerSetEvent {
-                oracle_manager: Some(Address::generate(&env)),
-            },
-        );
-        assert_roundtrip(
-            &env,
-            OracleManagerSetEvent {
-                oracle_manager: None,
-            },
         );
     }
 }

@@ -250,8 +250,6 @@ pub enum DataKey {
     Admin,
     /// Whether the contract is paused.
     Paused,
-    /// Dedicated pause administrator (can pause, not unpause).
-    PauseAdmin,
     /// Current semantic contract version.
     Version,
     /// Stores the root [`Auction`] record for a task.
