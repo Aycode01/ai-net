@@ -28,6 +28,8 @@
 
 import Database from 'better-sqlite3';
 import { createLogger } from '../utils/logger';
+import { resolveDatabasePath, isInMemoryPath, openDatabase } from '../db/index';
+import type { Config } from '../config';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -229,13 +231,34 @@ let _defaultStore: IdempotencyStore | null = null;
 
 /**
  * Get or create the default singleton idempotency store.
+ *
+ * - In `test` environments the store uses an in-memory database (fast, no
+ *   disk I/O, isolated per test run).
+ * - In all other environments the store opens the same file-backed SQLite
+ *   database as the rest of the backend (resolved from `DB_PATH` /
+ *   `DATABASE_URL`), ensuring idempotency keys survive a process restart and
+ *   are shared when the same file is mounted by multiple processes.
+ *
  * The store is lazily initialised on first call.
  */
-export function getDefaultIdempotencyStore(): IdempotencyStore {
+export function getDefaultIdempotencyStore(config?: Pick<Config, 'NODE_ENV' | 'IDEMPOTENCY_TTL_MS' | 'IDEMPOTENCY_CLEANUP_MS'>): IdempotencyStore {
   if (!_defaultStore) {
-    _defaultStore = createIdempotencyStore(undefined, {
-      ttlMs: Number(process.env.IDEMPOTENCY_TTL_MS) || DEFAULT_TTL_MS,
-      cleanupIntervalMs: Number(process.env.IDEMPOTENCY_CLEANUP_MS) || DEFAULT_CLEANUP_MS,
+    const isTest = (config?.NODE_ENV ?? process.env.NODE_ENV) === 'test';
+
+    let db: Database.Database;
+    if (isTest) {
+      db = new Database(':memory:');
+    } else {
+      // Reuse the main application database file so idempotency keys survive
+      // restarts and are consistent across any replicas that share the same
+      // SQLite file (e.g. single-node deploys with a bind-mounted volume).
+      const dbPath = resolveDatabasePath();
+      db = isInMemoryPath(dbPath) ? new Database(':memory:') : openDatabase(dbPath);
+    }
+
+    _defaultStore = createIdempotencyStore(db, {
+      ttlMs: config?.IDEMPOTENCY_TTL_MS ?? Number(process.env.IDEMPOTENCY_TTL_MS) || DEFAULT_TTL_MS,
+      cleanupIntervalMs: config?.IDEMPOTENCY_CLEANUP_MS ?? Number(process.env.IDEMPOTENCY_CLEANUP_MS) || DEFAULT_CLEANUP_MS,
     });
   }
   return _defaultStore;
