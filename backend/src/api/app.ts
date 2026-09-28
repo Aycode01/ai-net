@@ -7,7 +7,7 @@
  * dispatch/queue, etc.) and by the server entry-point (`src/index.ts`).
  */
 
-import express, { Request, Response, NextFunction } from "express";
+import express, { Request, Response, NextFunction, Router } from "express";
 import { createServer, Server as HttpServer } from "http";
 import swaggerUi from "swagger-ui-express";
 
@@ -46,9 +46,10 @@ import { readOnlyMiddleware } from "./middleware/readOnly";
 import { requestId } from "./middleware/requestId";
 import { requestLogger } from "./middleware/requestLogger";
 import { versioningMiddleware } from "./middleware/versioning";
-import { getOpenapiJson, getOpenapiYaml, openapiSpec, swaggerUiOptions } from "./docs";
+import { getOpenapiJson, getOpenapiYaml, swaggerUiOptions } from "./docs";
 import { createAdminRouter, createAdminQueueRouter } from "./routes/admin";
 import { createFlagsRouter } from "./routes/flags";
+import { createRateLimitRouter } from "./routes/ratelimit";
 import { createVersionsRouter } from "./routes/versions";
 import { createV1TasksRouter } from "./routes/v1/tasks";
 import { createV2TasksRouter } from "./routes/v2/tasks";
@@ -95,9 +96,26 @@ function tryLoadStellarRelease(): StellarReleasePaymentFn | undefined {
   }
 }
 
+/**
+ * Routes that are selected per-request rather than mounted as sub-routers.
+ *
+ * The task endpoints dispatch on the negotiated `API-Version` header, so they
+ * live behind a dispatcher function and cannot be recovered by walking the
+ * Express router stack. They are published here so route-introspection tooling
+ * (the OpenAPI parity test) can see the same routers the server dispatches to,
+ * instead of re-deriving the mount path and re-instantiating the factories.
+ */
+export interface VersionDispatchedRoutes {
+  /** Path the dispatching middleware is mounted at. */
+  mountPath: string;
+  /** Every router the dispatcher can route to, for the given mount path. */
+  routers: Router[];
+}
+
 export function createApp(opts: AppOptions = {}): {
   httpServer: HttpServer;
   close: (callback?: () => void) => void;
+  versionDispatchedRoutes: VersionDispatchedRoutes;
 } {
   const config = getConfig();
   const logger = createLogger({ module: "api-app" });
@@ -173,15 +191,81 @@ export function createApp(opts: AppOptions = {}): {
   app.post("/api/agents/register", registerRateLimitMiddleware);
   app.use("/api/agents", agentsRouter);
 
+  // ── Rate limit introspection (Issue #499) ─────────────────────────────────
+  app.use("/api/ratelimit", adminLimiter.middleware, createRateLimitRouter());
+
+  // ── API documentation (Issue #572) ───────────────────────────────────────
+  // Interactive Swagger UI, plus the raw spec in both serializations. The YAML
+  // is generated from the exact same object as the JSON, so the two can never
+  // drift apart.
+  /**
+   * @openapi
+   * /openapi.json:
+   *   get:
+   *     summary: OpenAPI specification (JSON)
+   *     operationId: getOpenapiJsonRoute
+   *     description: The canonical OpenAPI 3.1.0 document describing every route registered on this server.
+   *     tags: [Documentation]
+   *     security: []
+   *     responses:
+   *       200:
+   *         description: The OpenAPI document
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   * /openapi.yaml:
+   *   get:
+   *     summary: OpenAPI specification (YAML)
+   *     operationId: getOpenapiYamlRoute
+   *     description: >
+   *       The same OpenAPI 3.1.0 document as `GET /openapi.json`, serialized as
+   *       YAML. Both are generated from one in-memory object, so they are
+   *       semantically identical.
+   *     tags: [Documentation]
+   *     security: []
+   *     responses:
+   *       200:
+   *         description: The OpenAPI document, serialized as YAML
+   *         content:
+   *           text/yaml:
+   *             schema:
+   *               type: string
+   * /api-docs:
+   *   get:
+   *     summary: Interactive Swagger UI
+   *     operationId: getApiDocs
+   *     description: Browsable, "try it out" documentation for the live API. Backed by the same spec object as `/openapi.json`.
+   *     tags: [Documentation]
+   *     security: []
+   *     responses:
+   *       200:
+   *         description: Swagger UI HTML
+   *         content:
+   *           text/html:
+   *             schema:
+   *               type: string
+   */
   app.get("/openapi.json", (_req: Request, res: Response) => {
-    res.json(openapiSpec);
+    res.json(getOpenapiJson());
   });
+
+  app.get("/openapi.yaml", (_req: Request, res: Response) => {
+    res.type("text/yaml").send(getOpenapiYaml());
+  });
+
+  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(getOpenapiJson(), swaggerUiOptions));
 
   // ── Task routes ────────────────────────────────────────────────────────────
   // Authenticated task creation uses the tighter authed limiter.
   const v1TasksRouter = createV1TasksRouter(dispatch, releasePayment, jobQueue);
   const v2TasksRouter = createV2TasksRouter(dispatch, releasePayment, jobQueue);
 
+  // The v1/v2 implementation is picked from the negotiated API version, so the
+  // mount is a dispatcher function rather than a sub-router. That would make the
+  // task routes invisible to router-walking tooling, so both implementations
+  // are published on the returned handle for the OpenAPI parity test to
+  // introspect. Semantics are unchanged: 1.x → v1, everything else → v2.
   app.use("/api/tasks", authedLimiter.middleware, (req, res, next) => {
     const apiVersion = res.locals.apiVersion || "1.0";
     if (apiVersion.startsWith("1.")) {
@@ -261,7 +345,14 @@ export function createApp(opts: AppOptions = {}): {
 
   const routeCount = (app as unknown as { _router?: { stack?: unknown[] } })._router?.stack?.length;
   logger.debug({ routeCount }, "api app initialized");
-  return { httpServer, close };
+  return {
+    httpServer,
+    close,
+    versionDispatchedRoutes: {
+      mountPath: "/api/tasks",
+      routers: [v1TasksRouter, v2TasksRouter],
+    },
+  };
 }
 
 /**
