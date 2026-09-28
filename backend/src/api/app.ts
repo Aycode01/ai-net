@@ -105,6 +105,9 @@ export function createApp(opts: AppOptions = {}): {
   const httpServer = createServer(app);
   const eventStore = opts.eventStore ?? eventBus.store;
 
+  app.set("trust proxy", config.TRUST_PROXY);
+  const trustProxy = app.get("trust proxy fn");
+
   app.use(express.json());
   app.use((_req, res, next) => {
     if (config.NODE_ENV === "production") {
@@ -229,6 +232,7 @@ export function createApp(opts: AppOptions = {}): {
     eventStore,
     eventBus,
     getTask,
+    trustProxy,
     heartbeatIntervalMs: config.WS_HEARTBEAT_INTERVAL_MS,
     pongTimeoutMs: config.WS_PONG_TIMEOUT_MS,
     inactivityTimeoutMs: config.WS_INACTIVITY_TIMEOUT_MS,

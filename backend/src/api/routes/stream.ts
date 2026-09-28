@@ -13,6 +13,13 @@ import { createLogger } from '../../utils/logger';
 import { runWithTraceContext } from '../../services/traceContext';
 import { getConfig } from '../../config';
 
+type TrustProxyFn = (address: string, hop: number) => boolean;
+type ProxyAddr = (req: IncomingMessage, trust: TrustProxyFn) => string;
+
+// Express depends on proxy-addr but does not expose its request resolver.
+// eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+const proxyaddr = require('proxy-addr') as ProxyAddr;
+
 const STREAM_PATH = /^\/(?:api\/)?tasks\/([^/?]+)\/stream(?:\?.*)?$/;
 
 /**
@@ -114,10 +121,10 @@ export function getStreamConnectionCount(): number {
   return total;
 }
 
-function getClientIp(req: IncomingMessage): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-  return req.socket.remoteAddress ?? 'unknown';
+export function getClientIp(req: IncomingMessage, trustProxy?: TrustProxyFn): string {
+  const remoteAddress = req.socket.remoteAddress ?? 'unknown';
+  if (!trustProxy || !req.headers['x-forwarded-for']) return remoteAddress;
+  return proxyaddr(req, trustProxy) || remoteAddress;
 }
 
 function trackConnection(ip: string): boolean {
@@ -176,6 +183,7 @@ export interface TaskStreamOptions {
 export interface TaskStreamDeps extends TaskStreamOptions {
   httpServer: HttpServer;
   eventStore: EventStore;
+  trustProxy?: TrustProxyFn;
   eventBus?: typeof defaultEventBus;
   getTask?: (taskId: string) => Task | undefined;
 }
@@ -259,6 +267,7 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
     eventStore,
     eventBus = defaultEventBus,
     getTask = defaultGetTask,
+    trustProxy,
     heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
     pongTimeoutMs = DEFAULT_PONG_TIMEOUT_MS,
     authTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
@@ -278,7 +287,7 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
     }
 
     // ── Connection rate limit ────────────────────────────────────────────
-    const clientIp = getClientIp(req);
+    const clientIp = getClientIp(req, trustProxy);
     if (!trackConnection(clientIp)) {
       logger.warn({ clientIp }, 'connection rate limit exceeded');
       socket.write(

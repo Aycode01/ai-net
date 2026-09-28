@@ -118,6 +118,26 @@ const envSchema = z.object({
   /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
   IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
 
+  /** Express trusted proxy policy: none, a hop count, or trusted IP/CIDR ranges. */
+  TRUST_PROXY: z
+    .string()
+    .trim()
+    .default("none")
+    .transform((value): boolean | number | string => {
+      if (
+        !value ||
+        value.toLowerCase() === "none" ||
+        value.toLowerCase() === "false"
+      ) {
+        return false;
+      }
+      if (/^\d+$/.test(value)) {
+        const hopCount = Number(value);
+        return Number.isSafeInteger(hopCount) ? hopCount : value;
+      }
+      return value;
+    }),
+
   WS_MAX_CONNECTIONS_PER_CLIENT: z.coerce.number().int().positive().default(5),
   WS_MAX_MESSAGES_PER_MINUTE: z.coerce.number().int().positive().default(100),
   WS_INACTIVITY_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
