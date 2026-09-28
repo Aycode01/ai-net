@@ -13,6 +13,7 @@ import { idempotencyMiddleware } from "../../middleware/idempotency";
 import { currentTraceId } from "../../../services/traceContext";
 import { getConfig } from "../../../config";
 import { RateLimitError, NotFoundError, ForbiddenError, ConflictError } from "../../../errors";
+import { taskStreamUrl } from "../stream";
 
 import { getGlobalJobQueue, type JobQueue, type JobPriority } from "../../../queue";
 
@@ -112,7 +113,7 @@ export function createV2TasksRouter(
       },
       _links: {
         self: `/api/tasks/${task.id}`,
-        stream: `/api/tasks/${task.id}/stream`,
+        stream: taskStreamUrl(task.id),
       },
     });
     } catch (err) {
@@ -246,7 +247,7 @@ export function createV2TasksRouter(
       },
       _links: {
         self: `/api/tasks/${task.id}`,
-        stream: `/api/tasks/${task.id}/stream`,
+        stream: taskStreamUrl(task.id),
         cancel: `/api/tasks/${task.id}`,
       },
     });
