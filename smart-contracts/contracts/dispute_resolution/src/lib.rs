@@ -12,6 +12,7 @@ mod types;
 pub use errors::Error;
 pub use types::*;
 
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
