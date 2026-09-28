@@ -9,6 +9,7 @@ import express from "express";
 import request from "supertest";
 import Database from "better-sqlite3";
 import { createAgentDb, type AgentDb } from "../../db/agents";
+import * as agentsDb from "../../db/agents";
 import { createAgentsRouter } from "./agents";
 import { errorHandler } from "../middleware/errorHandler";
 
@@ -345,6 +346,49 @@ describe("POST /api/agents/register — Sybil Resistance (Issue #497)", () => {
     expect(res.status).toBe(400);
     const msg = typeof res.body.error === "string" ? res.body.error : res.body.error?.message;
     expect(msg).toMatch(/Agent limit per Stellar account reached/i);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Issue #646 — the schema DDL must not run on the request path
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("GET /api/agents — schema DDL (issue #646)", () => {
+  it("issues zero DDL across a loop of requests and reuses one wrapper", async () => {
+    const raw = makeDb();
+    const execSpy = jest.spyOn(raw, "exec");
+    const prepareSpy = jest.spyOn(raw, "prepare");
+    const getAgentDbSpy = jest.spyOn(agentsDb, "getAgentDb").mockReturnValue(raw);
+
+    // No `options.db` here: this exercises the real per-request
+    // `getDb()` path, which is the one the issue is about.
+    const app = express();
+    app.use(express.json());
+    app.use("/api/agents", createAgentsRouter());
+    app.use(errorHandler);
+
+    const wrapper = agentsDb.createAgentDb(raw);
+
+    try {
+      for (let i = 0; i < 5; i += 1) {
+        const res = await request(app).get("/api/agents");
+        expect(res.status).toBe(200);
+      }
+
+      // Every request reached the database ...
+      expect(prepareSpy).toHaveBeenCalled();
+      // ... and none of them ran schema DDL.
+      expect(execSpy).not.toHaveBeenCalled();
+      const ddl = prepareSpy.mock.calls
+        .map(([sql]) => String(sql))
+        .filter((sql) => /^\s*(CREATE|ALTER|DROP)\b/i.test(sql));
+      expect(ddl).toEqual([]);
+
+      // The wrapper the loop reused is the same object callers get.
+      expect(agentsDb.createAgentDb(raw)).toBe(wrapper);
+    } finally {
+      getAgentDbSpy.mockRestore();
+    }
   });
 });
 

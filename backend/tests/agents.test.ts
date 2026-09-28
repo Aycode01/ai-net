@@ -3,7 +3,7 @@ import type { AddressInfo } from "net";
 import request from "supertest";
 import { createAgentsRouter } from "../src/api/routes/agents";
 import { createTasksRouter } from "../src/api/routes/tasks";
-import { AgentRecord, createAgentDb } from "../src/db/agents";
+import { AgentRecord, createAgentDb, ensureAgentTable } from "../src/db/agents";
 import Database from "better-sqlite3";
 import { AppError } from "../src/errors";
 
@@ -34,18 +34,7 @@ function testErrorHandler(err: Error, _req: Request, res: Response, _next: NextF
 
 function createTestApp(initialAgents: AgentRecord[] = [], healthTimeoutMs = 500) {
   const rawDb = new Database(":memory:");
-  rawDb.exec(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id               TEXT PRIMARY KEY,
-      capabilities     TEXT NOT NULL,
-      pricingXLM       REAL NOT NULL,
-      endpoint         TEXT NOT NULL,
-      stellarPublicKey TEXT NOT NULL,
-      reputationScore  REAL NOT NULL DEFAULT 0,
-      lastSeenAt       TEXT NOT NULL,
-      status           TEXT NOT NULL DEFAULT 'online'
-    )
-  `);
+  ensureAgentTable(rawDb);
   const db = createAgentDb(rawDb);
   for (const agent of initialAgents) {
     db.upsert(agent);
