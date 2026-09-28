@@ -71,6 +71,12 @@ pub enum Error {
     InvalidPrice = 35,
     /// Multisig configuration is already active for this contract.
     MultisigAlreadyConfigured = 36,
+    /// Version string is not valid semver (major.minor.patch).
+    InvalidVersion = 37,
+    /// No versions are registered for this agent.
+    NoVersionsFound = 38,
+    /// The requested agent version does not exist.
+    VersionNotFound = 39,
 }
 
 impl Error {
@@ -113,6 +119,9 @@ impl Error {
             34 => Some(Error::InvalidConfig),
             35 => Some(Error::InvalidPrice),
             36 => Some(Error::MultisigAlreadyConfigured),
+            37 => Some(Error::InvalidVersion),
+            38 => Some(Error::NoVersionsFound),
+            39 => Some(Error::VersionNotFound),
             _ => None,
         }
     }
