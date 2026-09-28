@@ -68,7 +68,7 @@ function auditAdminRequests(req: Request, res: Response, next: NextFunction): vo
       at: new Date().toISOString(),
       actor: actorFromRequest(req),
       action: `${req.method} ${req.baseUrl}${req.path}`,
-      target: req.params.id,
+      target: req.params?.id,
       statusCode: res.statusCode,
       requestId:
         (res.locals.requestId as string | undefined) ??
@@ -92,6 +92,7 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
   const jobQueue = options.queue ?? getGlobalJobQueue();
   const reconciliationService = getReconciliationService(options.reconciliation);
 
+  router.use(adminAuthMiddleware);
   router.use(auditAdminRequests);
 
   router.get("/read-only", (_req: Request, res: Response) => {
@@ -224,6 +225,8 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
   const router = Router();
   const jobQueue = queue ?? getGlobalJobQueue();
 
+  router.use(adminAuthMiddleware);
+
   /**
    * @openapi
    * /api/admin/traces/{id}:
@@ -264,7 +267,7 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
    *       503:
    *         description: ADMIN_API_KEY is not configured
    */
-  router.get("/traces/:id", adminAuthMiddleware, (req: Request, res: Response) => {
+  router.get("/traces/:id", (req: Request, res: Response) => {
     const id = req.params.id;
 
     // Resolve requestId → correlationId when the id is not already a trace.

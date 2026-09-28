@@ -430,6 +430,7 @@ const EmptyState: React.FC<{ hasFilters: boolean }> = ({ hasFilters }) => (
   <CommonEmptyState
     icon={hasFilters ? <Clock size={32} /> : <History size={32} />}
     title={hasFilters ? 'No tasks match the current filters' : 'No task history yet'}
+    headingLevel={2}
     description={
       hasFilters
         ? 'Try adjusting the filters or expanding the date range.'

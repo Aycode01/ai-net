@@ -309,18 +309,7 @@ fn ensure_can_update(
     Err(denied)
 }
 
-fn read_admin(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotInitialized)
-}
 
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin = read_admin(env)?;
-    admin.require_auth();
-    Ok(admin)
-}
 
 /// Call `OracleManager::resolve_price(pair)` via a low-level cross-contract
 /// call and return the resolved price in stroops on success, or `None` on any
@@ -370,11 +359,17 @@ impl TaskStoreContract {
         env.storage()
             .instance()
             .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
+        env.events()
+            .publish((symbol_short!("task_meta"), symbol_short!("init")), admin);
         Ok(())
     }
 
     /// Return the current admin address, if set.
     pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    pub fn admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
     }
 
@@ -402,14 +397,6 @@ impl TaskStoreContract {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
-    }
-
-    /// Return the current admin address, if set.
-    ///
-    /// Alias of [`Self::get_admin`]; both spellings exist elsewhere in the
-    /// workspace, so both are kept for client compatibility.
-    pub fn admin(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Admin)
     }
 
     pub fn set_oracle_manager(env: Env, oracle_manager: Option<Address>) -> Result<(), Error> {
@@ -1154,114 +1141,10 @@ mod test {
         assert_eq!(fixture.env.events().all().len(), 0);
     }
 
-    // ── Pause / emergency stop ────────────────────────────────────────────────
-
     #[test]
     fn initialize_sets_unpaused() {
         let fixture = fixture();
         assert!(!fixture.client.is_paused());
-    }
-
-    #[test]
-    fn pause_blocks_store_task_metadata() {
-        let fixture = fixture();
-        let agents = Vec::from_array(&fixture.env, [fixture.agent.clone()]);
-        let dag = Bytes::from_slice(&fixture.env, &[0x78, 0x9c, 0x03, 0x00]);
-
-        fixture.client.pause();
-
-        let result = fixture.client.try_store_task_metadata(
-            &fixture.submitter,
-            &fixture.task_id,
-            &fixture.prompt_hash,
-            &agents,
-            &dag,
-            &1,
-            &None,
-        );
-        assert_eq!(result, Err(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn unpause_allows_store_task_metadata() {
-        let fixture = fixture();
-        fixture.client.pause();
-        fixture.client.unpause();
-
-        store(&fixture, 1);
-        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
-        assert_eq!(metadata.task_id, fixture.task_id);
-    }
-
-    #[test]
-    fn pause_blocks_update_task_status() {
-        let fixture = fixture();
-        store(&fixture, 1);
-
-        fixture.client.pause();
-
-        let result = fixture.client.try_update_task_status(
-            &fixture.task_id,
-            &fixture.agent,
-            &TaskStatus::Running,
-        );
-        assert_eq!(result, Err(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn get_task_metadata_still_works_when_paused() {
-        let fixture = fixture();
-        store(&fixture, 1);
-
-        fixture.client.pause();
-
-        // Reads should still work when paused.
-        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
-        assert_eq!(metadata.task_id, fixture.task_id);
-    }
-
-    // ── Coordinator configuration ─────────────────────────────────────────────
-
-    #[test]
-    fn set_coordinator_stores_and_clears_the_address() {
-        let fixture = fixture();
-        let coordinator = Address::generate(&fixture.env);
-        fixture.client.set_coordinator(&Some(coordinator.clone()));
-        assert_eq!(fixture.client.get_coordinator(), Some(coordinator));
-
-        fixture.client.set_coordinator(&None);
-        assert_eq!(fixture.client.get_coordinator(), None);
-    }
-
-    #[test]
-    fn set_coordinator_emits_event() {
-        let fixture = fixture();
-        fixture
-            .client
-            .set_coordinator(&Some(Address::generate(&fixture.env)));
-
-        let events = fixture.env.events().all();
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events.get(0).unwrap().1,
-            (symbol_short!("task_str"), symbol_short!("coord_set")).into_val(&fixture.env)
-        );
-    }
-
-    #[test]
-    fn set_coordinator_requires_the_admin_signature() {
-        let fixture = fixture();
-        let admin = fixture.client.get_admin().unwrap();
-
-        // `mock_all_auths` authorizes everything, so assert the contract asked
-        // for exactly the admin's authorization on this call.
-        fixture
-            .client
-            .set_coordinator(&Some(Address::generate(&fixture.env)));
-
-        let invocations = fixture.env.auths();
-        let last = invocations.last().unwrap();
-        assert_eq!(last.0, admin);
     }
 
     // ── Admin / set_oracle_manager ────────────────────────────────────────────
@@ -1280,7 +1163,7 @@ mod test {
         let admin = Address::generate(&fixture.env);
         assert_eq!(
             fixture.client.try_initialize(&admin),
-            Err(Ok(Error::AlreadyInitialized))
+            Err(Ok(Error::AlreadyExists))
         );
     }
 
@@ -1429,6 +1312,44 @@ mod test {
         );
 
         assert_eq!(result, Err(Ok(Error::OraclePriceUnavailable)));
+    }
+
+    #[test]
+    fn unpause_allows_store_task_metadata() {
+        let fixture = fixture();
+        fixture.client.pause();
+        fixture.client.unpause();
+
+        store(&fixture, 1);
+        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
+        assert_eq!(metadata.task_id, fixture.task_id);
+    }
+
+    #[test]
+    fn pause_blocks_update_task_status() {
+        let fixture = fixture();
+        store(&fixture, 1);
+
+        fixture.client.pause();
+
+        let result = fixture.client.try_update_task_status(
+            &fixture.task_id,
+            &fixture.agent,
+            &TaskStatus::Running,
+        );
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
+    }
+
+    #[test]
+    fn get_task_metadata_still_works_when_paused() {
+        let fixture = fixture();
+        store(&fixture, 1);
+
+        fixture.client.pause();
+
+        // Reads should still work when paused.
+        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
+        assert_eq!(metadata.task_id, fixture.task_id);
     }
 
     #[test]

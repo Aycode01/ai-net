@@ -19,23 +19,19 @@ import {
 import { httpDispatch } from "../coordinator/dispatch";
 import { eventBus } from "../coordinator/eventBus";
 import { getTask } from "../coordinator/taskStore";
-import { getTaskDb } from "../db/tasks";
+import { createTaskDb, getTaskDb } from "../db/tasks";
 import { createPaymentReleaseFn, type StellarReleasePaymentFn } from "../payment";
 import { getGlobalJobQueue, JobWorker, type JobQueue } from "../queue";
 import { createHeartbeatService, type HeartbeatServiceOptions } from "../services/heartbeat";
 import { metricsMiddleware, metricsService } from "../services/metrics";
+import { getEventStore } from "../events/eventStore";
 import type { EventStore } from "../events/eventStore";
 import {
   attachTaskStream,
   getStreamConnectionCount,
   type TaskStreamOptions,
 } from "./routes/stream";
-import { metricsMiddleware, metricsService } from "../services/metrics";
 import type { DAGNode } from "../types/task";
-import {
-  createPaymentReleaseFn,
-  type StellarReleasePaymentFn,
-} from "../payment";
 import { agentsRouter } from "./routes/agents";
 import { healthRouter } from "./routes/health";
 import { metricsRouter } from "./routes/metrics";
@@ -45,42 +41,23 @@ import { rateLimitMiddleware, registerRateLimitMiddleware, publicLimiter, authed
 import { authMiddleware } from "./middleware/auth";
 import { createCorsMiddleware } from "./middleware/cors";
 import { compressionMiddleware } from "./middleware/compression";
-import { createCorsMiddleware } from "./middleware/cors";
 import { errorHandler } from "./middleware/errorHandler";
 import { readOnlyMiddleware } from "./middleware/readOnly";
-import { registerRateLimitMiddleware } from "./middleware/rateLimit";
 import { requestId } from "./middleware/requestId";
 import { requestLogger } from "./middleware/requestLogger";
 import { versioningMiddleware } from "./middleware/versioning";
 import { getOpenapiJson, getOpenapiYaml, openapiSpec, swaggerUiOptions } from "./docs";
-import { agentsRouter } from "./routes/agents";
-import { createAdminRouter } from "./routes/admin";
-import { healthRouter } from "./routes/health";
-import { createReconciliationRouter, type ReconciliationRouterOptions } from "./routes/reconciliation";
-import { createStatsRouter } from "./routes/stats";
-import { attachTaskStream, getStreamConnectionCount, type TaskStreamOptions } from "./routes/stream";
+import { createAdminRouter, createAdminQueueRouter } from "./routes/admin";
+import { createFlagsRouter } from "./routes/flags";
+import { createVersionsRouter } from "./routes/versions";
 import { createV1TasksRouter } from "./routes/v1/tasks";
 import { createV2TasksRouter } from "./routes/v2/tasks";
 import { createAuthRouter } from "./routes/auth";
 import { type AuthService } from "../services/auth";
 import { createLogger } from "../utils/logger";
-import { createTaskDb, getTaskDb } from "../db/tasks";
 import { ValidationError, UnauthorizedError, NotFoundError, AppError } from "../errors";
-import { createHeartbeatService, type HeartbeatServiceOptions } from "../services/heartbeat";
-import { createTaskJobHandler } from "../coordinator/coordinator";
-import {
-  openapiSpec,
-  swaggerUiOptions,
-  getOpenapiJson,
-  getOpenapiYaml,
-} from "./docs";
-import {
-  getGlobalJobQueue,
-  JobWorker,
-  type JobQueue,
-} from "../queue";
-import { createAdminQueueRouter } from "./routes/admin";
-import { metricsService, metricsMiddleware } from "../services/metrics";
+import { getConfig } from "../config";
+import type { AgentRegistry } from "../types/agent";
 
 export interface AppOptions {
   dispatch?: DispatchFn;
@@ -125,6 +102,8 @@ export function createApp(opts: AppOptions = {}): {
   const config = getConfig();
   const logger = createLogger({ module: "api-app" });
   const app = express();
+  const httpServer = createServer(app);
+  const eventStore = opts.eventStore ?? eventBus.store;
 
   app.use(express.json());
   app.use((_req, res, next) => {
@@ -137,7 +116,7 @@ export function createApp(opts: AppOptions = {}): {
   app.use(requestId);
   app.use(requestLogger);
   app.use(metricsMiddleware);
-  app.use(globalRateLimitMiddleware);
+  app.use(rateLimitMiddleware);
   app.use(versioningMiddleware);
   app.use(
     readOnlyMiddleware({
@@ -207,18 +186,13 @@ export function createApp(opts: AppOptions = {}): {
     const apiVersion = res.locals.apiVersion || "1.0";
     if (apiVersion.startsWith("1.")) {
       return v1TasksRouter(req, res, next);
-    } else {
-      return v2TasksRouter(req, res, next);
     }
     return v2TasksRouter(req, res, next);
   });
 
-  // ── Prometheus metrics endpoint ──────────────────────────────────────
-  app.use("/metrics", metricsRouter);
-
   // ── Admin Queue routes ─────────────────────────────────────────────────────
   app.use("/api/admin/queue", adminLimiter.middleware, createAdminQueueRouter(jobQueue));
-  app.use("/api/admin", adminLimiter.middleware, createAdminQueueRouter(jobQueue));
+  app.use("/api/admin", adminLimiter.middleware, createAdminRouter({ queue: jobQueue, reconciliation: opts.reconciliation }));
 
   // ── Feature-flag admin routes (#425) ───────────────────────────────────────
   app.use("/api/admin/flags", createFlagsRouter());

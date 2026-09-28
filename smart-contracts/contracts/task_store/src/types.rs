@@ -132,19 +132,11 @@ pub struct TaskWithHistory {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// Contract version string, set at initialize and updated by `upgrade`.
+    Admin,
+    Paused,
     Version,
     /// Task metadata record, keyed by task id.
     Task(BytesN<32>),
-    /// Budget-based task record written by `create_task`, keyed by task id.
-    ///
-    /// Held separately from [`DataKey::Task`] so the two submission paths —
-    /// `store_task_metadata` and `create_task` — never share a storage slot and
-    /// therefore cannot overwrite one another.
-    LifecycleTask(BytesN<32>),
-    /// Admin address — the only address permitted to call `set_oracle_manager`,
-    /// `set_coordinator`, `pause`, `unpause` and `upgrade`.
-    Admin,
     /// Optional OracleManager contract address used to resolve quoted prices.
     OracleManager,
     /// Optional coordinator address, set by the admin.
@@ -343,17 +335,7 @@ pub enum Error {
     NotInitialized = 11,
     Unauthorized = 12,
     UpgradeFailed = 13,
-    /// Set by the admin via `pause`; blocks state-mutating calls.
     ContractPaused = 14,
-    /// An OracleManager is configured but the caller supplied no `price_pair`.
     MissingPricePair = 15,
-    /// An OracleManager is configured and the supplied `price_pair` could not be
-    /// resolved to a usable price (stale feed and no fallback). The task is
-    /// rejected rather than accepted at an unknown cost.
     OraclePriceUnavailable = 16,
-    /// `update_status` was called by neither the task creator nor the
-    /// configured coordinator.
-    NotAuthorizedUpdater = 17,
-    /// `create_task` was given a negative `budget_xlm`.
-    InvalidBudget = 18,
 }
