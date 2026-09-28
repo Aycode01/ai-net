@@ -3,6 +3,7 @@ import { getConfig } from "../../config";
 import { adminAuthMiddleware } from "../middleware/auth";
 import { metricsService } from "../../services/metrics";
 import { tracingService } from "../../services/tracing";
+import { getAllCircuitBreakerStatuses } from "../../services/circuitBreaker.js";
 
 const router = Router();
 const startTime = Date.now();
@@ -182,6 +183,28 @@ async function checkHorizon(url: string, timeoutMs = 5000): Promise<"ok" | "unre
     return "unreachable";
   }
 }
+
+/**
+ * @openapi
+ * /health/circuit-breakers:
+ *   get:
+ *     summary: Circuit breaker status for all external services
+ *     operationId: getCircuitBreakers
+ *     description: Returns the current state of every registered circuit breaker (Venice AI, Stellar Horizon).
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Circuit breaker statuses
+ */
+router.get("/circuit-breakers", (_req: Request, res: Response) => {
+  const breakers = getAllCircuitBreakerStatuses();
+  const anyOpen = breakers.some((b) => b.state === 'OPEN');
+  res.status(anyOpen ? 503 : 200).json({
+    status: anyOpen ? 'degraded' : 'ok',
+    circuitBreakers: breakers,
+  });
+});
 
 export { router as healthRouter };
 export default router;
