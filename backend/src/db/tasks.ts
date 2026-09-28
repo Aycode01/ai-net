@@ -11,9 +11,11 @@ const logger = createLogger({ component: "task-db" });
 const MIGRATIONS_DIR = path.join(__dirname, "migrations", "tasks");
 
 let _taskPool: SqlitePool | null = null;
+let _taskPoolClosing: Promise<void> | null = null;
 
 /** Lazily open (or reopen) the pooled task database. */
 export function getTaskPool(dbPath?: string): SqlitePool {
+  if (_taskPoolClosing) throw new Error("Task database is closing");
   if (!_taskPool || _taskPool.closed) {
     const filePath = dbPath ?? path.join(process.cwd(), "tasks.db");
     _taskPool = createPool({
@@ -51,9 +53,15 @@ export function currentTaskPool(): SqlitePool | null {
   return _taskPool && !_taskPool.closed ? _taskPool : null;
 }
 
-export function closeTaskDb(): void {
-  void _taskPool?.close();
-  _taskPool = null;
+export function closeTaskDb(): Promise<void> {
+  if (_taskPoolClosing) return _taskPoolClosing;
+  const pool = _taskPool;
+  if (!pool) return Promise.resolve();
+  _taskPoolClosing = pool.close().finally(() => {
+    if (_taskPool === pool) _taskPool = null;
+    _taskPoolClosing = null;
+  });
+  return _taskPoolClosing;
 }
 
 export interface TaskEvent {

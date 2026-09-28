@@ -385,7 +385,7 @@ export function getEventStoreConnection(): Database.Database | null {
   return _eventStoreConnection;
 }
 
-export function closeEventStore(): void {
+export async function closeEventStore(): Promise<void> {
   if (_eventStore) {
     _eventStore.close();
   }

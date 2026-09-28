@@ -36,6 +36,7 @@ export interface AgentCursorOptions {
 }
 
 let _agentPool: SqlitePool | null = null;
+let _agentPoolClosing: Promise<void> | null = null;
 
 export function ensureAgentTable(db: Database.Database): void {
   db.exec(`
@@ -72,6 +73,7 @@ export function ensureAgentTable(db: Database.Database): void {
 
 /** Lazily open (or reopen) the pooled agent database. */
 export function getAgentPool(dbPath?: string): SqlitePool {
+  if (_agentPoolClosing) throw new Error("Agent database is closing");
   if (!_agentPool || _agentPool.closed) {
     const filePath = dbPath ?? path.join(process.cwd(), "agents.db");
     _agentPool = createPool({
@@ -101,9 +103,15 @@ export function currentAgentPool(): SqlitePool | null {
   return _agentPool && !_agentPool.closed ? _agentPool : null;
 }
 
-export function closeAgentDb(): void {
-  void _agentPool?.close();
-  _agentPool = null;
+export function closeAgentDb(): Promise<void> {
+  if (_agentPoolClosing) return _agentPoolClosing;
+  const pool = _agentPool;
+  if (!pool) return Promise.resolve();
+  _agentPoolClosing = pool.close().finally(() => {
+    if (_agentPool === pool) _agentPool = null;
+    _agentPoolClosing = null;
+  });
+  return _agentPoolClosing;
 }
 
 export interface AgentDb {
