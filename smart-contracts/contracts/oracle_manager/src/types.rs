@@ -31,10 +31,20 @@ pub enum PriceSource {
 pub enum DataKey {
     /// Admin address (Instance storage).
     Admin,
+    /// Whether contract is paused (Instance storage).
+    Paused,
     /// Optional oracle contract address (Instance storage).
     OracleAddress,
     /// Admin-set fallback price per asset pair (Persistent storage).
     FallbackPrice(Symbol),
+}
+
+/// Event emitted when admin is transferred.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminChangedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
 }
 
 /// Event emitted when the oracle address is changed.

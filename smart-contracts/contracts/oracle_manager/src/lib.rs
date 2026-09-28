@@ -44,7 +44,8 @@ mod types;
 
 pub use errors::Error;
 pub use types::{
-    DataKey, FallbackPriceSetEvent, OracleSetEvent, PriceResolvedEvent, PriceSource, ResolvedPrice,
+    AdminChangedEvent, DataKey, FallbackPriceSetEvent, OracleSetEvent, PriceResolvedEvent,
+    PriceSource, ResolvedPrice,
 };
 
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, IntoVal, Symbol, Val};
@@ -64,6 +65,18 @@ fn read_admin(env: &Env) -> Result<Address, Error> {
 fn require_admin(env: &Env) -> Result<(), Error> {
     let admin = read_admin(env)?;
     admin.require_auth();
+    Ok(())
+}
+
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::ContractPaused);
+    }
     Ok(())
 }
 
@@ -135,15 +148,66 @@ impl OracleManagerContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
     }
 
     // ── Admin operations ──────────────────────────────────────────────────────
 
+    /// Transfer admin rights to a new address. Requires authorization from both current and new admin.
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        let old_admin = read_admin(&env)?;
+        old_admin.require_auth();
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("mgr"), symbol_short!("adm_chng")),
+            AdminChangedEvent {
+                old_admin,
+                new_admin,
+            },
+        );
+        Ok(())
+    }
+
+    /// Return current admin address.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// Pause the contract. Only admin can call this.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("mgr"), symbol_short!("paused")), ());
+        Ok(())
+    }
+
+    /// Unpause the contract. Only admin can call this.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("mgr"), symbol_short!("unpaused")), ());
+        Ok(())
+    }
+
+    /// Return whether contract is paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     /// Select the on-chain oracle to use for live prices.
     ///
     /// Pass `None` to remove the oracle and rely entirely on fallback prices.
     pub fn set_oracle(env: Env, oracle: Option<Address>) -> Result<(), Error> {
+        require_not_paused(&env)?;
         require_admin(&env)?;
         match &oracle {
             Some(addr) => env.storage().instance().set(&DataKey::OracleAddress, addr),
@@ -171,6 +235,7 @@ impl OracleManagerContract {
     /// * `pair`  – Asset pair (must match what the oracle uses, e.g. `XLM_USD`).
     /// * `price` – Fallback price in stroops (must be > 0).
     pub fn set_fallback_price(env: Env, pair: Symbol, price: i128) -> Result<(), Error> {
+        require_not_paused(&env)?;
         require_admin(&env)?;
         if price <= 0 {
             return Err(Error::InvalidFallbackPrice);
@@ -206,6 +271,7 @@ impl OracleManagerContract {
     /// A stale oracle response is **never** returned; the fallback is used
     /// transparently instead.
     pub fn resolve_price(env: Env, pair: Symbol) -> Result<ResolvedPrice, Error> {
+        require_not_paused(&env)?;
         // Step 1: try the live oracle.
         if let Some(oracle) = env
             .storage()
@@ -563,5 +629,16 @@ mod test {
         let oracle_addr = Address::generate(&f.env);
         // Should succeed with mock_all_auths — basic smoke test.
         f.client.set_oracle(&Some(oracle_addr));
+    }
+
+    #[test]
+    fn negative_auth_tests() {
+        let f = fixture();
+        init(&f);
+        let intruder = Address::generate(&f.env);
+        f.env.mock_auths(&[]);
+        assert!(f.client.try_set_admin(&intruder).is_err());
+        assert!(f.client.try_pause().is_err());
+        assert!(f.client.try_unpause().is_err());
     }
 }

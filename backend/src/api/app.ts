@@ -24,6 +24,7 @@ import { createPaymentReleaseFn, type StellarReleasePaymentFn } from "../payment
 import { getGlobalJobQueue, JobWorker, type JobQueue } from "../queue";
 import { createHeartbeatService, type HeartbeatServiceOptions } from "../services/heartbeat";
 import { metricsMiddleware, metricsService } from "../services/metrics";
+import { getEventStore } from "../events/eventStore";
 import type { EventStore } from "../events/eventStore";
 import {
   attachTaskStream,
@@ -190,12 +191,9 @@ export function createApp(opts: AppOptions = {}): {
     return v2TasksRouter(req, res, next);
   });
 
-  // ── Prometheus metrics endpoint ──────────────────────────────────────
-  app.use("/metrics", metricsRouter);
-
   // ── Admin Queue routes ─────────────────────────────────────────────────────
   app.use("/api/admin/queue", adminLimiter.middleware, createAdminQueueRouter(jobQueue));
-  app.use("/api/admin", adminLimiter.middleware, createAdminQueueRouter(jobQueue));
+  app.use("/api/admin", adminLimiter.middleware, createAdminRouter({ queue: jobQueue, reconciliation: opts.reconciliation }));
 
   // ── Feature-flag admin routes (#425) ───────────────────────────────────────
   app.use("/api/admin/flags", createFlagsRouter());

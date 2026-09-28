@@ -6,26 +6,34 @@
  * • Persist every {@link AppEvent} with a globally-unique `globalSeq` and a
  *   per-task `taskSeq` (the per-task cursor assigned upstream by the EventBus).
  * • Expose read queries needed by replay, projection, and WebSocket resume.
- * • Own the DDL — the schema in `../../db/events.sql` is the authoritative
- *   documentation; this module applies an equivalent DDL inline so the store
- *   can be instantiated without an external migration tool (e.g. in tests).
  *
- * Compatibility note
- * ──────────────────
- * The coordinator still imports the legacy {@link createEventStore} from
- * `../coordinator/eventStore`.  That module now re-exports from here so both
- * import paths resolve to the same implementation without breaking existing
- * callers or the tests in `tests/replay.test.ts`.
+ * Schema ownership
+ * ────────────────
+ * The DDL is defined in exactly one place — the migration system:
+ *   backend/src/db/migrations/tasks/002_create_task_events_table.up.sql  (schema B)
+ *   backend/src/db/migrations/tasks/005_replace_task_events_schema.up.sql (schema A)
+ *
+ * When `createEventStore` is called without a pre-migrated database (e.g. in
+ * unit tests or when operating against an in-memory DB), it applies both
+ * migration files in sequence — exactly what the production migrator does —
+ * so the resulting schema is identical regardless of how the store is created.
+ *
+ * There is no separate `events.sql` DDL: the migration files ARE the single
+ * source of truth.
  */
 
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { mkdirSync } from 'fs';
+import { dirname, isAbsolute, join } from 'path';
 import type { AppEvent } from './eventTypes';
 import { validateEvent } from './schemaRegistry';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger({ component: 'eventStore' });
+import type { EventArchive } from './eventArchive';
+import { createEventArchive } from './eventArchive';
+import { getConfig } from '../config';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -93,6 +101,16 @@ export interface EventStore {
    */
   maxTaskSeqPerTask(): Map<string, number>;
 
+  /**
+   * Retention archive sharing this store's database file.
+   *
+   * Holds `task_event_archive` (full-fidelity copies of purged events) and
+   * `task_event_summary` (the materialized per-task/per-node projection).
+   * Because it shares the connection, archive + purge happen in a single
+   * transaction — see `EventArchive.compactTask`.
+   */
+  archive: EventArchive;
+
   /** Release the underlying database connection. */
   close(): void;
 }
@@ -132,31 +150,35 @@ function rowToStoredEvent(row: EventRow): StoredEvent {
 }
 
 // ---------------------------------------------------------------------------
-// DDL — mirrors backend/src/db/events.sql
+// DDL — loaded from the canonical migration files
 // ---------------------------------------------------------------------------
 
-const DDL = `
-  CREATE TABLE IF NOT EXISTS task_events (
-    global_seq  INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_seq    INTEGER NOT NULL,
-    version     INTEGER NOT NULL DEFAULT 1,
-    type        TEXT    NOT NULL,
-    task_id     TEXT    NOT NULL,
-    node_id     TEXT,
-    occurred_at TEXT    NOT NULL,
-    payload     TEXT,
-    UNIQUE (task_id, task_seq)
+/**
+ * Bootstrap the task_events schema in a database that has NOT been migrated
+ * through the full migration chain (e.g. in-memory DBs in unit tests).
+ *
+ * The canonical schema is defined entirely within the migration system:
+ *   - 002_create_task_events_table.up.sql  →  creates schema B (legacy shape)
+ *   - 005_replace_task_events_schema.up.sql → transforms schema B → schema A
+ *
+ * Running both migrations in sequence is identical to what the production
+ * migrator does, so in-memory and file-backed databases end up with exactly
+ * the same schema A shape.  This is the single source of truth: no DDL is
+ * duplicated outside of the migration files.
+ */
+function applyDDL(db: import('better-sqlite3').Database): void {
+  const migrationsDir = join(__dirname, '..', 'db', 'migrations', 'tasks');
+  const migration002 = readFileSync(
+    join(migrationsDir, '002_create_task_events_table.up.sql'),
+    'utf8',
   );
-
-  CREATE INDEX IF NOT EXISTS idx_events_task_seq
-    ON task_events (task_id, task_seq ASC);
-
-  CREATE INDEX IF NOT EXISTS idx_events_occurred_at
-    ON task_events (occurred_at ASC);
-
-  CREATE INDEX IF NOT EXISTS idx_events_type
-    ON task_events (type, occurred_at ASC);
-`;
+  const migration005 = readFileSync(
+    join(migrationsDir, '005_replace_task_events_schema.up.sql'),
+    'utf8',
+  );
+  db.exec(migration002);
+  db.exec(migration005);
+}
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -167,7 +189,10 @@ const DDL = `
  *
  * @param db  An existing better-sqlite3 `Database` instance, or a file path
  *            string.  Defaults to an in-memory database — suitable for a
- *            long-running server and for unit tests alike.
+ *            long-running server and for unit tests alike.  Production wiring
+ *            goes through {@link getEventStore} so the log is actually durable;
+ *            a store left on `:memory:` discards the whole event log on restart,
+ *            which also makes the retention job a no-op.
  */
 export function createEventStore(db?: Database.Database | string): EventStore {
   const database =
@@ -177,7 +202,10 @@ export function createEventStore(db?: Database.Database | string): EventStore {
 
   database.pragma('journal_mode = WAL');
   database.pragma('busy_timeout = 5000');
-  database.exec(DDL);
+  applyDDL(database);
+
+  // The archive shares this connection so archive + purge are atomic.
+  const archive = createEventArchive(database);
 
   // ---------------------------------------------------------------------------
   // Prepared statements
@@ -242,6 +270,20 @@ export function createEventStore(db?: Database.Database | string): EventStore {
       // value.
       const taskSeq = event.taskSeq ?? 0;
 
+      // Validate the event payload against the declared version schema.
+      // A validation failure is a programming error — throw immediately rather
+      // than silently persisting a malformed event.
+      // Cast through unknown: AppEvent is a discriminated union without a string
+      // index signature, but validateEvent reads only type/version/payload at
+      // runtime, so this cast is safe.
+      const validation = validateEvent(event as unknown as Parameters<typeof validateEvent>[0]);
+      if (!validation.valid) {
+        throw new Error(
+          `Event payload schema validation failed for ${event.type} v${event.version ?? 1}: ` +
+          validation.errors.join('; ')
+        );
+      }
+
       const nodeId =
         'nodeId' in event && event.nodeId != null ? (event.nodeId as string) : null;
 
@@ -295,8 +337,66 @@ export function createEventStore(db?: Database.Database | string): EventStore {
       return result;
     },
 
+    archive,
+
     close(): void {
       database.close();
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Process-wide accessor
+// ---------------------------------------------------------------------------
+
+let _eventStore: EventStore | null = null;
+let _eventStoreConnection: Database.Database | null = null;
+
+/** Absolute path (or `:memory:`) the event store is configured to use. */
+export function getEventStorePath(): string {
+  const configured = getConfig().EVENT_STORE_PATH;
+  if (configured === ':memory:' || isAbsolute(configured)) return configured;
+  return join(process.cwd(), configured);
+}
+
+/**
+ * Lazily open the shared, process-wide event store.
+ *
+ * Follows the same accessor convention as `getTaskDb()` / `getDb()`: the
+ * connection is created on first use and reused thereafter, so the EventBus,
+ * the HTTP/WebSocket layer and the retention service all address the same
+ * database file.  This is what makes the log durable across restarts and what
+ * gives `EventBus` real `maxTaskSeqPerTask()` data to rehydrate from.
+ */
+export function getEventStore(): EventStore {
+  if (!_eventStore) {
+    const filePath = getEventStorePath();
+    if (filePath !== ':memory:') {
+      mkdirSync(dirname(filePath), { recursive: true });
+    }
+    // Open the connection here rather than letting createEventStore do it, so
+    // the same handle stays available for maintenance pragmas.
+    const connection = new Database(filePath);
+    connection.pragma('journal_mode = WAL');
+    connection.pragma('busy_timeout = 5000');
+    _eventStoreConnection = connection;
+    _eventStore = createEventStore(connection);
+  }
+  return _eventStore;
+}
+
+/**
+ * The raw connection behind {@link getEventStore}, for maintenance passes that
+ * need SQLite pragmas (`DbMaintenanceService`).  Null until the store is opened.
+ */
+export function getEventStoreConnection(): Database.Database | null {
+  return _eventStoreConnection;
+}
+
+export function closeEventStore(): void {
+  if (_eventStore) {
+    _eventStore.close();
+  }
+  _eventStoreConnection = null;
+  _eventStore = null;
 }

@@ -9,6 +9,7 @@ import { NotFoundPage } from './pages/NotFoundPage'
 import AppShell from './components/layout/AppShell'
 import LandingPage from './pages/LandingPage'
 import ErrorBoundary from './components/common/ErrorBoundary'
+import RouteLoader from './components/common/RouteLoader'
 import { ProtectedRoute } from './components/auth/ProtectedRoute'
 import { CommandPalette } from './components/common/CommandPalette'
 import { useCommandPalette } from './hooks/useCommandPalette'
@@ -23,6 +24,15 @@ const WalletPage = lazy(() => import('./pages/WalletPage'))
 const AgentsPage = lazy(() => import('./pages/AgentsPage'))
 const NewTaskPage = lazy(() => import('./pages/NewTaskPage'))
 const TaskHistoryPage = lazy(() => import('./pages/TaskHistoryPage'))
+// Route-level code splitting: every page except LandingPage (kept eager so
+// the first paint on `/` is not delayed) is fetched on demand. Heavy
+// route-only libraries (reactflow, recharts, jspdf, react-syntax-highlighter)
+// therefore stay out of the initial bundle.
+const DashboardPage = lazy(() => import('./pages/dashboard'))
+const WalletPage = lazy(() => import('./pages/WalletPage'))
+const AgentsPage = lazy(() => import('./pages/AgentsPage'))
+const NewTaskPage = lazy(() => import('./pages/tasks/NewTaskPage'))
+const TaskHistoryPage = lazy(() => import('./pages/tasks/TaskHistoryPage'))
 const TaskDetailPage = lazy(() => import('./pages/TaskDetailPage'))
 const RendererDemoPage = lazy(() => import('./pages/RendererDemoPage'))
 
@@ -40,7 +50,7 @@ const RoutedContent: React.FC = () => {
           path="/*"
           element={
             <AppShell>
-              <Suspense fallback={<RouteLoadingFallback />}>
+              <Suspense fallback={<RouteLoader />}>
                 <Routes>
                   <Route
                     path="/dashboard"

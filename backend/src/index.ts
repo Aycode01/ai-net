@@ -14,12 +14,14 @@ import { closeDb } from "./db/index";
 import { closeAuthDb } from "./db/auth";
 import { closeTaskDb, getTaskDb, createTaskDb } from "./db/tasks";
 import { closeJobDb } from "./queue";
-import { eventBus } from "./coordinator/eventBus";
+import { closeEventStore, getEventStore } from "./events/eventStore";
 import { createDefaultReconciliationService } from "./services/reconciliation";
 import { DbMaintenanceService, defaultMaintenanceDatabases } from "./services/dbMaintenance";
 import { ErrorRegistryMaintenanceService } from "./services/errorRegistryMaintenance";
+import { EventRetentionService } from "./services/eventRetention";
 import { createLogger } from "./utils/logger";
 import { redactedConfigSnapshot } from "./config";
+import { getDefaultIdempotencyStore, resetDefaultIdempotencyStore } from "./services/idempotency";
 
 async function main() {
   const logger = createLogger({ module: "server" });
@@ -44,6 +46,13 @@ async function main() {
     const reconciliationService = createDefaultReconciliationService();
     reconciliationService.startDaily(config.RECONCILIATION_INTERVAL_MS);
 
+    // Start idempotency key cleanup so the idempotency_keys table stays
+    // bounded in production (Issue #657).  The store is initialised here with
+    // the validated config so it uses the correct file-backed database and
+    // honours IDEMPOTENCY_TTL_MS / IDEMPOTENCY_CLEANUP_MS from the env.
+    const idempotencyStore = getDefaultIdempotencyStore(config);
+    idempotencyStore.startCleanup();
+
     // Start SQLite maintenance (WAL checkpoint, vacuum, backup)
     const maintenanceService = new DbMaintenanceService(defaultMaintenanceDatabases(), {
       intervalMs: config.DB_MAINTENANCE_INTERVAL_MS,
@@ -60,8 +69,21 @@ async function main() {
     });
     errorRegistryMaintenance.start();
 
+    // Open the file-backed event store and start event retention/compaction
+    // so the live task_events table stays bounded (issue #383).
+    const eventStore = getEventStore();
+    const eventRetention = new EventRetentionService({
+      eventStore,
+      intervalMs: config.EVENT_COMPACTION_INTERVAL_MS,
+      retentionDays: config.EVENT_RETENTION_DAYS,
+      batchTasks: config.EVENT_COMPACTION_BATCH_TASKS,
+      enabled: config.EVENT_COMPACTION_ENABLED,
+    });
+    eventRetention.start();
+
     // Create and start the server
     const { httpServer, close } = createApp({
+      eventStore,
       jobWorkerStopTimeoutMs: config.GRACEFUL_SHUTDOWN_TIMEOUT * 1000,
     });
 
@@ -77,7 +99,9 @@ async function main() {
       reconciliationService,
       maintenanceService,
       errorRegistryMaintenance,
+        eventRetention,
       globalAgentRegistry,
+      idempotencyStore,
     });
 
   } catch (error) {
@@ -91,7 +115,9 @@ export interface GracefulShutdownExtras {
   reconciliationService?: { stop(): void };
   maintenanceService?: { stop(): void };
   errorRegistryMaintenance?: { stop(): void };
+  eventRetention?: { stop(): void };
   globalAgentRegistry?: { shutdown(): void };
+  idempotencyStore?: { stopCleanup(): void; close(): void };
 }
 
 /**
@@ -144,6 +170,7 @@ export function setupGracefulShutdown(
       extras.maintenanceService?.stop();
       extras.errorRegistryMaintenance?.stop();
       extras.globalAgentRegistry?.shutdown();
+      extras.idempotencyStore?.stopCleanup();
 
       logger.info("failing running tasks");
       try {
@@ -167,6 +194,8 @@ export function setupGracefulShutdown(
       closeTaskDb();
       closeJobDb();
       closeAuthDb();
+      closeEventStore();
+      resetDefaultIdempotencyStore();
 
       logger.info({ signal }, "graceful shutdown complete");
       clearTimeout(forcedTimeout);

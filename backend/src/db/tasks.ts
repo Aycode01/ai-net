@@ -61,6 +61,7 @@ export interface TaskEvent {
   taskId: string;
   nodeId?: string;
   payload?: unknown;
+  /** ISO-8601 timestamp — stored in the `occurred_at` column (schema A). */
   timestamp: string;
 }
 
@@ -250,37 +251,51 @@ export function createTaskDb(db: Database.Database): TaskDb {
     },
 
     insertEvent(event: TaskEvent): void {
+      // Assign a per-task sequence number by looking up the current max.
+      // This is a simple approach suitable for the legacy TaskDb path; the
+      // EventBus / EventStore path uses its own atomic counter.
+      const row = db
+        .prepare(
+          'SELECT COALESCE(MAX(task_seq), -1) AS max_seq FROM task_events WHERE task_id = ?',
+        )
+        .get(event.taskId) as { max_seq: number };
+      const nextSeq = (row?.max_seq ?? -1) + 1;
+
       db.prepare(
         `
-        INSERT INTO task_events (taskId, type, nodeId, payload, timestamp)
-        VALUES (@taskId, @type, @nodeId, @payload, @timestamp)
+        INSERT INTO task_events (task_seq, version, type, task_id, node_id, occurred_at, payload)
+        VALUES (@task_seq, @version, @type, @task_id, @node_id, @occurred_at, @payload)
       `,
       ).run({
-        taskId: event.taskId,
+        task_seq: nextSeq,
+        version: 1,
         type: event.type,
-        nodeId: event.nodeId ?? null,
+        task_id: event.taskId,
+        node_id: event.nodeId ?? null,
+        occurred_at: event.timestamp,
         payload:
           event.payload !== undefined ? JSON.stringify(event.payload) : null,
-        timestamp: event.timestamp,
       });
     },
 
     getEventHistory(taskId: string): TaskEvent[] {
       const rows = db
-        .prepare("SELECT * FROM task_events WHERE taskId = ? ORDER BY id ASC")
+        .prepare(
+          'SELECT * FROM task_events WHERE task_id = ? ORDER BY task_seq ASC',
+        )
         .all(taskId) as Array<{
-        taskId: string;
+        task_id: string;
         type: string;
-        nodeId: string | null;
+        node_id: string | null;
         payload: string | null;
-        timestamp: string;
+        occurred_at: string;
       }>;
       return rows.map((r) => ({
-        taskId: r.taskId,
+        taskId: r.task_id,
         type: r.type,
-        nodeId: r.nodeId ?? undefined,
+        nodeId: r.node_id ?? undefined,
         payload: r.payload ? JSON.parse(r.payload) : undefined,
-        timestamp: r.timestamp,
+        timestamp: r.occurred_at,
       }));
     },
 

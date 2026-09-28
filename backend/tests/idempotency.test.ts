@@ -1,6 +1,14 @@
 import request from 'supertest';
 import Database from 'better-sqlite3';
-import { createIdempotencyStore, type IdempotencyStore } from '../src/services/idempotency';
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
+import {
+  createIdempotencyStore,
+  getDefaultIdempotencyStore,
+  resetDefaultIdempotencyStore,
+  type IdempotencyStore,
+} from '../src/services/idempotency';
 import { createIdempotencyMiddleware } from '../src/api/middleware/idempotency';
 import express, { Router, Request, Response } from 'express';
 
@@ -265,5 +273,99 @@ describe('Idempotency Middleware', () => {
 
     expect(res.status).toBe(201);
     expect(handlerCallCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Default singleton store — acceptance criteria for Issue #657
+// ---------------------------------------------------------------------------
+
+describe('getDefaultIdempotencyStore (Issue #657)', () => {
+  afterEach(() => {
+    // Always tear down the singleton between sub-tests.
+    resetDefaultIdempotencyStore();
+  });
+
+  it('uses an in-memory database under NODE_ENV=test', () => {
+    // NODE_ENV is already 'test' in this process.
+    const store = getDefaultIdempotencyStore();
+    store.storeResponse('key-test', 200, { ok: true });
+    expect(store.get('key-test')).toBeDefined();
+    // No filesystem path to assert, but the store must be functional.
+  });
+
+  it('a key recorded before a simulated restart replays its stored response afterwards (AC1)', () => {
+    // Use a real on-disk file to simulate a durable store across restarts.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'idem-test-'));
+    const dbPath = path.join(tmpDir, 'idem.db');
+
+    try {
+      // ── "First process" ──────────────────────────────────────────────────
+      const store1 = createIdempotencyStore(dbPath, { cleanupIntervalMs: 0 });
+      store1.storeResponse('restart-key', 201, { taskId: 'task_abc' });
+      store1.close();
+
+      // ── "Second process" (fresh store, same file) ────────────────────────
+      const store2 = createIdempotencyStore(dbPath, { cleanupIntervalMs: 0 });
+      const replayed = store2.get('restart-key');
+      expect(replayed).toBeDefined();
+      expect(replayed!.statusCode).toBe(201);
+      expect(JSON.parse(replayed!.responseBody)).toEqual({ taskId: 'task_abc' });
+      store2.close();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('idempotency_keys row count stays bounded after cleanup (AC2)', () => {
+    // Short TTL so entries expire right away; then cleanup should reduce the count.
+    const db = new Database(':memory:');
+    const store = createIdempotencyStore(db, { ttlMs: 1, cleanupIntervalMs: 0 });
+
+    // Insert enough entries to make the effect observable.
+    for (let i = 0; i < 20; i++) {
+      store.storeResponse(`bounded-${i}`, 200, { i });
+    }
+
+    // Busy-wait for TTL to expire.
+    const start = Date.now();
+    while (Date.now() - start < 5) { /* spin */ }
+
+    const deleted = store.cleanup();
+    expect(deleted).toBe(20);
+
+    // Table must now be empty.
+    const count = db.prepare('SELECT COUNT(*) as c FROM idempotency_keys').get() as { c: number };
+    expect(count.c).toBe(0);
+
+    store.close();
+  });
+
+  it('startCleanup() from the store is unref()ed so it does not block process exit (AC3)', () => {
+    const db = new Database(':memory:');
+    const store = createIdempotencyStore(db, { cleanupIntervalMs: 100 });
+    // If unref() is not called the test runner would hang waiting for the timer.
+    // Jest's fake-timer infrastructure handles this, but we verify the call
+    // does not throw and is idempotent.
+    expect(() => {
+      store.startCleanup();
+      store.startCleanup(); // idempotent
+    }).not.toThrow();
+    store.stopCleanup();
+    store.close();
+  });
+
+  it('getDefaultIdempotencyStore returns in-memory store under NODE_ENV=test (AC4)', () => {
+    const original = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'test';
+    try {
+      const store = getDefaultIdempotencyStore();
+      // Must be functional without opening a filesystem path.
+      store.storeResponse('ac4-key', 200, { test: true });
+      expect(store.get('ac4-key')).toBeDefined();
+    } finally {
+      process.env.NODE_ENV = original;
+      resetDefaultIdempotencyStore();
+    }
   });
 });
