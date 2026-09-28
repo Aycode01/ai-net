@@ -3,13 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**.md"
   pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "**.md"
   workflow_dispatch:
 
 concurrency:
@@ -29,6 +23,7 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      contracts: ${{ steps.filter.outputs.contracts }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -41,14 +36,17 @@ jobs:
             backend:
               - 'backend/**'
               - 'tests/e2e/**'
-              - 'smart-contracts/**'
-              - '.github/workflows/ci.yml'
             frontend:
               - 'frontend/**'
+              - 'tests/e2e/**'
+            contracts:
+              - 'smart-contracts/**'
               - '.github/workflows/ci.yml'
 
   backend:
     name: backend
+    needs: [changes]
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -82,6 +80,8 @@ jobs:
 
   frontend:
     name: frontend
+    needs: [changes]
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -112,6 +112,8 @@ jobs:
 
   frontend-visual:
     name: frontend-visual-regression
+    needs: [changes]
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
     # Deliberately does NOT `needs: [frontend]`. This suite renders four
     # specific routes through `vite dev` (an on-demand, per-module dev
     # server), not the full production bundle `frontend`'s `npm run build`
@@ -162,10 +164,9 @@ jobs:
 
   contracts:
     name: smart-contracts
-    # Run after the lightweight Node jobs so that at most one Rust compilation
-    # is active at a time, preventing the runner (or a local dev laptop) from
-    # being overwhelmed by concurrent cargo builds.
-    needs: [backend, frontend]
+    # Contract checks are independent of the backend and frontend suites.
+    needs: [changes]
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.contracts == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
