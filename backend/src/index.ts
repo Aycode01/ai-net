@@ -14,7 +14,6 @@ import { closeDb } from "./db/index";
 import { closeAuthDb } from "./db/auth";
 import { closeTaskDb, getTaskDb, createTaskDb } from "./db/tasks";
 import { closeJobDb } from "./queue";
-import { closeTaskDb, createTaskDb, getTaskDb } from "./db/tasks";
 import { closeEventStore, getEventStore } from "./events/eventStore";
 import { createDefaultReconciliationService } from "./services/reconciliation";
 import { DbMaintenanceService, defaultMaintenanceDatabases } from "./services/dbMaintenance";
@@ -22,6 +21,7 @@ import { ErrorRegistryMaintenanceService } from "./services/errorRegistryMainten
 import { EventRetentionService } from "./services/eventRetention";
 import { createLogger } from "./utils/logger";
 import { redactedConfigSnapshot } from "./config";
+import { getDefaultIdempotencyStore, resetDefaultIdempotencyStore } from "./services/idempotency";
 
 async function main() {
   const logger = createLogger({ module: "server" });
@@ -45,6 +45,13 @@ async function main() {
     // Start daily payment reconciliation
     const reconciliationService = createDefaultReconciliationService();
     reconciliationService.startDaily(config.RECONCILIATION_INTERVAL_MS);
+
+    // Start idempotency key cleanup so the idempotency_keys table stays
+    // bounded in production (Issue #657).  The store is initialised here with
+    // the validated config so it uses the correct file-backed database and
+    // honours IDEMPOTENCY_TTL_MS / IDEMPOTENCY_CLEANUP_MS from the env.
+    const idempotencyStore = getDefaultIdempotencyStore(config);
+    idempotencyStore.startCleanup();
 
     // Start SQLite maintenance (WAL checkpoint, vacuum, backup)
     const maintenanceService = new DbMaintenanceService(defaultMaintenanceDatabases(), {
@@ -94,6 +101,7 @@ async function main() {
       errorRegistryMaintenance,
         eventRetention,
       globalAgentRegistry,
+      idempotencyStore,
     });
 
   } catch (error) {
@@ -109,6 +117,7 @@ export interface GracefulShutdownExtras {
   errorRegistryMaintenance?: { stop(): void };
   eventRetention?: { stop(): void };
   globalAgentRegistry?: { shutdown(): void };
+  idempotencyStore?: { stopCleanup(): void; close(): void };
 }
 
 /**
@@ -161,6 +170,7 @@ export function setupGracefulShutdown(
       extras.maintenanceService?.stop();
       extras.errorRegistryMaintenance?.stop();
       extras.globalAgentRegistry?.shutdown();
+      extras.idempotencyStore?.stopCleanup();
 
       logger.info("failing running tasks");
       try {
@@ -185,6 +195,7 @@ export function setupGracefulShutdown(
       closeJobDb();
       closeAuthDb();
       closeEventStore();
+      resetDefaultIdempotencyStore();
 
       logger.info({ signal }, "graceful shutdown complete");
       clearTimeout(forcedTimeout);

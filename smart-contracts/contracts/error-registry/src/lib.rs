@@ -116,6 +116,7 @@ impl ErrorRegistryContract {
             .unwrap_or(false)
     }
 
+    /// Return the deployed contract version.
     pub fn contract_version(env: Env) -> String {
         env.storage()
             .instance()
@@ -123,6 +124,7 @@ impl ErrorRegistryContract {
             .unwrap_or_else(|| String::from_str(&env, CONTRACT_VERSION))
     }
 
+    /// Upgrade this contract's WASM. Only the admin may call this.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: String) -> Result<(), Error> {
         let desc = String::from_str(&env, "Direct upgrade");
         Self::upgrade_contract(env, new_wasm_hash, new_version, desc)

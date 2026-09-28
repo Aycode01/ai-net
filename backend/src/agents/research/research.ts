@@ -1,7 +1,31 @@
 import { z } from 'zod';
-import { VeniceClient, type VeniceClientLike } from '../../services/venice/index.js';
-import type { AgentTask, AgentResult, AgentError, Source } from './types';
+import {
+  VeniceClient,
+  CircuitOpenError,
+  TokenBudgetExceededError,
+  type CompleteOptions,
+  type VeniceClientLike,
+} from '../../services/venice/index.js';
+import { estimateTokens, trimToTokenBudget } from '../../services/budget';
+import type { AgentTask, AgentResult, AgentError, AgentUsage, Source } from './types';
 import { getConfig } from '../../config/index.js';
+
+/**
+ * Fraction of the node's token allowance the prompt may use; the rest is left
+ * for the completion.
+ */
+const PROMPT_SHARE_OF_ALLOWANCE = 0.75;
+
+/**
+ * A budget rejection is not transient: retrying cannot help, and the
+ * coordinator needs to distinguish it from a provider outage to halt the task
+ * rather than burn retries.
+ */
+function describeVeniceFailure(err: unknown): string {
+  if (err instanceof TokenBudgetExceededError) return 'BUDGET_EXHAUSTED';
+  if (err instanceof CircuitOpenError) return 'VENICE_UNAVAILABLE';
+  return 'VENICE_UNAVAILABLE';
+}
 
 const SourceSchema = z.object({
   url: z.string().url(),
@@ -71,6 +95,7 @@ export class ResearchAgent {
   private readonly venice: VeniceClientLike;
   private readonly apiBaseUrl: string;
   private readonly agentId: string;
+  private usage: AgentUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   constructor(config: ResearchAgentConfig = {}) {
     if (config.veniceClient) {
@@ -82,20 +107,62 @@ export class ResearchAgent {
     this.agentId = config.agentId ?? 'research-agent-1';
   }
 
+  /** Token totals for the task just executed, for the coordinator's billing. */
+  usageForCurrentTask(): AgentUsage {
+    return { ...this.usage };
+  }
+
+  /**
+   * Options for one Venice call: the node's token allowance plus a usage
+   * callback, so this agent's spend is attributed to the task (Issue #390).
+   */
+  private callOptions(task: AgentTask): CompleteOptions {
+    return {
+      budget: {
+        taskId: task.taskId,
+        nodeId: task.nodeId,
+        agentId: this.agentId,
+        agentType: 'research',
+        maxTokens: task.budget?.maxTokens,
+      },
+      onUsage: (reported) => {
+        this.usage.promptTokens += reported.prompt_tokens;
+        this.usage.completionTokens += reported.completion_tokens;
+        this.usage.totalTokens += reported.total_tokens;
+      },
+    };
+  }
+
+  /**
+   * Trim the prompt so it fits the node's allowance, leaving room for the
+   * completion. Research prompts are the worst offenders for size — they carry
+   * every upstream node's JSON — so this is where the cap usually bites.
+   */
+  private preparePrompt(task: AgentTask, prompt: string): string {
+    const allowance = task.budget?.maxTokens;
+    if (!allowance || allowance <= 0) return prompt;
+
+    const promptCeiling = Math.max(1, Math.floor(allowance * PROMPT_SHARE_OF_ALLOWANCE));
+    if (estimateTokens(prompt) <= promptCeiling) return prompt;
+    return trimToTokenBudget(prompt, promptCeiling);
+  }
+
   async execute(task: AgentTask): Promise<AgentResult | AgentError> {
     const { taskId, nodeId, prompt, context } = task;
+    this.usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
     const userContent = context
       ? `${prompt}\n\nAdditional context:\n${context}`
       : prompt;
 
-    const fullPrompt = `${SYSTEM_PROMPT}\n\n${userContent}`;
+    const fullPrompt = this.preparePrompt(task, `${SYSTEM_PROMPT}\n\n${userContent}`);
+    const options = this.callOptions(task);
 
     let rawText: string;
     try {
-      rawText = await this.venice.complete(fullPrompt, 'research');
-    } catch {
-      return { error: 'VENICE_UNAVAILABLE' };
+      rawText = await this.venice.complete(fullPrompt, 'research', options);
+    } catch (err) {
+      return { error: describeVeniceFailure(err) };
     }
 
     const parsed = this.parseVeniceResponse(rawText);
@@ -105,10 +172,13 @@ export class ResearchAgent {
 
     let retryText: string;
     try {
-      const retryPrompt = `${SYSTEM_PROMPT}\n\n${userContent}${JSON_MODE_ADDENDUM}`;
-      retryText = await this.venice.complete(retryPrompt, 'research');
-    } catch {
-      return { error: 'VENICE_UNAVAILABLE' };
+      const retryPrompt = this.preparePrompt(
+        task,
+        `${SYSTEM_PROMPT}\n\n${userContent}${JSON_MODE_ADDENDUM}`
+      );
+      retryText = await this.venice.complete(retryPrompt, 'research', options);
+    } catch (err) {
+      return { error: describeVeniceFailure(err) };
     }
 
     const retryParsed = this.parseVeniceResponse(retryText);

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import type { TaskResponse, NodeStatus } from '../types/api';
-import { apiClient } from '../services/api';
+import type { CursorPageEnvelope, TaskResponse, NodeStatus } from '../types/api';
+import { ApiError, apiClient } from '../services/api';
+import { readWalletSession } from '../services/walletSession';
 
 // ─── Filter types ────────────────────────────────────────────────────────────
 
@@ -201,10 +202,9 @@ export function useTaskHistory(
     setLoading(true);
     setError(null);
     try {
-      const walletAddress =
-        localStorage.getItem('wallet_pubkey') ||
-        localStorage.getItem('walletAddress') ||
-        '';
+      // Read through the shared session layer (#477) so this stays in step with
+      // WalletContext after the move from localStorage to sessionStorage.
+      const walletAddress = readWalletSession()?.publicKey ?? '';
 
       if (!walletAddress) {
         setAllTasks([]);
@@ -218,26 +218,46 @@ export function useTaskHistory(
 
       const url = `/api/wallets/${walletAddress}/tasks?${qs.toString()}`;
 
-      // Try v2 cursor envelope first, fall back to flat array
+      // Try v2 cursor envelope first, with a flat-array compatibility fallback.
       let fetchedTasks: TaskResponse[] = [];
       let newCursor: string | null = null;
       let morePages = false;
+      let envelope: CursorPageEnvelope<TaskResponse> | TaskResponse[] | undefined;
+      let useFallback = false;
 
       try {
-        type V2Envelope = { data: { items: TaskResponse[]; pagination: { nextCursor: string | null; hasNextPage: boolean } } };
-        const envelope = await apiClient.get<V2Envelope>(url);
-        if (envelope?.data?.items) {
-          fetchedTasks = envelope.data.items;
-          newCursor = envelope.data.pagination.nextCursor ?? null;
-          morePages = envelope.data.pagination.hasNextPage;
+        envelope = await apiClient.get<CursorPageEnvelope<TaskResponse> | TaskResponse[]>(url);
+      } catch (err) {
+        if (err instanceof ApiError && err.statusCode === 404) {
+          useFallback = true;
         } else {
-          // Flat array response from v1 / wallet endpoint
-          fetchedTasks = Array.isArray(envelope) ? (envelope as unknown as TaskResponse[]) : [];
+          throw err;
         }
-      } catch {
-        // Fallback: fetch without cursor
+      }
+
+      if (!useFallback && Array.isArray(envelope)) {
+        fetchedTasks = envelope;
+      } else if (
+        !useFallback &&
+        envelope &&
+        Array.isArray(envelope.data?.items) &&
+        envelope.data.pagination &&
+        typeof envelope.data.pagination.hasNextPage === 'boolean' &&
+        (typeof envelope.data.pagination.nextCursor === 'string' ||
+          envelope.data.pagination.nextCursor === null)
+      ) {
+        fetchedTasks = envelope.data.items;
+        newCursor = envelope.data.pagination.nextCursor;
+        morePages = envelope.data.pagination.hasNextPage;
+      } else {
+        useFallback = true;
+      }
+
+      if (useFallback) {
+        // Retry without the cursor only for a missing endpoint or incompatible response shape.
+        qs.delete('cursor');
         const fallback = await apiClient.get<TaskResponse[]>(
-          `/api/wallets/${walletAddress}/tasks?limit=200`
+          `/api/wallets/${walletAddress}/tasks?${qs.toString()}`
         );
         fetchedTasks = Array.isArray(fallback) ? fallback : [];
       }
