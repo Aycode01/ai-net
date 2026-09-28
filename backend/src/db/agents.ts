@@ -4,6 +4,7 @@ import { migrateToLatest } from "./migrator";
 import type { ReputationBreakdown } from "../services/qualityScorer.types";
 import { createPool, type SqlitePool } from "./pool";
 import { decodeCursor, encodeCursor, type CursorPage } from "./cursor";
+import { ValidationError } from "../errors";
 import { createErrorRegistryStore, getErrorDb } from "./errorRegistry";
 
 const MIGRATIONS_DIR = path.join(__dirname, "migrations", "agents");
@@ -68,6 +69,7 @@ export function ensureAgentTable(db: Database.Database): void {
       // Ignored if column already exists
     }
   }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agents_listing ON agents (lastSeenAt DESC, id DESC)");
 }
 
 /** Lazily open (or reopen) the pooled agent database. */
@@ -109,7 +111,8 @@ export function closeAgentDb(): void {
 export interface AgentDb {
   upsert(agent: AgentRecord): void;
   findById(id: string): AgentRecord | undefined;
-  list(filters?: { capability?: string; minReputation?: number; maxPriceXLM?: number; status?: string }): AgentRecord[];
+  /** Bounded convenience wrapper: defaults to 20, at most 100 records. */
+  list(options?: AgentCursorOptions): AgentRecord[];
   /**
    * Cursor-based list — stable under concurrent writes.
    * Keyset: (lastSeenAt DESC, id DESC).
@@ -184,42 +187,15 @@ export function createAgentDb(db: Database.Database): AgentDb {
       };
     },
 
-    list(filters?: { capability?: string; minReputation?: number; maxPriceXLM?: number; status?: string }): AgentRecord[] {
-      let query = "SELECT * FROM agents WHERE 1=1";
-      const params: any[] = [];
-      
-      if (filters?.minReputation !== undefined) {
-        query += " AND reputationScore >= ?";
-        params.push(filters.minReputation);
-      }
-      if (filters?.maxPriceXLM !== undefined) {
-        query += " AND pricingXLM <= ?";
-        params.push(filters.maxPriceXLM);
-      }
-      if (filters?.capability !== undefined) {
-        query += " AND EXISTS (SELECT 1 FROM json_each(capabilities) WHERE value = ?)";
-        params.push(filters.capability);
-      }
-      if (filters?.status !== undefined) {
-        query += " AND status = ?";
-        params.push(filters.status);
-      }
-
-      const rows = db.prepare(query).all(...params) as any[];
-      return rows.map(row => ({
-        ...row,
-        capabilities: JSON.parse(row.capabilities),
-        status: row.status ?? 'offline',
-        reputationScore: Number(row.reputationScore ?? 2.5),
-        bondAmountXLM: Number(row.bondAmountXLM ?? 0),
-        tasksCompleted: Number(row.tasksCompleted ?? 0),
-        tasksFailed: Number(row.tasksFailed ?? 0),
-        lastActiveAt: row.lastActiveAt ?? row.lastSeenAt,
-      }));
+    list(options: AgentCursorOptions = {}): AgentRecord[] {
+      return this.listCursor(options).items;
     },
 
     listCursor(options: AgentCursorOptions = {}): CursorPage<AgentRecord> {
-      const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
+      const limit = options.limit ?? 20;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        throw new ValidationError("limit must be an integer between 1 and 100");
+      }
 
       const conditions: string[] = ["1=1"];
       const params: unknown[] = [];
@@ -244,25 +220,29 @@ export function createAgentDb(db: Database.Database): AgentDb {
       let cursorCondition = "";
       const cursorParams: unknown[] = [];
 
-      if (options.cursor) {
+      if (options.cursor !== undefined) {
         const payload = decodeCursor(options.cursor);
-        if (payload?.lastSeenAt && payload?.id) {
-          // Compound keyset: rows that come after (lastSeenAt DESC, id DESC)
-          cursorCondition = "AND (lastSeenAt < ? OR (lastSeenAt = ? AND id < ?))";
-          cursorParams.push(payload.lastSeenAt, payload.lastSeenAt, payload.id);
+        if (!payload || typeof payload.lastSeenAt !== "string" || !payload.lastSeenAt ||
+            typeof payload.id !== "string" || !payload.id) {
+          throw new ValidationError("Invalid agent cursor");
         }
+        // Compound keyset: rows that come after (lastSeenAt DESC, id DESC)
+        cursorCondition = "AND (lastSeenAt < ? OR (lastSeenAt = ? AND id < ?))";
+        cursorParams.push(payload.lastSeenAt, payload.lastSeenAt, payload.id);
       }
 
       const whereClause = conditions.join(" AND ");
       // Fetch limit+1 to detect whether a next page exists without a COUNT query
       const rows = db
         .prepare(
-          `SELECT * FROM agents
+          `SELECT id, capabilities, pricingXLM, endpoint, stellarPublicKey,
+                  reputationScore, lastSeenAt, status, bondAmountXLM,
+                  tasksCompleted, tasksFailed, lastActiveAt FROM agents
            WHERE ${whereClause} ${cursorCondition}
            ORDER BY lastSeenAt DESC, id DESC
            LIMIT ?`,
         )
-        .all(...params, ...cursorParams, limit + 1) as any[];
+        .all(...params, ...cursorParams, limit + 1) as Array<Omit<AgentRecord, "capabilities"> & { capabilities: string }>;
 
       const hasMore = rows.length > limit;
       const pageRows = hasMore ? rows.slice(0, limit) : rows;
@@ -271,6 +251,11 @@ export function createAgentDb(db: Database.Database): AgentDb {
         ...row,
         capabilities: JSON.parse(row.capabilities),
         status: row.status ?? 'offline',
+        reputationScore: Number(row.reputationScore ?? 2.5),
+        bondAmountXLM: Number(row.bondAmountXLM ?? 0),
+        tasksCompleted: Number(row.tasksCompleted ?? 0),
+        tasksFailed: Number(row.tasksFailed ?? 0),
+        lastActiveAt: row.lastActiveAt ?? row.lastSeenAt,
       }));
 
       const result: CursorPage<AgentRecord> = { items: agents };

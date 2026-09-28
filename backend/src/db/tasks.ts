@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import path from "path";
 import type { Task, TaskStatus } from "../types/task";
 import type { QualityScoreRecord } from "../services/qualityScorer.types";
+import { ValidationError } from "../errors";
 import { createLogger } from "../utils/logger";
 import { migrateToLatest } from "./migrator";
 import { createPool, type SqlitePool } from "./pool";
@@ -65,6 +66,18 @@ export interface TaskEvent {
   timestamp: string;
 }
 
+export interface TaskEventHistoryOptions {
+  /** Task-local sequence from nextCursor; omitted (or -1) starts before sequence zero. */
+  afterId?: number;
+  /** Defaults to 100; must be an integer from 1 to 100. */
+  limit?: number;
+}
+
+export interface TaskEventHistoryPage {
+  items: TaskEvent[];
+  nextCursor: number | null;
+}
+
 export interface TaskListOptions {
   status?: string;
   q?: string;
@@ -103,7 +116,7 @@ export interface TaskDb {
   updateStatus(id: string, status: TaskStatus): void;
   updateDagJson(id: string, dagJson: string): void;
   insertEvent(event: TaskEvent): void;
-  getEventHistory(taskId: string): TaskEvent[];
+  getEventHistory(taskId: string, options?: TaskEventHistoryOptions): TaskEventHistoryPage;
   failRunningTasks(): void;
   insertQualityScore(record: QualityScoreRecord): void;
   listQualityScores(agentId?: string, limit?: number): QualityScoreRecord[];
@@ -278,25 +291,39 @@ export function createTaskDb(db: Database.Database): TaskDb {
       });
     },
 
-    getEventHistory(taskId: string): TaskEvent[] {
-      const rows = db
-        .prepare(
-          'SELECT * FROM task_events WHERE task_id = ? ORDER BY task_seq ASC',
-        )
-        .all(taskId) as Array<{
+    getEventHistory(taskId: string, options: TaskEventHistoryOptions = {}): TaskEventHistoryPage {
+      const { afterId = -1, limit = 100 } = options;
+      if (!Number.isSafeInteger(afterId) || afterId < -1) {
+        throw new ValidationError("afterId must be a safe integer greater than or equal to -1");
+      }
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        throw new ValidationError("limit must be an integer between 1 and 100");
+      }
+      // task_seq is the immutable per-task cursor in the current event schema.
+      const rows = db.prepare(`
+        SELECT task_seq, task_id, type, node_id, payload, occurred_at
+        FROM task_events WHERE task_id = ? AND task_seq > ?
+        ORDER BY task_seq ASC LIMIT ?
+      `).all(taskId, afterId, limit + 1) as Array<{
+        task_seq: number;
         task_id: string;
         type: string;
         node_id: string | null;
         payload: string | null;
         occurred_at: string;
       }>;
-      return rows.map((r) => ({
-        taskId: r.task_id,
-        type: r.type,
-        nodeId: r.node_id ?? undefined,
-        payload: r.payload ? JSON.parse(r.payload) : undefined,
-        timestamp: r.occurred_at,
-      }));
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit);
+      return {
+        items: page.map((r) => ({
+          taskId: r.task_id,
+          type: r.type,
+          nodeId: r.node_id ?? undefined,
+          payload: r.payload ? JSON.parse(r.payload) : undefined,
+          timestamp: r.occurred_at,
+        })),
+        nextCursor: hasMore ? page[page.length - 1].task_seq : null,
+      };
     },
 
     failRunningTasks(): void {

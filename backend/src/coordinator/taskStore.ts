@@ -1,5 +1,5 @@
 import type { Task, DAGNode } from '../types/task';
-import { getTaskDb, createTaskDb } from '../db/tasks';
+import { getTaskDb, createTaskDb, type TaskEventHistoryOptions } from '../db/tasks';
 
 function db() {
   return createTaskDb(getTaskDb());
@@ -32,6 +32,6 @@ export function updateNode(taskId: string, nodeId: string, patch: Partial<DAGNod
   db().updateDagJson(taskId, JSON.stringify(task.dag));
 }
 
-export function getEventHistory(taskId: string) {
-  return db().getEventHistory(taskId);
+export function getEventHistory(taskId: string, options?: TaskEventHistoryOptions) {
+  return db().getEventHistory(taskId, options);
 }
