@@ -2,6 +2,25 @@
 
 This guide explains how to safely upgrade ai-net smart contracts using the comprehensive upgrade mechanism with data migration, version tracking, and rollback capabilities.
 
+---
+
+## Architectural Decision Record (ADR-001): Standardized Workspace Upgrade Design
+
+### Context & Problem Statement
+The workspace previously contained multiple fragmented upgrade patterns:
+- **Canonical Design**: Proposal-scoped upgrade via `UpgradeManager` + `Upgradeable` trait + timelock + pre/post-migration hooks (used by `agent_registry`).
+- **Ad-Hoc Design**: Direct, unvalidated `update_current_contract_wasm` calls bypassing version checks, compatibility hooks, and rollback records (previously in `error-registry`, `task_store`, `agent_bidding`).
+
+Ad-hoc upgrades constituted a major security vulnerability, allowing immediate WASM replacement without safety checks or emergency rollback windows.
+
+### Decision
+We standardize on **Design 2 (UpgradeManager + Upgradeable Trait + Timelock + Hooks)** across the workspace:
+1. **Single Canonical Upgrade Path**: All contract upgrades must be performed through `UpgradeManager` via proposals, validation hooks, and 48-hour rollback windows.
+2. **Deprecation of Ad-Hoc Paths**: All direct public `upgrade` methods calling `update_current_contract_wasm` outside `UpgradeManager` and the `Upgradeable` implementation have been removed.
+3. **CI Enforcement**: `scripts/check_upgrade_paths.sh` is executed in CI to ensure no contract invokes `update_current_contract_wasm` directly outside canonical files.
+
+---
+
 ## Overview
 
 The ai-net smart contracts support two upgrade methods:
