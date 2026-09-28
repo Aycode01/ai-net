@@ -52,6 +52,7 @@
 //! **rejected** with `Error::OraclePriceUnavailable`. This prevents tasks from
 //! being accepted at an unknown cost.
 
+pub mod gas;
 mod types;
 
 #[cfg(test)]
@@ -72,6 +73,7 @@ use soroban_sdk::{
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const CONTRACT_VERSION: &str = "1.0.0";
+const MAX_TASK_QUERY_BATCH: u32 = 50;
 
 fn require_not_paused(env: &Env) -> Result<(), Error> {
     let paused: bool = env
@@ -364,7 +366,6 @@ impl TaskStoreContract {
         Ok(())
     }
 
-    /// Return the current admin address, if set.
     pub fn get_admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Admin)
     }
@@ -406,7 +407,7 @@ impl TaskStoreContract {
             None => env.storage().instance().remove(&DataKey::OracleManager),
         }
         env.events().publish(
-            (symbol_short!("task_str"), symbol_short!("ora_set")),
+            (symbol_short!("task_meta"), symbol_short!("ora_set")),
             OracleManagerSetEvent { oracle_manager },
         );
         Ok(())
@@ -456,7 +457,7 @@ impl TaskStoreContract {
             .instance()
             .set(&DataKey::Version, &new_version);
         env.events().publish(
-            (symbol_short!("task_str"), symbol_short!("upgraded")),
+            (symbol_short!("task_meta"), symbol_short!("upgraded")),
             (
                 old_version,
                 new_version,
@@ -567,6 +568,21 @@ impl TaskStoreContract {
 
     pub fn get_task_metadata(env: Env, task_id: BytesN<32>) -> Result<TaskMetadata, Error> {
         read_metadata(&env, &task_id)
+    }
+
+    /// Read a bounded set of task records in one invocation.
+    pub fn get_task_metadata_batch(
+        env: Env,
+        task_ids: Vec<BytesN<32>>,
+    ) -> Result<Vec<TaskMetadata>, Error> {
+        if task_ids.len() > MAX_TASK_QUERY_BATCH {
+            return Err(Error::BatchTooLarge);
+        }
+        let mut result = Vec::new(&env);
+        for task_id in task_ids.iter() {
+            result.push_back(read_metadata(&env, &task_id)?);
+        }
+        Ok(result)
     }
 
     pub fn get_task_status(env: Env, task_id: BytesN<32>) -> Result<TaskStatus, Error> {
@@ -854,6 +870,12 @@ impl TaskStoreContract {
     }
 }
 
+impl gas_interface::GasEstimator for TaskStoreContract {
+    fn estimate(operation: Symbol, params: soroban_sdk::Map<Symbol, Val>) -> u64 {
+        gas::estimate(operation, params.len())
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -882,9 +904,6 @@ mod test {
         });
         let contract_id = env.register(TaskStoreContract, ());
         let client = TaskStoreContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
         Fixture {
             submitter: Address::generate(&env),
             agent: Address::generate(&env),
@@ -1194,7 +1213,7 @@ mod test {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events.get(0).unwrap().1,
-            (symbol_short!("task_str"), symbol_short!("ora_set")).into_val(&fixture.env)
+            (symbol_short!("task_meta"), symbol_short!("ora_set")).into_val(&fixture.env)
         );
     }
 

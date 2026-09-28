@@ -7,6 +7,7 @@
 //! task's escrow by off-chain payment coordinators.
 
 mod errors;
+pub mod gas;
 mod types;
 
 pub use errors::Error;
@@ -550,6 +551,12 @@ impl DisputeResolutionContract {
             .persistent()
             .get(&DataKey::AgentBond(agent_id))
             .unwrap_or(0)
+    }
+}
+
+impl gas_interface::GasEstimator for DisputeResolutionContract {
+    fn estimate(operation: Symbol, params: Map<Symbol, Val>) -> u64 {
+        gas::estimate(operation, params.len())
     }
 }
 

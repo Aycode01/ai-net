@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 import path from "path";
 import { migrateToLatest } from "./migrator";
 import type { ReputationBreakdown } from "../services/qualityScorer.types";
@@ -7,6 +8,24 @@ import { decodeCursor, encodeCursor, type CursorPage } from "./cursor";
 import { createErrorRegistryStore, getErrorDb } from "./errorRegistry";
 
 const MIGRATIONS_DIR = path.join(__dirname, "migrations", "agents");
+
+/** Map a raw `agents` row to an {@link AgentRecord}. */
+function toAgentRecord(row: any): AgentRecord {
+  return {
+    id: row.id,
+    capabilities: JSON.parse(row.capabilities || "[]"),
+    pricingXLM: row.pricingXLM,
+    endpoint: row.endpoint,
+    stellarPublicKey: row.stellarPublicKey,
+    reputationScore: row.reputationScore,
+    lastSeenAt: row.lastSeenAt,
+    status: row.status,
+    bondAmountXLM: row.bondAmountXLM,
+    tasksCompleted: row.tasksCompleted,
+    tasksFailed: row.tasksFailed,
+    lastActiveAt: row.lastActiveAt ?? undefined,
+  };
+}
 
 export interface AgentRecord {
   id: string;
@@ -35,6 +54,19 @@ export interface AgentCursorOptions {
   status?: string;
 }
 
+/** A persisted watchdog alert, as stored in `agent_alerts`. */
+export interface AgentAlertRow {
+  id: string;
+  agentId: string;
+  type: string;
+  severity: string;
+  message: string;
+  lastSeenAt: string | null;
+  detectedAt: string;
+  resolvedAt: string | null;
+  metadata: Record<string, unknown>;
+}
+
 let _agentPool: SqlitePool | null = null;
 
 export function ensureAgentTable(db: Database.Database): void {
@@ -60,6 +92,8 @@ export function ensureAgentTable(db: Database.Database): void {
     "ALTER TABLE agents ADD COLUMN tasksCompleted INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE agents ADD COLUMN tasksFailed INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE agents ADD COLUMN lastActiveAt TEXT",
+    // Watchdog grace-period clock (Issue #379).
+    "ALTER TABLE agents ADD COLUMN staleSince TEXT",
   ];
   for (const sql of migrations) {
     try {
@@ -68,6 +102,25 @@ export function ensureAgentTable(db: Database.Database): void {
       // Ignored if column already exists
     }
   }
+
+  // Mirrors migration 002 so an in-memory test database (which never runs the
+  // migrations directory) still has the alert table.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_alerts (
+      id         TEXT PRIMARY KEY,
+      agentId    TEXT NOT NULL,
+      type       TEXT NOT NULL,
+      severity   TEXT NOT NULL,
+      message    TEXT NOT NULL,
+      lastSeenAt TEXT,
+      detectedAt TEXT NOT NULL,
+      resolvedAt TEXT,
+      metadata   TEXT NOT NULL DEFAULT '{}'
+    )
+  `);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agent_alerts_detectedAt ON agent_alerts (detectedAt DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agent_alerts_agentId ON agent_alerts (agentId, detectedAt DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agents_staleSince ON agents (staleSince)");
 }
 
 /** Lazily open (or reopen) the pooled agent database. */
@@ -123,6 +176,40 @@ export interface AgentDb {
   updateLastSeen(agentId: string): void;
   markStaleAgents(staleThresholdMinutes?: number): number;
   deleteOfflineAgents(offlineThresholdHours?: number): number;
+
+  // ── Heartbeat watchdog (Issue #379) ────────────────────────────────────────
+  /**
+   * Quarantine an agent: withdraw it from dispatch and start its grace clock.
+   *
+   * Setting `staleSince` is not enough on its own — the coordinator dispatches
+   * to `status = 'online'` agents, so an agent left online stays reachable for
+   * the whole grace window. Flipping the status is what makes a stale agent
+   * unavailable *within* the grace period.
+   */
+  markStale(agentId: string, staleSince: string): void;
+  /**
+   * Clear the grace-period clock and restore dispatch eligibility.
+   *
+   * Only safe to call once liveness has been proven (a fresh heartbeat), which
+   * is the only thing the watchdog's recovery path checks before calling it.
+   */
+  clearStale(agentId: string): void;
+  /** Epoch ms the agent was first seen missing, or null if never. */
+  getStaleSince(agentId: string): number | null;
+  /** Agents currently inside their grace period. */
+  listStaleAgents(): AgentRecord[];
+  /** Persist a watchdog alert for the dashboard and the audit trail. */
+  recordAlert(alert: {
+    agentId: string;
+    type: string;
+    severity: string;
+    message: string;
+    lastSeenAt?: string | null;
+    metadata?: Record<string, unknown>;
+  }): string;
+  /** Most recent alerts first; optionally filtered to unresolved ones. */
+  listAlerts(options?: { limit?: number; agentId?: string; unresolvedOnly?: boolean }): AgentAlertRow[];
+
   // Optional on-chain event handlers used by registry/sync.ts. Not every
   // AgentDb implementation mirrors contract state, so call sites use `?.`.
   remove?(id: string): void;
@@ -363,6 +450,120 @@ export function createAgentDb(db: Database.Database): AgentDb {
           AND datetime(lastSeenAt, '+' || ? || ' hours') < datetime('now')
       `).run(offlineThresholdHours);
       return result.changes;
+    },
+
+    // ── Heartbeat watchdog (Issue #379) ──────────────────────────────────────
+
+    markStale(agentId: string, staleSince: string): void {
+      // COALESCE so a second miss does not re-arm the grace clock: eviction is
+      // measured from the *first* missed tick, not from the latest one.
+      // `status = 'offline'` withdraws the agent from dispatch immediately.
+      db.prepare(`
+        UPDATE agents
+        SET staleSince = COALESCE(staleSince, ?),
+            status = 'offline'
+        WHERE id = ?
+      `).run(staleSince, agentId);
+    },
+
+    clearStale(agentId: string): void {
+      // Restore dispatch eligibility as well as clearing the clock. The caller
+      // has just seen a fresh heartbeat, so 'online' is the truthful status
+      // even if the heartbeat write path did not set it.
+      db.prepare(`
+        UPDATE agents
+        SET staleSince = NULL,
+            status = 'online'
+        WHERE id = ?
+      `).run(agentId);
+    },
+
+    getStaleSince(agentId: string): number | null {
+      const row = db.prepare("SELECT staleSince FROM agents WHERE id = ?").get(agentId) as
+        | { staleSince: string | null }
+        | undefined;
+      if (!row?.staleSince) return null;
+      const parsed = Date.parse(row.staleSince);
+      return Number.isFinite(parsed) ? parsed : null;
+    },
+
+    listStaleAgents(): AgentRecord[] {
+      const rows = db
+        .prepare("SELECT * FROM agents WHERE staleSince IS NOT NULL ORDER BY staleSince ASC")
+        .all() as any[];
+      return rows.map(toAgentRecord);
+    },
+
+    recordAlert(alert: {
+      agentId: string;
+      type: string;
+      severity: string;
+      message: string;
+      lastSeenAt?: string | null;
+      metadata?: Record<string, unknown>;
+    }): string {
+      const id = randomUUID();
+      const detectedAt = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO agent_alerts
+          (id, agentId, type, severity, message, lastSeenAt, detectedAt, resolvedAt, metadata)
+        VALUES
+          (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+      `).run(
+        id,
+        alert.agentId,
+        alert.type,
+        alert.severity,
+        alert.message,
+        alert.lastSeenAt ?? null,
+        detectedAt,
+        JSON.stringify(alert.metadata ?? {}),
+      );
+      return id;
+    },
+
+    listAlerts(
+      options: { limit?: number; agentId?: string; unresolvedOnly?: boolean } = {},
+    ): AgentAlertRow[] {
+      const limit = options.limit ?? 50;
+      const clauses: string[] = [];
+      const params: unknown[] = [];
+
+      if (options.agentId) {
+        clauses.push("agentId = ?");
+        params.push(options.agentId);
+      }
+      if (options.unresolvedOnly) {
+        clauses.push("resolvedAt IS NULL");
+      }
+
+      const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+      const rows = db
+        .prepare(
+          `SELECT * FROM agent_alerts ${where} ORDER BY detectedAt DESC LIMIT ?`,
+        )
+        .all(...params, limit) as any[];
+
+      return rows.map((row) => {
+        let metadata: Record<string, unknown> = {};
+        try {
+          metadata = JSON.parse(row.metadata ?? "{}");
+        } catch {
+          // Corrupt metadata must not make the whole alert list unreadable.
+          metadata = {};
+        }
+        return {
+          id: row.id,
+          agentId: row.agentId,
+          type: row.type,
+          severity: row.severity,
+          message: row.message,
+          lastSeenAt: row.lastSeenAt ?? null,
+          detectedAt: row.detectedAt,
+          resolvedAt: row.resolvedAt ?? null,
+          metadata,
+        };
+      });
     },
 
     upsertError(error: {

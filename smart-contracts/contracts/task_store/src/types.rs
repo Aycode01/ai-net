@@ -135,7 +135,7 @@ pub enum DataKey {
     Admin,
     Paused,
     Version,
-    /// Task metadata record, keyed by task id.
+    Paused,
     Task(BytesN<32>),
     /// Optional OracleManager contract address used to resolve quoted prices.
     OracleManager,
