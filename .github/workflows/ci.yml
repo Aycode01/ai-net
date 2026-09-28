@@ -18,6 +18,8 @@ concurrency:
 
 permissions:
   contents: read
+  # dorny/paths-filter queries the pull request files API on PR events.
+  pull-requests: read
 
 jobs:
   changes:
@@ -457,12 +459,13 @@ jobs:
   ci-gate:
     name: ci-gate (required)
     if: always()
-    needs: [backend, frontend, contracts, e2e-backend-smoke, e2e-backend-heavy, e2e-frontend-smoke, e2e-frontend-heavy]
+    needs: [changes, backend, frontend, contracts, e2e-backend-smoke, e2e-backend-heavy, e2e-frontend-smoke, e2e-frontend-heavy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Evaluate CI results (skipped = success for path-filtered PRs)
         run: |
+          echo "changes: ${{ needs.changes.result }}"
           echo "backend: ${{ needs.backend.result }}"
           echo "frontend: ${{ needs.frontend.result }}"
           echo "contracts: ${{ needs.contracts.result }}"
@@ -472,7 +475,7 @@ jobs:
           echo "e2e-frontend-heavy: ${{ needs.e2e-frontend-heavy.result }}"
 
           fail=0
-          for job in "${{ needs.backend.result }}" "${{ needs.frontend.result }}" "${{ needs.contracts.result }}"; do
+          for job in "${{ needs.changes.result }}" "${{ needs.backend.result }}" "${{ needs.frontend.result }}" "${{ needs.contracts.result }}"; do
             if [[ "$job" == "failure" || "$job" == "cancelled" ]]; then
               echo "❌ Required job failed: $job"
               fail=1
