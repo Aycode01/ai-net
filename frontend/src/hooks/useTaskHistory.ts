@@ -273,19 +273,15 @@ export function useTaskHistory(
   }, [filters.status]);
 
   useEffect(() => {
-    // Reset and fetch from the start whenever filters change
+    // `fetchTasks` is recreated only when `filters.status` changes, so this
+    // effect fetches exactly once on mount and refetches exactly once per
+    // status change. Non-status filters are applied client-side and never
+    // trigger a new request.
     setAllTasks([]);
     setNextCursor(null);
     setHasNextPage(false);
     fetchTasks(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.status]);
-
-  // Initial load (non-status filters are applied client-side)
-  useEffect(() => {
-    fetchTasks(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchTasks]);
 
   const refetch = useCallback(() => {
     setAllTasks([]);
