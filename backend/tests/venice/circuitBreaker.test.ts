@@ -1,5 +1,5 @@
-import { CircuitBreaker } from '../../src/venice/circuitBreaker';
-import { CircuitOpenError } from '../../src/venice/errors';
+import { CircuitBreaker } from '../../src/services/venice/circuitBreaker';
+import { CircuitOpenError } from '../../src/services/venice/errors';
 
 describe('CircuitBreaker', () => {
   let now: number;
