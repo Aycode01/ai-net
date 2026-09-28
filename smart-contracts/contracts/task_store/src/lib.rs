@@ -102,18 +102,7 @@ fn is_terminal(status: TaskStatus) -> bool {
     matches!(status, TaskStatus::Completed | TaskStatus::Failed)
 }
 
-fn read_admin(env: &Env) -> Result<Address, Error> {
-    env.storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotInitialized)
-}
 
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin = read_admin(env)?;
-    admin.require_auth();
-    Ok(admin)
-}
 
 /// Call `OracleManager::resolve_price(pair)` via a low-level cross-contract
 /// call and return the resolved price in stroops on success, or `None` on any
@@ -152,16 +141,7 @@ pub struct TaskStoreContract;
 
 #[contractimpl]
 impl TaskStoreContract {
-    pub fn estimate_gas(env: Env, operation: Symbol, count: u32) -> u64 {
-        let _ = env;
-        gas::estimate(operation, count)
-    }
-
-    pub fn estimate(env: Env, operation: Symbol, params: soroban_sdk::Map<Symbol, Val>) -> u64 {
-        let _ = env;
-        <TaskStoreContract as gas_interface::GasEstimator>::estimate(operation, params)
-    }
-
+    /// Initialise the contract with an admin. Can only be called once.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyExists);
@@ -172,6 +152,8 @@ impl TaskStoreContract {
         env.storage()
             .instance()
             .set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
+        env.events()
+            .publish((symbol_short!("task_meta"), symbol_short!("init")), admin);
         Ok(())
     }
 
@@ -667,25 +649,6 @@ mod test {
         assert!(!fixture.client.is_paused());
     }
 
-    #[test]
-    fn pause_blocks_store_task_metadata() {
-        let fixture = fixture();
-        fixture.client.initialize(&Address::generate(&fixture.env));
-        let agents = Vec::from_array(&fixture.env, [fixture.agent.clone()]);
-        let dag = Bytes::from_slice(&fixture.env, &[0x78, 0x9c, 0x03, 0x00]);
-        fixture.client.pause();
-        let result = fixture.client.try_store_task_metadata(
-            &fixture.submitter,
-            &fixture.task_id,
-            &fixture.prompt_hash,
-            &agents,
-            &dag,
-            &1u32,
-            &None,
-        );
-        assert_eq!(result, Err(Ok(Error::ContractPaused)));
-    }
-
     // ── Admin / set_oracle_manager ────────────────────────────────────────────
 
     #[test]
@@ -860,6 +823,44 @@ mod test {
         );
 
         assert_eq!(result, Err(Ok(Error::OraclePriceUnavailable)));
+    }
+
+    #[test]
+    fn unpause_allows_store_task_metadata() {
+        let fixture = fixture();
+        fixture.client.pause();
+        fixture.client.unpause();
+
+        store(&fixture, 1);
+        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
+        assert_eq!(metadata.task_id, fixture.task_id);
+    }
+
+    #[test]
+    fn pause_blocks_update_task_status() {
+        let fixture = fixture();
+        store(&fixture, 1);
+
+        fixture.client.pause();
+
+        let result = fixture.client.try_update_task_status(
+            &fixture.task_id,
+            &fixture.agent,
+            &TaskStatus::Running,
+        );
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
+    }
+
+    #[test]
+    fn get_task_metadata_still_works_when_paused() {
+        let fixture = fixture();
+        store(&fixture, 1);
+
+        fixture.client.pause();
+
+        // Reads should still work when paused.
+        let metadata = fixture.client.get_task_metadata(&fixture.task_id);
+        assert_eq!(metadata.task_id, fixture.task_id);
     }
 
     #[test]

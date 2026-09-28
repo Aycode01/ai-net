@@ -9,10 +9,9 @@
  *  3. Delivered to per-task subscribers.
  *
  * The EventStore is injected at construction time so it can be replaced with a
- * custom instance (e.g. a file-backed DB for production, or a fresh in-memory
- * DB in tests).  If no store is supplied the bus creates a default in-memory
- * instance — this preserves the zero-config behaviour used throughout the test
- * suite.
+ * custom instance (e.g. a fresh in-memory DB in tests).  If no store is
+ * supplied the bus uses the shared process-wide store (`getEventStore()`),
+ * which is file-backed in production so the log survives a restart.
  *
  * Backward compatibility
  * ──────────────────────
@@ -28,7 +27,7 @@
 
 import { EventEmitter } from 'events';
 import type { DAGEvent } from '../types/task';
-import { createEventStore } from '../events/eventStore';
+import { getEventStore } from '../events/eventStore';
 import type { EventStore } from '../events/eventStore';
 import type { AppEvent } from '../events/eventTypes';
 import { CURRENT_EVENT_VERSION } from '../events/eventTypes';
@@ -108,7 +107,11 @@ class EventBus extends EventEmitter {
 
   constructor(options: EventBusOptions = {}) {
     super();
-    this.store = options.store ?? createEventStore();
+    // Default to the shared, file-backed store so the event log survives a
+    // restart — which is also what gives the maxTaskSeqPerTask() rehydration
+    // below something to rehydrate from, and what makes the retention job
+    // meaningful.
+    this.store = options.store ?? getEventStore();
     this.setMaxListeners(options.maxListeners ?? 100);
 
     // ── Rehydrate seq counters from the DB ──────────────────────────────────

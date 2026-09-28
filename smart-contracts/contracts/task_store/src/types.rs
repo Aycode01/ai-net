@@ -48,6 +48,7 @@ pub struct TaskMetadata {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    Paused,
     Version,
     Paused,
     Task(BytesN<32>),
@@ -129,5 +130,4 @@ pub enum Error {
     ContractPaused = 14,
     MissingPricePair = 15,
     OraclePriceUnavailable = 16,
-    BatchTooLarge = 17,
 }
