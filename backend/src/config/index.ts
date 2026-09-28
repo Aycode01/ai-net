@@ -51,9 +51,25 @@ const envSchema = z.object({
   REGISTER_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(10),
   DAILY_TASK_LIMIT_PER_WALLET: z.coerce.number().int().min(0).default(100),
 
+  /** Token budget management and per-task cost tracking (Issue #390). */
+  /** Total tokens (input + output) a single task may consume before it halts. */
+  TASK_TOKEN_BUDGET: z.coerce.number().int().positive().default(200_000),
+  /** Ceiling on one LLM call's max_tokens. */
+  LLM_MAX_TOKENS_PER_CALL: z.coerce.number().int().positive().default(8_192),
+  /** Ceiling on one LLM call's input prompt; longer prompts are trimmed. */
+  LLM_MAX_PROMPT_TOKENS: z.coerce.number().int().positive().default(16_000),
+  /** `MODEL=inputUsd:outputUsd,MODEL=...` overrides for the pricing table. */
+  VENICE_PRICING: z.string().optional(),
+  /** How often in-flight task costs are flushed to the database (ms). */
+  COST_FLUSH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+
   HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
   HEARTBEAT_STALE_THRESHOLD_MINUTES: z.coerce.number().int().positive().default(5),
   AGENT_OFFLINE_DELETE_HOURS: z.coerce.number().int().positive().default(24),
+
+  /** Agent heartbeat watchdog: grace period before eviction (Issue #379). */
+  AGENT_WATCHDOG_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  AGENT_WATCHDOG_GRACE_MINUTES: z.coerce.number().int().positive().default(10),
 
   RECONCILIATION_WEBHOOK_URL: z.string().url().optional(),
   RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(86_400_000),
