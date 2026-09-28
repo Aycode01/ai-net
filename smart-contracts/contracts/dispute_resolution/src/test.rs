@@ -264,3 +264,77 @@ fn setup_with_admin() -> (Env, DisputeResolutionContractClient<'static>, Address
     client.initialize(&admin);
     (env, client, admin)
 }
+
+// ========================================================================
+// Negative Authorization Tests (Issue #549)
+// ========================================================================
+
+#[test]
+fn negative_auth_set_admin() {
+    let (env, client, _admin) = setup_with_admin();
+    let intruder = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_admin(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_pause() {
+    let (env, client, _admin) = setup_with_admin();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_pause(), Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn negative_auth_unpause() {
+    let (env, client, admin) = setup_with_admin();
+    client.pause();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_unpause(), Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn negative_auth_set_voters() {
+    let (env, client, _admin) = setup_with_admin();
+    let voters = soroban_sdk::vec![&env, Address::generate(&env)];
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_voters(&voters),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_set_reputation() {
+    let (env, client, _admin) = setup_with_admin();
+    let account = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_reputation(&account, &50),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_set_agent_bond() {
+    let (env, client, _admin) = setup_with_admin();
+    let agent = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_agent_bond(&agent, &100),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_set_task_escrow() {
+    let (env, client, _admin) = setup_with_admin();
+    let task_id = Symbol::new(&env, "task1");
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_task_escrow(&task_id, &1000),
+        Err(Ok(Error::Unauthorized))
+    );
+}
