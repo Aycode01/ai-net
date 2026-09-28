@@ -74,7 +74,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         try {
           const errorText = await response.text();
           message = errorText || message;
-        } catch {}
+        } catch {
+          // Body already consumed or unreadable — keep the default message.
+        }
       }
       progressError();
       throw new ApiError(response.status, message, path);
