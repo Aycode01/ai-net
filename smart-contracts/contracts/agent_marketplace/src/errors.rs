@@ -15,8 +15,8 @@ pub enum Error {
     BookingNotFound = 7,
     BookingAlreadyCompleted = 8,
     BookingAlreadyCancelled = 9,
-    SlaViolation = 10,
-    NotOwner = 11,
+    // Codes 10 (SlaViolation) and 11 (NotOwner) were never constructed and
+    // have been removed. They are reserved and must not be reused.
     ServiceNotAvailable = 12,
 }
 
@@ -32,8 +32,6 @@ impl Error {
             7 => Some(Error::BookingNotFound),
             8 => Some(Error::BookingAlreadyCompleted),
             9 => Some(Error::BookingAlreadyCancelled),
-            10 => Some(Error::SlaViolation),
-            11 => Some(Error::NotOwner),
             12 => Some(Error::ServiceNotAvailable),
             _ => None,
         }

@@ -4,7 +4,7 @@
 //! variant maps to a stable `u32` status code so off-chain callers can branch
 //! on the numeric code without coupling to a specific SDK build.
 //!
-//! The code range used here (`1..=16`) is local to this contract. **Never
+//! The code range used here (`1..=23`) is local to this contract. **Never
 //! renumber an existing variant** once the contract is deployed.
 
 use soroban_sdk::contracterror;
@@ -46,4 +46,18 @@ pub enum Error {
     ProposalFinalized = 15,
     /// Proposal title or description must not be empty.
     EmptyMetadata = 16,
+    /// The caller is not the governance admin.
+    NotAdmin = 17,
+    /// Proposal creation and voting are paused.
+    ContractPaused = 18,
+    /// The execution target is missing, unknown, or not a contract.
+    InvalidTarget = 19,
+    /// Execution calldata exceeds `MAX_CALLDATA_LEN`.
+    CalldataTooLarge = 20,
+    /// `calldata` does not hash to the pinned `expected_hash`.
+    PayloadHashMismatch = 21,
+    /// A `ParameterChange` proposal was created before a registry was set.
+    RegistryNotSet = 22,
+    /// The voter had no voting power at the proposal's snapshot point.
+    NoSnapshotPower = 23,
 }
