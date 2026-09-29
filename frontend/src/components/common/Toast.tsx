@@ -1,6 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import type { ReactNode } from 'react';
-import { AlertTriangle, CheckCircle, Info, XCircle } from 'lucide-react';
+import { CheckCircle, XCircle, AlertTriangle, Info } from 'lucide-react';
 import './Toast.css';
 import type { Toast } from '../../context/ToastContext';
 

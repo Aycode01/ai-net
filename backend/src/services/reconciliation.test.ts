@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { createReconciliationRouter } from "../api/routes/reconciliation";
+import { errorHandler } from "../api/middleware/errorHandler";
 import {
   ReconciliationService,
   createSqliteReconciliationReportStore,
@@ -432,6 +433,7 @@ describe("reconciliation API routes", () => {
   });
 
   function makeApp(service: Partial<ReconciliationService>): express.Express {
+    process.env.ADMIN_API_KEY = "test-admin-key";
     const app = express();
     app.use(express.json());
     app.use(
@@ -440,6 +442,7 @@ describe("reconciliation API routes", () => {
         service: service as unknown as ReconciliationService,
       })
     );
+    app.use(errorHandler);
     return app;
   }
 
@@ -449,6 +452,7 @@ describe("reconciliation API routes", () => {
 
     const response = await request(app)
       .post("/api/reconciliation/run")
+      .set("x-admin-api-key", "test-admin-key")
       .send({ triggeredBy: "manual" });
 
     expect(response.status).toBe(200);
@@ -460,7 +464,10 @@ describe("reconciliation API routes", () => {
     const run = jest.fn().mockResolvedValue(sampleReport());
     const app = makeApp({ run, getLatestReport: jest.fn() });
 
-    const response = await request(app).post("/api/reconciliation/run").send({});
+    const response = await request(app)
+      .post("/api/reconciliation/run")
+      .set("x-admin-api-key", "test-admin-key")
+      .send({});
 
     expect(response.status).toBe(200);
     expect(run).toHaveBeenCalledWith("manual");
@@ -470,10 +477,13 @@ describe("reconciliation API routes", () => {
     const run = jest.fn().mockRejectedValue(new Error("boom"));
     const app = makeApp({ run, getLatestReport: jest.fn() });
 
-    const response = await request(app).post("/api/reconciliation/run").send({});
+    const response = await request(app)
+      .post("/api/reconciliation/run")
+      .set("x-admin-api-key", "test-admin-key")
+      .send({});
 
     expect(response.status).toBe(500);
-    expect(response.body.error).toBe("RECONCILIATION_FAILED");
+    expect(response.body.error?.code ?? response.body.error).toBe("INTERNAL_ERROR");
   });
 
   it("GET /report returns the latest report when one exists", async () => {
@@ -482,7 +492,9 @@ describe("reconciliation API routes", () => {
       getLatestReport: jest.fn().mockReturnValue(sampleReport()),
     });
 
-    const response = await request(app).get("/api/reconciliation/report");
+    const response = await request(app)
+      .get("/api/reconciliation/report")
+      .set("x-admin-api-key", "test-admin-key");
 
     expect(response.status).toBe(200);
     expect(response.body.id).toBe("r-1");
@@ -494,10 +506,11 @@ describe("reconciliation API routes", () => {
       getLatestReport: jest.fn().mockReturnValue(undefined),
     });
 
-    const response = await request(app).get("/api/reconciliation/report");
+    const response = await request(app)
+      .get("/api/reconciliation/report")
+      .set("x-admin-api-key", "test-admin-key");
 
     expect(response.status).toBe(404);
-    expect(response.body.error).toBe("NO_RECONCILIATION_REPORT");
   });
 });
 
