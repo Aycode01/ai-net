@@ -90,3 +90,47 @@ Emitted when contract administration rights are transferred via `set_admin`.
 | `dispute_resolution` | `Symbol::new(env, "dispute")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
 | `agent_registry` | `Symbol::new(env, "registry")` | `Symbol::new(env, "adm_chngd")` | `AdminChangedEvent` |
 
+---
+
+## Agent Bidding Pause Events
+
+Emitted by `agent_bidding` when the admin halts or resumes the auction
+lifecycle. While paused, `create_auction`, bid submission, reveal, and
+`award_contract` return `ContractPaused` (code 28).
+
+| Function | Topic 1 | Topic 2 | Payload |
+|---|---|---|---|
+| `pause` | `symbol_short!("bidding")` | `symbol_short!("paused")` | `(admin: Address, ledger_sequence: u32)` |
+| `unpause` | `symbol_short!("bidding")` | `symbol_short!("unpaused")` | `(admin: Address, ledger_sequence: u32)` |
+| `pause_by_pause_admin` | `symbol_short!("bidding")` | `symbol_short!("pa_pause")` | `(pause_admin: Address, ledger_sequence: u32)` |
+
+---
+
+## Agent Governance Events
+
+| Function | Topic 1 | Topic 2 | Payload |
+|---|---|---|---|
+| `set_admin` | `gov` | `admin_set` | `(old_admin: Address, new_admin: Address)` |
+| `pause` | `gov` | `paused` | `admin: Address` |
+| `unpause` | `gov` | `unpaused` | `admin: Address` |
+| `remove_agent` | `gov` | `agent_rm` | `(agent: Address, removed_power: i128)` |
+| `execute_proposal` | `gov` | `failed` | `ProposalFailedEvent` (now includes `execution_failed: bool`) |
+
+---
+
+## Upgrade Manager Migration Events
+
+`(upgrade, complete)` → `MigrationCompleteEvent`:
+
+```rust
+pub struct MigrationCompleteEvent {
+    pub version: String,                        // actual applied version
+    pub delegated_transformations: Vec<String>, // run by the target's post_upgrade_hook
+    pub delegated_validations: Vec<String>,     // run by the target's post_upgrade_hook
+    pub estimated_items: u32,                   // plan estimate, not a count
+}
+```
+
+The former `(upgrade, progress)` `MigrationProgressEvent` and all `gas_used`
+fields were removed; they reported placeholder values.
+

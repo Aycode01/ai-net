@@ -257,21 +257,35 @@ impl AgentBiddingContract {
     }
 
     /// Admin: pause the contract.
+    ///
+    /// Blocks auction creation, bid submission, reveal, and award until
+    /// `unpause`. Emits `(bidding, paused)` with `(admin, ledger_sequence)`.
     pub fn pause(env: Env) -> Result<(), Error> {
-        require_admin(&env)?;
+        let admin = require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((symbol_short!("bidding"), symbol_short!("paused")), ());
+        env.events().publish(
+            (symbol_short!("bidding"), symbol_short!("paused")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
     /// Admin: unpause the contract.
+    ///
+    /// Emits `(bidding, unpaused)` with `(admin, ledger_sequence)`.
     pub fn unpause(env: Env) -> Result<(), Error> {
-        require_admin(&env)?;
+        let admin = require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((symbol_short!("bidding"), symbol_short!("unpaused")), ());
+        env.events().publish(
+            (symbol_short!("bidding"), symbol_short!("unpaused")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
+    }
+
+    /// Alias of [`is_paused`](Self::is_paused) for coordinator reads.
+    pub fn get_paused(env: Env) -> bool {
+        Self::is_paused(env)
     }
 
     /// Returns whether the contract is currently paused.
@@ -3002,5 +3016,66 @@ mod test {
             rev,
             "only revealed bidder can win"
         );
+    }
+
+    // ── pause / unpause ─────────────────────────────────────────────────────
+
+    #[test]
+    fn pause_blocks_auction_creation() {
+        let (env, client, _admin) = setup();
+        let creator = Address::generate(&env);
+        client.pause();
+        assert!(client.is_paused());
+        assert!(client.get_paused());
+        let res =
+            client.try_create_auction(&creator, &symbol_short!("t1"), &config(&env, BID_SECS));
+        assert_eq!(res.err(), Some(Ok(Error::ContractPaused)));
+
+        client.unpause();
+        assert!(!client.is_paused());
+        create_test_auction(&env, &client, &creator, &symbol_short!("t1"), BID_SECS);
+    }
+
+    #[test]
+    fn pause_blocks_bid_submission_mid_auction() {
+        let (env, client, _admin) = setup();
+        let creator = Address::generate(&env);
+        let bidder = Address::generate(&env);
+        let task = symbol_short!("t2");
+        create_test_auction(&env, &client, &creator, &task, BID_SECS);
+        client.pause();
+        let commitment = BytesN::<32>::from_array(&env, &[1u8; 32]);
+        let res = client.try_submit_bid(&task, &bidder, &commitment, &BOND, &50);
+        assert_eq!(res.err(), Some(Ok(Error::ContractPaused)));
+    }
+
+    #[test]
+    fn non_admin_cannot_pause() {
+        let (_env, client, _admin) = setup();
+        assert!(client.mock_auths(&[]).try_pause().is_err());
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn non_admin_cannot_unpause() {
+        let (_env, client, _admin) = setup();
+        client.pause();
+        assert!(client.mock_auths(&[]).try_unpause().is_err());
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn pause_and_unpause_emit_events() {
+        let (env, client, _admin) = setup();
+        client.pause();
+        let paused = env.events().all().iter().any(|(_, topics, _)| {
+            topics == (symbol_short!("bidding"), symbol_short!("paused")).into_val(&env)
+        });
+        assert!(paused);
+        client.unpause();
+        let unpaused = env.events().all().iter().any(|(_, topics, _)| {
+            topics == (symbol_short!("bidding"), symbol_short!("unpaused")).into_val(&env)
+        });
+        assert!(unpaused);
     }
 }

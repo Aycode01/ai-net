@@ -252,6 +252,8 @@ pub enum DataKey {
     Paused,
     /// Current semantic contract version.
     Version,
+    /// Optional emergency pause administrator (may pause, never unpause).
+    PauseAdmin,
     /// Stores the root [`Auction`] record for a task.
     Auction(Symbol),
     /// Stores a single [`SealedBid`] for a given (task, bidder) pair.
