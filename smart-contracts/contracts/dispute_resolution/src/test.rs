@@ -246,6 +246,26 @@ fn insufficient_votes_return_a_neutral_split_without_penalties() {
     assert_eq!(fixture.client.get_agent_bond(&fixture.agent), 100);
 }
 
+fn setup_with_admin() -> (Env, DisputeResolutionContractClient<'static>, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(DisputeResolutionContract, ());
+    let client = DisputeResolutionContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    (env, client, admin)
+}
+
+#[test]
+fn negative_auth_initialize() {
+    let env = Env::default();
+    env.mock_auths(&[]);
+    let contract_id = env.register(DisputeResolutionContract, ());
+    let client = DisputeResolutionContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    assert!(client.try_initialize(&admin).is_err());
+}
+
 #[test]
 fn appeal_reopens_voting_and_reverses_provisional_slash() {
     let fixture = setup();

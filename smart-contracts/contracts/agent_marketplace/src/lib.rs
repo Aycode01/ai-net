@@ -55,6 +55,7 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
 impl AgentMarketplaceContract {
     /// Initialize the marketplace with an admin.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyExists);
         }

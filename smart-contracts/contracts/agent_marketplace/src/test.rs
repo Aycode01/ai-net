@@ -442,6 +442,16 @@ fn search_services_still_works_when_paused() {
 // ========================================================================
 
 #[test]
+fn negative_auth_initialize() {
+    let env = Env::default();
+    env.mock_auths(&[]);
+    let id = env.register(AgentMarketplaceContract, ());
+    let client = AgentMarketplaceContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    assert!(client.try_initialize(&admin).is_err());
+}
+
+#[test]
 fn negative_auth_set_admin() {
     let (env, client, _admin) = setup_with_admin();
     let intruder = Address::generate(&env);
