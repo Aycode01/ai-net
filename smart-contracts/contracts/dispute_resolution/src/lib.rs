@@ -216,6 +216,10 @@ impl DisputeResolutionContract {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -497,7 +501,7 @@ impl DisputeResolutionContract {
             dispute_id: dispute_id.clone(),
             evidence_id,
             submitter: submitter.clone(),
-            evidence_hash,
+            evidence_hash: evidence_hash.clone(),
             submitted_at: now,
         };
         env.storage()
@@ -518,6 +522,9 @@ impl DisputeResolutionContract {
                 dispute_id,
                 evidence_id,
                 submitter,
+                evidence_hash,
+                submitted_at: now,
+                evidence_index: evidence_count,
             },
         );
         Ok(evidence_id)

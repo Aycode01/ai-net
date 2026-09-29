@@ -132,6 +132,7 @@ pub struct TaskWithHistory {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    /// Admin address — the only address permitted to call `set_oracle_manager`.
     Admin,
     Paused,
     Version,

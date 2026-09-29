@@ -3,7 +3,10 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _},
+    Address, Env, IntoVal, Symbol, TryFromVal, TryIntoVal, Val,
+};
 
 fn setup() -> (Env, AgentMarketplaceContractClient<'static>) {
     let env = Env::default();
@@ -48,7 +51,6 @@ fn initialize_cannot_be_called_twice() {
 fn list_service_success() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
-
     let result = client.try_list_service(
         &Symbol::new(&env, "svc1"),
         &Symbol::new(&env, "agent1"),
