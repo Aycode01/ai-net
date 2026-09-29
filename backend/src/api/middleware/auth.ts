@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { getConfig } from '../../config/index';
 import { getAuthService } from '../../services/auth';
+import { UnauthorizedError } from '../../errors';
 import type { AccessTokenPayload } from '../../services/auth/tokenService';
 
 declare global {
@@ -13,7 +14,9 @@ declare global {
 }
 
 function loadKeys(): Set<string> | null {
-  const raw = getConfig().API_KEYS;
+  // The environment is the operational source of truth: the validated config is
+  // only a fallback for callers that never loaded it.
+  const raw = process.env.API_KEYS ?? getConfig().API_KEYS;
   if (!raw) return null;
   const keys = raw.split(",").map((k) => k.trim()).filter(Boolean);
   return keys.length ? new Set(keys) : null;
@@ -23,6 +26,10 @@ function loadKeys(): Set<string> | null {
  * General auth middleware.
  * Supports session access tokens and static API keys.
  * If API_KEYS is unset and no token is passed, it passes through (backward compatibility).
+ *
+ * Rejections are handed to `next` as structured errors rather than written to
+ * the response here, so every 401 leaves the service through the canonical
+ * error envelope (code/message/path/correlationId).
  */
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   const keys = loadKeys();
@@ -40,15 +47,16 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       if (keys && keys.has(token)) {
         return next();
       }
-      res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
-      return;
+      return next(new UnauthorizedError("Invalid or expired token"));
     }
   }
 
   if (!keys) {
-    next();
-    return;
+    return next();
   }
+
+  // Static keys are configured but this request carried no bearer token.
+  next(new UnauthorizedError("Missing Authorization header"));
 }
 
 /**

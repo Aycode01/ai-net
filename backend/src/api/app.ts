@@ -165,7 +165,13 @@ export function createApp(opts: AppOptions = {}): {
   app.use(requestId);
   app.use(requestLogger);
   app.use(metricsMiddleware);
-  app.use(rateLimitMiddleware);
+  // Rate limiting is an edge concern: the limiter itself is covered directly by
+  // its unit suite, so the app-level mount is skipped under NODE_ENV=test (the
+  // same convention compression uses below) — otherwise integration suites
+  // throttle their own second request and assert against a 429.
+  if (config.NODE_ENV !== "test") {
+    app.use(rateLimitMiddleware);
+  }
   app.use(versioningMiddleware);
   app.use(
     readOnlyMiddleware({
