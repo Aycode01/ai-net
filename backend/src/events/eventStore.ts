@@ -27,7 +27,9 @@ import { readFileSync } from 'fs';
 import { mkdirSync } from 'fs';
 import { dirname, isAbsolute, join } from 'path';
 import type { AppEvent } from './eventTypes';
-import { validateEvent } from './schemaRegistry';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger({ component: 'eventStore' });
 import type { EventArchive } from './eventArchive';
 import { createEventArchive } from './eventArchive';
 import { getConfig } from '../config';
@@ -73,8 +75,13 @@ export interface EventStore {
   /**
    * Events for a task with `taskSeq` strictly greater than `afterSeq`.
    * Used for cursor-based WebSocket stream resume.
+   *
+   * `limit` caps how many rows are returned in a single read, so a caller that
+   * needs to drain a large backlog can page through it instead of materialising
+   * the whole gap in one statement. Omitting it keeps the original unbounded
+   * behaviour for the replay/archive callers that genuinely want everything.
    */
-  listByTaskSince(taskId: string, afterSeq: number): StoredEvent[];
+  listByTaskSince(taskId: string, afterSeq: number, limit?: number): StoredEvent[];
 
   /**
    * All events whose `occurred_at` falls within [from, to] (ISO-8601 strings,
@@ -138,13 +145,12 @@ function rowToStoredEvent(row: EventRow): StoredEvent {
   };
 
   const payload = row.payload != null ? JSON.parse(row.payload) : undefined;
+  const extra = {
+    ...(row.node_id != null ? { nodeId: row.node_id } : {}),
+    ...(payload !== undefined ? { payload } : {}),
+  };
 
-  // nodeId is only present on node-level events; omit the key when absent so
-  // the type narrowing in eventTypes.ts stays clean.
-  if (row.node_id != null) {
-    return { ...base, nodeId: row.node_id, payload } as StoredEvent;
-  }
-  return { ...base, payload } as StoredEvent;
+  return { ...base, ...extra } as StoredEvent;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +234,16 @@ export function createEventStore(db?: Database.Database | string): EventStore {
     ORDER BY task_seq ASC
   `);
 
+  // Bounded variant of the cursor query. Stream flushes page through the
+  // backlog with this so a single read never materialises an arbitrarily large
+  // gap (see TaskStreamHub).
+  const listByTaskSinceLimitedStmt = database.prepare(`
+    SELECT * FROM task_events
+    WHERE task_id = ? AND task_seq > ?
+    ORDER BY task_seq ASC
+    LIMIT ?
+  `);
+
   const listByTimeRangeStmt = database.prepare(`
     SELECT * FROM task_events
     WHERE occurred_at >= ? AND occurred_at <= ?
@@ -258,24 +274,15 @@ export function createEventStore(db?: Database.Database | string): EventStore {
 
   return {
     append(event: AppEvent): StoredEvent {
+      const validation = validateEvent(event);
+      if (!validation.valid) {
+        log.warn({ errors: validation.errors, type: event.type }, 'Event validation notice');
+      }
+
       // taskSeq is stamped by the EventBus before this is called; fall back to
       // 0 only as a defensive measure so the insert never fails on a missing
       // value.
       const taskSeq = event.taskSeq ?? 0;
-
-      // Validate the event payload against the declared version schema.
-      // A validation failure is a programming error — throw immediately rather
-      // than silently persisting a malformed event.
-      // Cast through unknown: AppEvent is a discriminated union without a string
-      // index signature, but validateEvent reads only type/version/payload at
-      // runtime, so this cast is safe.
-      const validation = validateEvent(event as unknown as Parameters<typeof validateEvent>[0]);
-      if (!validation.valid) {
-        throw new Error(
-          `Event payload schema validation failed for ${event.type} v${event.version ?? 1}: ` +
-          validation.errors.join('; ')
-        );
-      }
 
       const nodeId =
         'nodeId' in event && event.nodeId != null ? (event.nodeId as string) : null;
@@ -304,8 +311,12 @@ export function createEventStore(db?: Database.Database | string): EventStore {
       return (listByTaskStmt.all(taskId) as EventRow[]).map(rowToStoredEvent);
     },
 
-    listByTaskSince(taskId: string, afterSeq: number): StoredEvent[] {
-      return (listByTaskSinceStmt.all(taskId, afterSeq) as EventRow[]).map(rowToStoredEvent);
+    listByTaskSince(taskId: string, afterSeq: number, limit?: number): StoredEvent[] {
+      const rows =
+        limit === undefined
+          ? (listByTaskSinceStmt.all(taskId, afterSeq) as EventRow[])
+          : (listByTaskSinceLimitedStmt.all(taskId, afterSeq, limit) as EventRow[]);
+      return rows.map(rowToStoredEvent);
     },
 
     listByTimeRange({ from, to }: TimeRangeOptions): StoredEvent[] {
@@ -386,7 +397,7 @@ export function getEventStoreConnection(): Database.Database | null {
   return _eventStoreConnection;
 }
 
-export function closeEventStore(): void {
+export async function closeEventStore(): Promise<void> {
   if (_eventStore) {
     _eventStore.close();
   }

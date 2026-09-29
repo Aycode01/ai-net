@@ -1,5 +1,13 @@
-import { NetworkStats, AgentRecord } from '../types/api';
+import {
+  NetworkStats,
+  TaskResponse,
+  AgentRecord,
+  TaskCost,
+  AgentWatchdogAlert,
+  QuarantinedAgent,
+} from '../types/api';
 import { progressStart, progressDone, progressError } from '../context/RouteProgressContext';
+import { readWalletSession } from './walletSession';
 
 export class ApiError extends Error {
   statusCode: number;
@@ -20,32 +28,11 @@ const notifyToast = (message: string, type: 'success' | 'error' | 'warning' | 'i
   window.dispatchEvent(new CustomEvent('app-toast', { detail: { message, type, duration } }));
 };
 
-export const WALLET_PUBKEY_KEY = 'wallet_pubkey';
-export const WALLET_AUTH_TOKEN_KEY = 'wallet_auth_token';
-
-/**
- * Retrieves the stored wallet public key and performs a one-time migration
- * from the legacy 'walletAddress' key to 'wallet_pubkey'.
- */
-export function getStoredWalletPublicKey(): string | null {
-  if (typeof localStorage === 'undefined') return null;
-  const legacy = localStorage.getItem('walletAddress');
-  const current = localStorage.getItem(WALLET_PUBKEY_KEY);
-
-  if (legacy && !current) {
-    localStorage.setItem(WALLET_PUBKEY_KEY, legacy);
-  }
-  if (legacy) {
-    localStorage.removeItem('walletAddress');
-  }
-
-  return localStorage.getItem(WALLET_PUBKEY_KEY);
-}
-
+// Reads through the same session layer as WalletContext (#477), so a session
+// restored on page load authenticates requests without a second storage key.
 const getAuthHeader = (): Record<string, string> => {
-  if (typeof localStorage === 'undefined') return {};
-  const token = localStorage.getItem(WALLET_AUTH_TOKEN_KEY) || localStorage.getItem('wallet_signature');
-  return token ? { 'Authorization': `Bearer ${token}` } : {};
+  const pubKey = readWalletSession()?.publicKey;
+  return pubKey ? { 'Authorization': `Bearer ${pubKey}` } : {};
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -97,7 +84,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         try {
           const errorText = await response.text();
           message = errorText || message;
-        } catch {}
+        } catch {
+          // Body already consumed or unreadable — keep the default message.
+        }
       }
       progressError();
       throw new ApiError(response.status, message, path);
@@ -146,7 +135,41 @@ export const apiClient = {
 };
 
 export const getStats = async (): Promise<NetworkStats> => {
+  // The stats router is mounted at /api/stats and defines its own /stats route.
   return apiClient.get<NetworkStats>('/api/stats/stats');
+};
+
+/**
+ * Token budget and LLM spend for one task (Issue #390).
+ *
+ * The backend scopes this to the calling wallet, so the session's public key is
+ * attached via the shared auth header.
+ */
+export const getTaskCost = async (taskId: string): Promise<TaskCost> => {
+  return apiClient.get<TaskCost>(`/api/tasks/${taskId}/cost`);
+};
+
+/** Recent watchdog alerts, newest first (Issue #379). */
+export const getWatchdogAlerts = async (options: {
+  limit?: number;
+  unresolvedOnly?: boolean;
+} = {}): Promise<AgentWatchdogAlert[]> => {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.unresolvedOnly) params.set('unresolvedOnly', 'true');
+  const query = params.toString();
+  return apiClient.get<AgentWatchdogAlert[]>(
+    `/api/agent-watchdog/alerts${query ? `?${query}` : ''}`,
+  );
+};
+
+/** Agents currently inside their heartbeat grace period (Issue #379). */
+export const getQuarantinedAgents = async (): Promise<QuarantinedAgent[]> => {
+  return apiClient.get<QuarantinedAgent[]>('/api/agent-watchdog/quarantine');
+};
+
+export const getRecentTasks = async (walletAddress: string): Promise<TaskResponse[]> => {
+  return apiClient.get<TaskResponse[]>(`/api/wallets/${walletAddress}/tasks?limit=5`);
 };
 
 export const getAgents = async (): Promise<AgentRecord[]> => {

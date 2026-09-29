@@ -187,11 +187,12 @@ export interface ValidationResult {
  */
 export function validateEvent(event: {
   type: string;
-  version: number;
+  version?: number;
   payload?: unknown;
   [key: string]: unknown;
 }): ValidationResult {
-  const { type, version } = event;
+  const version = event.version ?? 1;
+  const type = event.type;
 
   // Check that the version is known
   const versionSchemas = schemasByVersion[version];

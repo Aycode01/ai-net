@@ -51,6 +51,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 /**
+/**
  * Strict session auth middleware for protected user endpoints.
  * Requires a valid unrevoked access token in Authorization: Bearer <token>.
  */
@@ -66,7 +67,7 @@ export function sessionAuthMiddleware(req: Request, res: Response, next: NextFun
   try {
     const payload = getAuthService().verifyAccessToken(token);
     req.user = payload;
-    next();
+    return next();
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Invalid or expired token";
     res.status(401).json({ error: "Unauthorized", message });

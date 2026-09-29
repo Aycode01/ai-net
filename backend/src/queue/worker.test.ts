@@ -1,4 +1,7 @@
 import Database from "better-sqlite3";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { createJobStore, type JobStore, type Job } from "./jobStore";
 import { JobWorker } from "./worker";
 import { JobQueue } from "./index";
@@ -15,6 +18,26 @@ describe("Background Job Queue & Worker", () => {
   afterEach(() => {
     db.close();
   });
+
+  /** Minimal valid job row; every field can be overridden per test. */
+  function makeJob(overrides: Partial<Job> = {}): Job {
+    const now = new Date().toISOString();
+    return {
+      id: `job_${Math.random().toString(36).slice(2, 10)}`,
+      taskId: `task_${Math.random().toString(36).slice(2, 10)}`,
+      type: "execute_task",
+      payload: {},
+      status: "pending",
+      priority: "normal",
+      progress: 0,
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: now,
+      createdAt: now,
+      updatedAt: now,
+      ...overrides,
+    };
+  }
 
   describe("JobStore operations", () => {
     it("inserts and retrieves a job by id and taskId", () => {
@@ -232,6 +255,111 @@ describe("Background Job Queue & Worker", () => {
       const historyCount = (db.prepare("SELECT COUNT(*) as c FROM job_history WHERE jobId = ?").get("job_concurrent_1") as any).c;
       expect(historyCount).toBe(1);
     });
+
+    it("claimNextPendingJob marks the returned job active and never returns it twice", () => {
+      const now = new Date().toISOString();
+      const job = makeJob({ id: "claim_1", createdAt: now, nextRunAt: now });
+      store.insert(job);
+
+      const claimed = store.claimNextPendingJob(now);
+
+      // The row comes back already flipped to 'active' — the caller never has
+      // to (and must not) run a second UPDATE to take ownership.
+      expect(claimed?.id).toBe("claim_1");
+      expect(claimed?.status).toBe("active");
+      expect(store.findById("claim_1")?.status).toBe("active");
+
+      // A second claim hands out nothing, so the handler behind it cannot be
+      // scheduled a second time for the same row.
+      expect(store.claimNextPendingJob(now)).toBeUndefined();
+    });
+
+    it("claimNextPendingJob leaves non-runnable jobs alone", () => {
+      const now = new Date().toISOString();
+      const future = new Date(Date.now() + 60_000).toISOString();
+
+      store.insert(makeJob({ id: "running_1", status: "active", createdAt: now, nextRunAt: now }));
+      store.insert(makeJob({ id: "scheduled_1", status: "pending", createdAt: now, nextRunAt: future }));
+      store.insert(
+        makeJob({ id: "exhausted_1", status: "failed", attempts: 3, maxAttempts: 3, createdAt: now, nextRunAt: now })
+      );
+
+      expect(store.claimNextPendingJob(now)).toBeUndefined();
+      expect(store.findById("running_1")?.status).toBe("active");
+      expect(store.findById("scheduled_1")?.status).toBe("pending");
+      expect(store.findById("exhausted_1")?.status).toBe("failed");
+    });
+
+    it("a second claimant over its own connection loses the row already claimed elsewhere", () => {
+      // Regression test for the race this change fixes. Claiming used to be a
+      // `getNextPendingJob()` SELECT followed by a separate `updateStatus()`
+      // UPDATE. Two workers over the same SQLite file could both see the same
+      // candidate row in that gap; the second UPDATE then matched
+      // unconditionally, so both ran the handler (duplicate payment / duplicate
+      // side effects) for one job. Here both connections deliberately perform
+      // the stale read first — the exact interleaving the old code allowed —
+      // and the atomic claim must refuse the second one.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-claim-"));
+      const dbPath = path.join(dir, "jobs.sqlite");
+
+      const dbA = new Database(dbPath);
+      const dbB = new Database(dbPath);
+      dbA.pragma("busy_timeout = 5000");
+      dbB.pragma("busy_timeout = 5000");
+
+      try {
+        const storeA = createJobStore(dbA);
+        const storeB = createJobStore(dbB);
+        const now = new Date().toISOString();
+        storeA.insert(makeJob({ id: "shared_1", createdAt: now, nextRunAt: now }));
+
+        // Both workers look before either claims: same row, same nextRunAt.
+        expect(storeA.getNextPendingJob(now)?.id).toBe("shared_1");
+        expect(storeB.getNextPendingJob(now)?.id).toBe("shared_1");
+
+        // Only one of them can come away with it.
+        const winner = storeA.claimNextPendingJob(now);
+        const loser = storeB.claimNextPendingJob(now);
+        expect(winner?.id).toBe("shared_1");
+        expect(winner?.status).toBe("active");
+        expect(loser).toBeUndefined();
+      } finally {
+        dbA.close();
+        dbB.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("two connections claiming a two-job queue get one distinct job each", () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-claim-"));
+      const dbPath = path.join(dir, "jobs.sqlite");
+
+      const dbA = new Database(dbPath);
+      const dbB = new Database(dbPath);
+      dbA.pragma("busy_timeout = 5000");
+      dbB.pragma("busy_timeout = 5000");
+
+      try {
+        const storeA = createJobStore(dbA);
+        const storeB = createJobStore(dbB);
+        const now = new Date().toISOString();
+        storeA.insert(makeJob({ id: "shared_1", createdAt: now, nextRunAt: now }));
+        storeA.insert(makeJob({ id: "shared_2", createdAt: now, nextRunAt: now }));
+
+        const claimedA = storeA.claimNextPendingJob(now);
+        const claimedB = storeB.claimNextPendingJob(now);
+
+        expect(claimedA).toBeDefined();
+        expect(claimedB).toBeDefined();
+        expect(claimedA!.id).not.toBe(claimedB!.id);
+        expect(new Set([claimedA!.id, claimedB!.id])).toEqual(new Set(["shared_1", "shared_2"]));
+        expect(storeA.claimNextPendingJob(now)).toBeUndefined();
+      } finally {
+        dbA.close();
+        dbB.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("JobWorker Lifecycle & Execution", () => {
@@ -426,6 +554,81 @@ describe("Background Job Queue & Worker", () => {
 
       expect(executionOrder).toEqual(["critical", "high", "normal", "low"]);
     });
+
+    it(
+      "multiple worker processes over one SQLite file each run a job exactly once (#647)",
+      async () => {
+        // End-to-end version of the claim fix: several workers, each with its
+        // own connection to the same file — the shape of a multi-process /
+        // multi-replica deployment — draining a shared queue. Every job must be
+        // handled exactly once: no job left behind, none run twice.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-workers-"));
+        const dbPath = path.join(dir, "jobs.sqlite");
+        const connections: Database.Database[] = [];
+        const workers: JobWorker[] = [];
+        const handled = new Set<string>();
+        let duplicateRuns = 0;
+
+        const WORKER_COUNT = 4;
+        const TOTAL_JOBS = 50;
+
+        try {
+          const now = new Date().toISOString();
+          const seeder = new Database(dbPath);
+          connections.push(seeder);
+          const seedStore = createJobStore(seeder);
+          for (let i = 0; i < TOTAL_JOBS; i++) {
+            seedStore.insert(
+              makeJob({ id: `job_${i}`, taskId: `task_${i}`, createdAt: now, nextRunAt: now })
+            );
+          }
+
+          for (let w = 0; w < WORKER_COUNT; w++) {
+            const conn = new Database(dbPath);
+            conn.pragma("busy_timeout = 5000");
+            connections.push(conn);
+
+            workers.push(
+              new JobWorker({
+                jobStore: createJobStore(conn),
+                handler: async (job) => {
+                  if (handled.has(job.id)) {
+                    duplicateRuns++;
+                  }
+                  handled.add(job.id);
+                  return { success: true };
+                },
+                pollIntervalMs: 10,
+                autoStart: false,
+              })
+            );
+          }
+
+          workers.forEach((worker) => worker.start());
+
+          const deadline = Date.now() + 20_000;
+          while (handled.size < TOTAL_JOBS && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+
+          await Promise.all(workers.map((worker) => worker.stop()));
+
+          expect(handled.size).toBe(TOTAL_JOBS);
+          expect(duplicateRuns).toBe(0);
+          // Every job reached the terminal state — the codebase's terminal
+          // status is `completed` (there is no separate `done` status).
+          expect(seedStore.getStats().completed).toBe(TOTAL_JOBS);
+          // Nothing left runnable, and nothing stuck mid-flight.
+          expect(seedStore.getNextPendingJob(new Date(Date.now() + 60_000).toISOString())).toBeUndefined();
+          expect(seedStore.getStats().active).toBe(0);
+        } finally {
+          await Promise.all(workers.map((worker) => worker.stop().catch(() => undefined)));
+          connections.forEach((conn) => conn.close());
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
   });
 
   describe("Restart mid-stream (#349 — in-flight jobs resume, not fail)", () => {
