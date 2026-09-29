@@ -15,15 +15,6 @@ import { CommandPalette } from './components/common/CommandPalette'
 import { useCommandPalette } from './hooks/useCommandPalette'
 import './components/common/Toast.css'
 
-const RouteLoadingFallback: React.FC = () => (
-  <div className="p-8 text-center text-text-muted">Loading...</div>
-)
-
-const DashboardPage = lazy(() => import('./pages/DashboardPage'))
-const WalletPage = lazy(() => import('./pages/WalletPage'))
-const AgentsPage = lazy(() => import('./pages/AgentsPage'))
-const NewTaskPage = lazy(() => import('./pages/NewTaskPage'))
-const TaskHistoryPage = lazy(() => import('./pages/TaskHistoryPage'))
 // Route-level code splitting: every page except LandingPage (kept eager so
 // the first paint on `/` is not delayed) is fetched on demand. Heavy
 // route-only libraries (reactflow, recharts, jspdf, react-syntax-highlighter)
