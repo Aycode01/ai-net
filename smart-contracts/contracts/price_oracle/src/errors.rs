@@ -22,4 +22,6 @@ pub enum Error {
     InvalidTimestamp = 7,
     /// Contract is currently paused.
     ContractPaused = 8,
+    /// The max_price_age value is zero or invalid.
+    InvalidMaxPriceAge = 9,
 }
