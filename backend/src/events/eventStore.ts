@@ -27,6 +27,7 @@ import { readFileSync } from 'fs';
 import { mkdirSync } from 'fs';
 import { dirname, isAbsolute, join } from 'path';
 import type { AppEvent } from './eventTypes';
+import { validateEvent } from './schemaRegistry';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger({ component: 'eventStore' });
@@ -274,7 +275,7 @@ export function createEventStore(db?: Database.Database | string): EventStore {
 
   return {
     append(event: AppEvent): StoredEvent {
-      const validation = validateEvent(event);
+      const validation = validateEvent(event as unknown as Parameters<typeof validateEvent>[0]);
       if (!validation.valid) {
         log.warn({ errors: validation.errors, type: event.type }, 'Event validation notice');
       }
