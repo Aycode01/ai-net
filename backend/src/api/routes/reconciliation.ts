@@ -20,6 +20,8 @@ export interface ReconciliationRouterOptions {
  *     summary: Trigger a payment reconciliation check
  *     operationId: runReconciliation
  *     tags: [Reconciliation]
+ *     security:
+ *       - adminApiKey: []
  *     requestBody:
  *       content:
  *         application/json:
@@ -48,6 +50,8 @@ export interface ReconciliationRouterOptions {
  *     summary: Get the latest reconciliation report
  *     operationId: getLatestReconciliationReport
  *     tags: [Reconciliation]
+ *     security:
+ *       - adminApiKey: []
  *     responses:
  *       200:
  *         description: Latest reconciliation report
