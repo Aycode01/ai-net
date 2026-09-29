@@ -12,7 +12,7 @@ import { rateLimitMiddleware } from "../../middleware/rateLimit";
 import { idempotencyMiddleware } from "../../middleware/idempotency";
 import { currentTraceId } from "../../../services/traceContext";
 import { getConfig } from "../../../config";
-import { RateLimitError, NotFoundError, ForbiddenError, ConflictError } from "../../../errors";
+import { RateLimitError, NotFoundError, ForbiddenError, ConflictError, ValidationError } from "../../../errors";
 import { taskStreamUrl } from "../stream";
 
 import { getGlobalJobQueue, type JobQueue, type JobPriority } from "../../../queue";
@@ -223,7 +223,7 @@ export function createV2TasksRouter(
     const db = createTaskDb(getTaskDb());
     const task = db.findById(req.params.id);
     if (!task) {
-      throw new NotFoundError("Task", req.params.id, res.locals.correlationId as string | undefined);
+      throw new NotFoundError("Task", req.params.id, undefined, res.locals.correlationId as string | undefined);
     }
     const requesterKey = req.headers["walletpublickey"] as string;
     if (!requesterKey || requesterKey !== task.walletPublicKey) {
@@ -262,7 +262,7 @@ export function createV2TasksRouter(
     const db = createTaskDb(getTaskDb());
     const task = db.findById(req.params.id);
     if (!task) {
-      throw new NotFoundError("Task", req.params.id, res.locals.correlationId as string | undefined);
+      throw new NotFoundError("Task", req.params.id, undefined, res.locals.correlationId as string | undefined);
     }
 
     const requesterKey = req.headers["walletpublickey"] as string;

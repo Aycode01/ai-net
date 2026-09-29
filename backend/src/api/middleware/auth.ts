@@ -4,6 +4,7 @@ import { getAuthService } from '../../services/auth';
 import type { AccessTokenPayload } from '../../services/auth/tokenService';
 
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace -- Express type augmentation
   namespace Express {
     interface Request {
       user?: AccessTokenPayload;
@@ -51,6 +52,27 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 /**
+ * Require a valid session access token.
+ */
+export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const auth = req.headers["authorization"] ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (!token) {
+    res.status(401).json({ error: "Unauthorized", message: "Missing Authorization header" });
+    return;
+  }
+
+  try {
+    const payload = getAuthService().verifyAccessToken(token);
+    req.user = payload;
+    return next();
+  } catch {
+    res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
+  }
+}
+
+/**
  * Optional session auth middleware: extracts user token if present without rejecting unauthenticated requests.
  */
 export function optionalAuthMiddleware(req: Request, _res: Response, next: NextFunction): void {
@@ -76,7 +98,7 @@ export function optionalAuthMiddleware(req: Request, _res: Response, next: NextF
 export function resolveAdminApiKey(): string | undefined {
   let fromConfig: string | undefined;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     fromConfig = (require("../../config") as typeof import("../../config")).getConfig()
       .ADMIN_API_KEY;
   } catch {

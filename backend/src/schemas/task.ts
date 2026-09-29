@@ -45,6 +45,8 @@ export const promptSchema = z
   .string()
   .min(1, "Prompt is required")
   .max(MAX_PROMPT_LENGTH, `Prompt too long (max ${MAX_PROMPT_LENGTH} characters)`)
+  // Sanitising control characters is the point of this expression.
+  // eslint-disable-next-line no-control-regex
   .transform((s) => s.replace(/[\x00-\x08\x0E-\x1F]/g, "").trim());
 
 /**

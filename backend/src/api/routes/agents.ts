@@ -164,7 +164,7 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
     try {
       const agent = getDb().findById(req.params.id);
       if (!agent) {
-        throw new NotFoundError("Agent", req.params.id, res.locals.correlationId as string | undefined);
+        throw new NotFoundError("Agent", req.params.id, undefined, res.locals.correlationId as string | undefined);
       }
       res.json(agent);
     } catch (error) {
@@ -197,7 +197,7 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
     try {
       const agent = getDb().findById(req.params.id);
       if (!agent) {
-        throw new NotFoundError("Agent", req.params.id, res.locals.correlationId as string | undefined);
+        throw new NotFoundError("Agent", req.params.id, undefined, res.locals.correlationId as string | undefined);
       }
 
       const startedAt = Date.now();
@@ -354,7 +354,7 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
       const db = getDb();
       const agent = db.findById(req.params.id);
       if (!agent) {
-        throw new NotFoundError("Agent", req.params.id, res.locals.correlationId as string | undefined);
+        throw new NotFoundError("Agent", req.params.id, undefined, res.locals.correlationId as string | undefined);
       }
 
       db.upsert({ ...agent, lastSeenAt: new Date().toISOString(), status: "online" });
@@ -433,7 +433,7 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
       const db = getDb();
       const agent = db.findById(req.params.id);
       if (!agent) {
-        throw new NotFoundError("Agent", req.params.id, correlationId);
+        throw new NotFoundError("Agent", req.params.id, undefined, correlationId);
       }
 
       const signature = req.headers["x-signature"] as string | undefined;

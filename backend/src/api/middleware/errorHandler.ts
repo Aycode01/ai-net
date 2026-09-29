@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { createLogger } from "../../utils/logger";
 import { AppError } from "../../errors";
 import { getConfig } from "../../config";
-import { HTTP_STATUS_FOR_CODE } from "../../errors/ErrorCode";
+import { HTTP_STATUS_FOR_CODE, type ErrorCode } from "../../errors/ErrorCode";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -62,7 +62,7 @@ function resolveStatusCode(err: unknown): number {
   return (
     (err as any)?.statusCode ??
     (err as any)?.status ??
-    HTTP_STATUS_FOR_CODE[(err as any)?.code] ??
+    HTTP_STATUS_FOR_CODE[(err as any)?.code as ErrorCode] ??
     500
   );
 }

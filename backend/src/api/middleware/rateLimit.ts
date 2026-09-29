@@ -96,7 +96,7 @@ export function createRateLimiter(opts: RateLimitOptions = {}): RateLimiter {
     const now = Date.now();
     const cutoff = now - windowMs;
 
-    let win = windows.get(ip) ?? { timestamps: [] };
+    const win = windows.get(ip) ?? { timestamps: [] };
     win.timestamps = win.timestamps.filter((t) => t > cutoff);
 
     const oldest = win.timestamps[0];
@@ -140,7 +140,7 @@ export class RedisRateLimiter {
 
   constructor(redisUrl: string) {
     // Lazy-require ioredis so the module doesn't break when Redis is not used
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     const Redis = require("ioredis");
     this.client = new Redis(redisUrl);
     this.fallback = createRateLimiter({ maxRequests: 5, windowMs: 60_000 });

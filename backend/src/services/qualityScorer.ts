@@ -12,6 +12,7 @@
  * (avg/min/max/trend), and fed back into the agent reputation system.
  */
 
+import { isEnabled } from './featureFlags';
 import type {
   AgentQualityMetrics,
   DimensionScore,

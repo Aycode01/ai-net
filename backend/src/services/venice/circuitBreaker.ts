@@ -1,55 +1,30 @@
-import { CircuitOpenError } from './errors.js';
+/**
+ * Venice-scoped circuit breaker.
+ *
+ * Re-exports the generalised `CircuitBreaker` from `../circuitBreaker` with
+ * Venice-specific defaults so existing Venice client code continues to work
+ * without modification.
+ */
 
-export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+export type { CircuitState, CircuitBreakerOptions } from '../circuitBreaker.js';
+export { CircuitOpenError } from '../circuitBreaker.js';
 
-const FAILURE_THRESHOLD = 3;
-const OPEN_DURATION_MS = 60_000;
+import {
+  CircuitBreaker as GenericCircuitBreaker,
+  type CircuitBreakerOptions as Options,
+} from '../circuitBreaker.js';
 
-export class CircuitBreaker {
-  private state: CircuitState = 'CLOSED';
-  private failures = 0;
-  private openedAt = 0;
-  private nowFn: () => number;
-
-  constructor(nowFn?: () => number) {
-    this.nowFn = nowFn ?? (() => Date.now());
-  }
-
-  getState(): CircuitState {
-    this.evaluateState();
-    return this.state;
-  }
-
-  getFailureCount(): number {
-    return this.failures;
-  }
-
-  assertClosed(): void {
-    this.evaluateState();
-    if (this.state === 'OPEN') {
-      throw new CircuitOpenError();
-    }
-  }
-
-  recordSuccess(): void {
-    this.failures = 0;
-    this.state = 'CLOSED';
-  }
-
-  recordFailure(): void {
-    this.failures++;
-    if (this.failures >= FAILURE_THRESHOLD) {
-      this.state = 'OPEN';
-      this.openedAt = this.nowFn();
-    }
-  }
-
-  private evaluateState(): void {
-    if (this.state === 'OPEN') {
-      const elapsed = this.nowFn() - this.openedAt;
-      if (elapsed >= OPEN_DURATION_MS) {
-        this.state = 'HALF_OPEN';
-      }
-    }
+/**
+ * Venice-scoped breaker.
+ *
+ * The generalised breaker lives in `../circuitBreaker`; this subclass only pins
+ * the service name (so the state events and error messages say "venice") and
+ * keeps the constructor argument optional, which is how the Venice client and
+ * its tests have always constructed it. Thresholds are inherited unchanged:
+ * 3 consecutive failures, 60 s before the recovery probe.
+ */
+export class CircuitBreaker extends GenericCircuitBreaker {
+  constructor(options: Partial<Options> = {}) {
+    super({ name: 'venice', ...options });
   }
 }
