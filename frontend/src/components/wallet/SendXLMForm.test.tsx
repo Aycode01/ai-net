@@ -5,7 +5,9 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Mock } from 'vitest';
 import { SendXLMForm } from './SendXLMForm';
+import { useWallet } from '../../context/WalletContext';
 
 // Mock wallet context
 vi.mock('../../context/WalletContext', () => ({
@@ -76,8 +78,7 @@ describe('SendXLMForm Component', () => {
 
   describe('Disconnected State', () => {
     it('shows disconnected message when wallet is not connected', () => {
-      const { useWallet } = require('../../context/WalletContext');
-      useWallet.mockReturnValue({
+      (useWallet as unknown as Mock).mockReturnValue({
         publicKey: null,
         keypair: null,
         connected: false,
@@ -518,8 +519,7 @@ describe('SendXLMForm Component', () => {
 
   describe('Freighter Integration', () => {
     it('uses freighter signing when connectionMethod is freighter', async () => {
-      const { useWallet } = require('../../context/WalletContext');
-      useWallet.mockReturnValue({
+      (useWallet as unknown as Mock).mockReturnValue({
         publicKey: 'GBRPYHIL2CI3WHZDTOOQFC6EB4PSQUMACTUN4QE2LBNVQWSRUCF6XX2H',
         keypair: null,
         connected: true,
