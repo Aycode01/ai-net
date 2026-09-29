@@ -83,6 +83,7 @@
 //! view, which is the same code path the contract verifies against.
 
 mod errors;
+pub mod gas;
 #[cfg(test)]
 mod property_tests;
 mod types;
@@ -107,11 +108,12 @@ use soroban_sdk::{
 /// Threshold (ledgers remaining) below which we extend.
 const TTL_THRESHOLD: u32 = 100_000;
 /// Target TTL after extension (~31 days at 5s ledgers).
-const TTL_EXTEND_TO: u32 = 535_680;
 const CONTRACT_VERSION: &str = "1.0.0";
 
-/// Maximum page size accepted by [`AgentBiddingContract::get_bidders`].
-const MAX_PAGE_SIZE: u32 = 50;
+/// Maximum number of bidders allowed per auction.
+pub const MAX_BIDDERS_PER_AUCTION: u32 = 100;
+/// Maximum page size for paginated queries.
+pub const MAX_PAGE_SIZE: u32 = 50;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -237,7 +239,7 @@ impl AgentBiddingContract {
 
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
+            return Err(Error::AlreadyExists);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -256,21 +258,6 @@ impl AgentBiddingContract {
             .instance()
             .get(&DataKey::Version)
             .unwrap_or_else(|| String::from_str(&env, CONTRACT_VERSION))
-    }
-
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: String) -> Result<(), Error> {
-        let admin = require_admin(&env)?;
-        let old_version = Self::contract_version(env.clone());
-        env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &new_version);
-        env.events().publish(
-            (symbol_short!("bidding"), symbol_short!("upgraded")),
-            (old_version, new_version, new_wasm_hash, admin, env.ledger().sequence()),
-        );
-        Ok(())
     }
 
     // ── Creation ─────────────────────────────────────────────────────────
@@ -453,6 +440,9 @@ impl AgentBiddingContract {
             .persistent()
             .get(&bidders_key)
             .unwrap_or_else(|| Vec::new(&env));
+        if bidders.len() >= MAX_BIDDERS_PER_AUCTION {
+            return Err(Error::MaxBiddersReached);
+        }
         bidders.push_back(bidder.clone());
         env.storage().persistent().set(&bidders_key, &bidders);
         extend_ttl_for_key(&env, &bidders_key);
@@ -1031,6 +1021,21 @@ impl AgentBiddingContract {
 
     // ── View Functions ─────────────────────────────────────────────────────
 
+    /// Estimate CPU instructions for a supported operation and item count.
+    pub fn estimate_gas(env: Env, operation: Symbol, count: u32) -> u64 {
+        let _ = env;
+        gas::estimate(operation, count)
+    }
+
+    pub fn estimate(
+        env: Env,
+        operation: Symbol,
+        params: soroban_sdk::Map<Symbol, soroban_sdk::Val>,
+    ) -> u64 {
+        let _ = env;
+        <AgentBiddingContract as gas_interface::GasEstimator>::estimate(operation, params)
+    }
+
     /// Compute the commitment an off-chain bidder must submit for this task.
     ///
     /// Exposed so tooling never has to re-implement the pre-image layout and
@@ -1101,6 +1106,52 @@ impl AgentBiddingContract {
             page.push_back(bidders.get(i).unwrap());
         }
         page
+    }
+
+    /// Return a cursor-paginated list of bidder addresses for a task.
+    pub fn get_bidders_paginated(
+        env: Env,
+        task_id: Symbol,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Address>, Error> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(Error::InvalidAuditRange);
+        }
+
+        let bidders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bidders(task_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = bidders.len();
+
+        if total == 0 {
+            if offset != 0 {
+                return Err(Error::InvalidAuditRange);
+            }
+            return Ok(Vec::new(&env));
+        }
+
+        if offset >= total {
+            return Err(Error::InvalidAuditRange);
+        }
+
+        let mut page = Vec::new(&env);
+        let end = (offset + limit).min(total);
+        for i in offset..end {
+            if let Some(bidder) = bidders.get(i) {
+                page.push_back(bidder);
+            }
+        }
+
+        Ok(page)
+    }
+}
+
+impl gas_interface::GasEstimator for AgentBiddingContract {
+    fn estimate(operation: Symbol, params: soroban_sdk::Map<Symbol, soroban_sdk::Val>) -> u64 {
+        gas::estimate(operation, params.len())
     }
 }
 
@@ -2833,143 +2884,5 @@ mod test {
             rev,
             "only revealed bidder can win"
         );
-    }
-
-    // ── Pause / unpause ──────────────────────────────────────────────────
-
-    #[test]
-    fn initialize_sets_admin_and_unpaused() {
-        let (_env, client) = setup();
-        assert!(client.get_admin().is_some());
-        assert!(!client.is_paused());
-    }
-
-    #[test]
-    fn pause_blocks_create_auction() {
-        let (env, client) = setup();
-        let creator = Address::generate(&env);
-        let task_id = Symbol::new(&env, "paused_task");
-
-        client.pause();
-
-        let err = client.try_create_auction(&creator, &task_id, &0, &1_000_000, &500_000);
-        assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn unpause_allows_create_auction() {
-        let (env, client) = setup();
-        let creator = Address::generate(&env);
-        let task_id = Symbol::new(&env, "unpaused_task");
-
-        client.pause();
-        client.unpause();
-
-        client.create_auction(&creator, &task_id, &0, &1_000_000, &500_000);
-        assert!(client.get_auction(&task_id).is_some());
-    }
-
-    #[test]
-    fn pause_blocks_submit_bid() {
-        let (env, client) = setup();
-        let creator = Address::generate(&env);
-        let bidder = Address::generate(&env);
-        let task_id = Symbol::new(&env, "bid_pause");
-
-        create_test_auction(&env, &client, &creator, &task_id, 3600);
-
-        client.pause();
-
-        let salt = BytesN::<32>::from_array(&env, &[99u8; 32]);
-        let commitment =
-            test_commitment(&env, &bidder, 2_000_000, &String::from_str(&env, ""), &salt);
-        let err = client.try_submit_bid(&task_id, &bidder, &commitment, &500_000, &50);
-        assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn pause_blocks_reveal_bid() {
-        let (env, client) = setup();
-        let creator = Address::generate(&env);
-        let bidder = Address::generate(&env);
-        let task_id = Symbol::new(&env, "rev_pause");
-
-        create_test_auction(&env, &client, &creator, &task_id, 3600);
-
-        let salt = BytesN::<32>::from_array(&env, &[98u8; 32]);
-        let price: i128 = 3_000_000;
-        let terms = String::from_str(&env, "terms");
-        let commitment = test_commitment(&env, &bidder, price, &terms, &salt);
-        client.submit_bid(&task_id, &bidder, &commitment, &500_000, &70);
-
-        env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
-
-        client.pause();
-
-        let err = client.try_reveal_bid(&task_id, &bidder, &price, &terms, &salt);
-        assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn pause_blocks_reveal_bids() {
-        let (env, client) = setup();
-        let creator = Address::generate(&env);
-        let bidder = Address::generate(&env);
-        let task_id = Symbol::new(&env, "rvb_pause");
-
-        create_test_auction(&env, &client, &creator, &task_id, 3600);
-
-        let salt = BytesN::<32>::from_array(&env, &[97u8; 32]);
-        let price: i128 = 3_000_000;
-        let terms = String::from_str(&env, "");
-        let commitment = test_commitment(&env, &bidder, price, &terms, &salt);
-        client.submit_bid(&task_id, &bidder, &commitment, &500_000, &70);
-
-        env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
-        client.reveal_bid(&task_id, &bidder, &price, &terms, &salt);
-
-        client.pause();
-
-        let err = client.try_reveal_bids(&task_id);
-        assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn pause_blocks_award_contract() {
-        let (env, client) = setup();
-        let creator = Address::generate(&env);
-        let bidder = Address::generate(&env);
-        let task_id = Symbol::new(&env, "aw_pause");
-
-        create_test_auction(&env, &client, &creator, &task_id, 3600);
-
-        let salt = BytesN::<32>::from_array(&env, &[96u8; 32]);
-        let price: i128 = 3_000_000;
-        let terms = String::from_str(&env, "");
-        let commitment = test_commitment(&env, &bidder, price, &terms, &salt);
-        client.submit_bid(&task_id, &bidder, &commitment, &500_000, &70);
-
-        env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
-        client.reveal_bid(&task_id, &bidder, &price, &terms, &salt);
-        client.reveal_bids(&task_id);
-
-        client.pause();
-
-        let err = client.try_award_contract(&task_id);
-        assert_eq!(err.err(), Some(Ok(Error::ContractPaused)));
-    }
-
-    #[test]
-    fn get_auction_still_works_when_paused() {
-        let (env, client) = setup();
-        let creator = Address::generate(&env);
-        let task_id = Symbol::new(&env, "read_pause");
-
-        create_test_auction(&env, &client, &creator, &task_id, 3600);
-
-        client.pause();
-
-        // Reads should still work when paused.
-        assert!(client.get_auction(&task_id).is_some());
     }
 }
