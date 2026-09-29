@@ -1,5 +1,8 @@
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, FromVal, Map};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    Address, Env, FromVal, Map,
+};
 
 fn setup() -> (Env, AgentRegistryContractClient<'static>, Symbol, Address) {
     let env = Env::default();
@@ -82,4 +85,39 @@ fn cooldown_blocks_early_claim_and_returns_bond_after_expiry() {
     let bond = client.get_bond(&agent_id).unwrap();
     assert_eq!(bond.amount_stroops, 0);
     assert_eq!(bond.status, bond::BondStatus::Returned);
+}
+
+#[test]
+fn slashed_agent_must_restore_bond_before_reregistration() {
+    let (env, client, agent_id, owner) = setup();
+    client.slash_bond(
+        &agent_id,
+        &100,
+        &soroban_sdk::String::from_str(&env, "verified fraud"),
+    );
+    client.deregister_agent(&agent_id);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + BOND_COOLDOWN_LEDGERS + 1);
+    client.deregister_agent(&agent_id);
+
+    let record = AgentRecord {
+        id: agent_id.clone(),
+        capability: Symbol::new(&env, "research"),
+        price_stroops: 1,
+        endpoint: soroban_sdk::String::from_str(&env, "https://agent.example"),
+        owner: owner.clone(),
+        metadata: Map::new(&env),
+        bond_amount: DEFAULT_MIN_BOND_STROOPS,
+    };
+    assert_eq!(
+        client.try_register_agent(&record),
+        Err(Ok(Error::InsufficientBond))
+    );
+
+    assert_eq!(
+        client.restore_slashed_bond(&agent_id, &DEFAULT_MIN_BOND_STROOPS),
+        DEFAULT_MIN_BOND_STROOPS
+    );
+    client.register_agent(&record);
+    assert_eq!(client.get_bond(&agent_id).unwrap().amount_stroops, DEFAULT_MIN_BOND_STROOPS);
 }

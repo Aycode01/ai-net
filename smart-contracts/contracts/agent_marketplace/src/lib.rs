@@ -7,6 +7,7 @@
 //! booking with escrow, and rating.
 
 mod errors;
+pub mod gas;
 mod types;
 
 pub use errors::Error;
@@ -112,6 +113,22 @@ impl AgentMarketplaceContract {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
+    }
+
+    /// Estimate CPU instructions for listing, searching, or purchasing.
+    /// `count` is the number of listings scanned for search or operations.
+    pub fn estimate_gas(env: Env, operation: Symbol, count: u32) -> u64 {
+        let _ = env;
+        gas::estimate(operation, count)
+    }
+
+    pub fn estimate(
+        env: Env,
+        operation: Symbol,
+        params: soroban_sdk::Map<Symbol, soroban_sdk::Val>,
+    ) -> u64 {
+        let _ = env;
+        <AgentMarketplaceContract as gas_interface::GasEstimator>::estimate(operation, params)
     }
 
     /// List a service on the marketplace.
@@ -420,6 +437,12 @@ impl AgentMarketplaceContract {
                 total_ratings: 0,
                 rating_sum: 0,
             })
+    }
+}
+
+impl gas_interface::GasEstimator for AgentMarketplaceContract {
+    fn estimate(operation: Symbol, params: soroban_sdk::Map<Symbol, soroban_sdk::Val>) -> u64 {
+        gas::estimate(operation, params.len())
     }
 }
 

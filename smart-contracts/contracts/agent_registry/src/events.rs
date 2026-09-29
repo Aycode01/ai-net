@@ -309,7 +309,7 @@ pub struct BondLocked {
 
 /// Data payload for `(registry, bond_slsh)`.
 ///
-/// Published by `slash_bond` when an admin penalises an agent's bond.
+/// Published when an admin or verified dispute ruling penalises an agent's bond.
 /// Both the penalty applied and the resulting remaining balance are included
 /// so indexers don't need to recompute the residual from prior state.
 #[contracttype]

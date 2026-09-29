@@ -1,16 +1,19 @@
-//! Unit tests for the multi-phase dispute contract. These are updated with
-//! the contract interface but intentionally not executed in this change.
+//! Unit tests for the multi-phase dispute contract.
 
 extern crate std;
 
 use super::*;
+use agent_registry::{AgentRecord, AgentRegistryContract, AgentRegistryContractClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _}, Address, BytesN, Env, String, Symbol,
+    testutils::{Address as _, Ledger as _},
+    Address, BytesN, Env, Map, String, Symbol,
 };
 
 struct Fixture {
     env: Env,
     client: DisputeResolutionContractClient<'static>,
+    registry: AgentRegistryContractClient<'static>,
+    registry_agent_id: Symbol,
     voters: [Address; 5],
     filer: Address,
     agent: Address,
@@ -50,12 +53,31 @@ fn setup() -> Fixture {
     let task_id = Symbol::new(&env, "task1");
     client.set_reputation(&filer, &10);
     client.set_reputation(&agent, &10);
+    let registry_id = env.register(AgentRegistryContract, ());
+    let registry = AgentRegistryContractClient::new(&env, &registry_id);
+    let registry_agent_id = Symbol::new(&env, "registry_agent");
+    registry.initialize(&admin);
+    registry.set_min_bond(&100);
+    registry.set_dispute_resolver(&contract_id);
+    registry.register_agent(&AgentRecord {
+        id: registry_agent_id.clone(),
+        capability: Symbol::new(&env, "research"),
+        price_stroops: 1,
+        endpoint: String::from_str(&env, "https://agent.example"),
+        owner: agent.clone(),
+        metadata: Map::new(&env),
+        bond_amount: 100,
+    });
+    client.set_agent_registry(&registry_id);
+    client.set_agent_registry_id(&agent, &registry_agent_id);
     client.set_agent_bond(&agent, &100);
     client.set_task_escrow(&task_id, &1_000);
 
     Fixture {
         env,
         client,
+        registry,
+        registry_agent_id,
         voters,
         filer,
         agent,
@@ -81,6 +103,12 @@ fn advance_to_voting(fixture: &Fixture) {
 fn advance_to_resolution(fixture: &Fixture) {
     fixture.env.ledger().with_mut(|ledger| {
         ledger.timestamp += EVIDENCE_PHASE + VOTING_PHASE;
+    });
+}
+
+fn advance_to_appeal_finalization(fixture: &Fixture) {
+    fixture.env.ledger().with_mut(|ledger| {
+        ledger.timestamp += APPEAL_PHASE + 1;
     });
 }
 
@@ -174,6 +202,22 @@ fn support_filer_refunds_and_slashes_half_the_agent_bond() {
         fixture.client.resolve(&fixture.task_id),
         DisputeOutcome::SupportFiler
     );
+    let proposed = fixture.client.get_dispute(&fixture.task_id).unwrap();
+    assert_eq!(proposed.status, DisputeStatus::AppealPending);
+    assert!(proposed.appeal_deadline.is_some());
+    assert!(!proposed.appealed);
+    assert_eq!(proposed.bond_slashed, 50);
+    assert_eq!(fixture.client.get_agent_bond(&fixture.agent), 100);
+    assert_eq!(
+        fixture.client.try_finalize_dispute(&fixture.task_id),
+        Err(Ok(Error::InvalidPhase))
+    );
+    assert_eq!(
+        fixture.client.try_resolve(&fixture.task_id),
+        Err(Ok(Error::InvalidPhase))
+    );
+    advance_to_appeal_finalization(&fixture);
+    fixture.client.finalize_dispute(&fixture.task_id);
     let dispute = fixture.client.get_dispute(&fixture.task_id).unwrap();
     assert_eq!(dispute.bond_slashed, 50);
     assert_eq!(fixture.client.get_agent_bond(&fixture.agent), 50);
@@ -193,11 +237,97 @@ fn insufficient_votes_return_a_neutral_split_without_penalties() {
     advance_to_resolution(&fixture);
 
     assert_eq!(fixture.client.resolve(&fixture.task_id), DisputeOutcome::Tie);
+    advance_to_appeal_finalization(&fixture);
+    fixture.client.finalize_dispute(&fixture.task_id);
     let dispute = fixture.client.get_dispute(&fixture.task_id).unwrap();
     assert_eq!(dispute.filer_refund, 500);
     assert_eq!(dispute.agent_payment, 500);
     assert_eq!(dispute.bond_slashed, 0);
     assert_eq!(fixture.client.get_agent_bond(&fixture.agent), 100);
+}
+
+#[test]
+fn appeal_reopens_voting_and_reverses_provisional_slash() {
+    let fixture = setup();
+    file(&fixture);
+    assert_eq!(
+        fixture
+            .registry
+            .try_initiate_bond_return(&fixture.registry_agent_id),
+        Err(Ok(agent_registry::Error::DisputePending))
+    );
+    advance_to_voting(&fixture);
+    for voter in fixture.voters.iter().take(3) {
+        fixture
+            .client
+            .vote(&fixture.task_id, voter, &VoteSide::SupportFiler);
+    }
+    for voter in fixture.voters.iter().skip(3) {
+        fixture
+            .client
+            .vote(&fixture.task_id, voter, &VoteSide::SupportAgent);
+    }
+    advance_to_resolution(&fixture);
+    assert_eq!(
+        fixture.client.resolve(&fixture.task_id),
+        DisputeOutcome::SupportFiler
+    );
+    assert_eq!(
+        fixture.client.try_appeal_dispute(&fixture.task_id, &fixture.filer),
+        Err(Ok(Error::Unauthorized))
+    );
+    fixture
+        .client
+        .appeal_dispute(&fixture.task_id, &fixture.agent);
+
+    for voter in fixture.voters.iter().take(3) {
+        fixture
+            .client
+            .vote(&fixture.task_id, voter, &VoteSide::SupportAgent);
+    }
+    for voter in fixture.voters.iter().skip(3) {
+        fixture
+            .client
+            .vote(&fixture.task_id, voter, &VoteSide::SupportFiler);
+    }
+    fixture.env.ledger().with_mut(|ledger| {
+        ledger.timestamp += VOTING_PHASE;
+    });
+    assert_eq!(
+        fixture.client.resolve(&fixture.task_id),
+        DisputeOutcome::SupportAgent
+    );
+    let dispute = fixture.client.get_dispute(&fixture.task_id).unwrap();
+    assert_eq!(dispute.status, DisputeStatus::Resolved);
+    assert_eq!(dispute.bond_slashed, 0);
+    assert_eq!(fixture.client.get_agent_bond(&fixture.agent), 100);
+    assert_eq!(dispute.agent_payment, 1_000);
+    fixture
+        .registry
+        .initiate_bond_return(&fixture.registry_agent_id);
+}
+
+#[test]
+fn finalized_verified_dispute_slashes_registry_bond_with_reason() {
+    let fixture = setup();
+    file(&fixture);
+    advance_to_voting(&fixture);
+    for voter in fixture.voters.iter().take(3) {
+        fixture
+            .client
+            .vote(&fixture.task_id, voter, &VoteSide::SupportFiler);
+    }
+    advance_to_resolution(&fixture);
+    fixture.client.resolve(&fixture.task_id);
+    advance_to_appeal_finalization(&fixture);
+    fixture.client.finalize_dispute(&fixture.task_id);
+
+    let bond = fixture
+        .registry
+        .get_bond(&fixture.registry_agent_id)
+        .unwrap();
+    assert_eq!(bond.amount_stroops, 50);
+    assert_eq!(bond.status, agent_registry::bond::BondStatus::Active);
 }
 
 #[test]

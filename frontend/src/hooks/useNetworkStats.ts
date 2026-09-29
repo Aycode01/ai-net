@@ -1,16 +1,9 @@
 // src/hooks/useNetworkStats.ts
 import { useEffect, useState, useCallback } from 'react';
 import { getStats } from '../services/api';
-import type { TimePoint } from '../types/api';
+import type { NetworkStats } from '../types/api';
 
-export interface NetworkStats {
-  totalAgents: number;
-  totalTasks: number;
-  totalXLMTransacted: number;
-  uptimePercent: number;
-  tasksLast24h?: TimePoint[];
-  xlmLast24h?: TimePoint[];
-}
+export type { NetworkStats };
 
 export const useNetworkStats = () => {
   const [data, setData] = useState<NetworkStats | null>(null);
