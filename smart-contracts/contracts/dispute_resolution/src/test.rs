@@ -337,3 +337,134 @@ fn negative_auth_set_admin() {
     env.mock_auths(&[]);
     assert!(client.try_set_admin(&intruder).is_err());
 }
+
+#[test]
+fn evidence_index_zero_survives_submission() {
+    let fixture = setup();
+    file(&fixture);
+    
+    let hash0 = BytesN::from_array(&fixture.env, &[1u8; 32]);
+    let hash1 = BytesN::from_array(&fixture.env, &[2u8; 32]);
+    let hash2 = BytesN::from_array(&fixture.env, &[3u8; 32]);
+    
+    // Submit 3 pieces of evidence
+    let id0 = fixture
+        .client
+        .submit_evidence(&fixture.task_id, &fixture.filer, &hash0);
+    let id1 = fixture
+        .client
+        .submit_evidence(&fixture.task_id, &fixture.agent, &hash1);
+    let id2 = fixture
+        .client
+        .submit_evidence(&fixture.task_id, &fixture.filer, &hash2);
+    
+    // Verify evidence IDs are sequential
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    
+    // Verify count is correct
+    assert_eq!(fixture.client.get_evidence_count(&fixture.task_id), 3);
+    
+    // CRITICAL: Verify evidence #0 is retrievable and has correct data
+    let evidence0 = fixture.client.get_evidence(&fixture.task_id, &0).unwrap();
+    assert_eq!(evidence0.evidence_id, 0);
+    assert_eq!(evidence0.evidence_hash, hash0);
+    assert_eq!(evidence0.submitter, fixture.filer);
+    assert_eq!(evidence0.dispute_id, fixture.task_id);
+    
+    // Verify evidence #1 and #2 are also retrievable
+    let evidence1 = fixture.client.get_evidence(&fixture.task_id, &1).unwrap();
+    assert_eq!(evidence1.evidence_id, 1);
+    assert_eq!(evidence1.evidence_hash, hash1);
+    assert_eq!(evidence1.submitter, fixture.agent);
+    
+    let evidence2 = fixture.client.get_evidence(&fixture.task_id, &2).unwrap();
+    assert_eq!(evidence2.evidence_id, 2);
+    assert_eq!(evidence2.evidence_hash, hash2);
+    assert_eq!(evidence2.submitter, fixture.filer);
+}
+
+fn setup_with_admin() -> (Env, DisputeResolutionContractClient<'static>, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(DisputeResolutionContract, ());
+    let client = DisputeResolutionContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    (env, client, admin)
+}
+
+// ========================================================================
+// Negative Authorization Tests (Issue #549)
+// ========================================================================
+
+#[test]
+fn negative_auth_set_admin() {
+    let (env, client, _admin) = setup_with_admin();
+    let intruder = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_admin(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_pause() {
+    let (env, client, _admin) = setup_with_admin();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_pause(), Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn negative_auth_unpause() {
+    let (env, client, admin) = setup_with_admin();
+    client.pause();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_unpause(), Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn negative_auth_set_voters() {
+    let (env, client, _admin) = setup_with_admin();
+    let voters = soroban_sdk::vec![&env, Address::generate(&env)];
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_voters(&voters),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_set_reputation() {
+    let (env, client, _admin) = setup_with_admin();
+    let account = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_reputation(&account, &50),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_set_agent_bond() {
+    let (env, client, _admin) = setup_with_admin();
+    let agent = Address::generate(&env);
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_agent_bond(&agent, &100),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_set_task_escrow() {
+    let (env, client, _admin) = setup_with_admin();
+    let task_id = Symbol::new(&env, "task1");
+    env.mock_auths(&[]);
+    assert_eq!(
+        client.try_set_task_escrow(&task_id, &1000),
+        Err(Ok(Error::Unauthorized))
+    );
+}

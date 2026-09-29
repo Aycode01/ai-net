@@ -1,6 +1,6 @@
 //! # Data Types for Price Oracle
 
-use soroban_sdk::{contracttype, Symbol};
+use soroban_sdk::{contracttype, Address, Symbol};
 
 /// A single price observation pushed by the authoritative feed provider.
 #[contracttype]
