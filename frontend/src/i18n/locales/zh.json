@@ -225,6 +225,7 @@
   "page.task.ws.connected": "已连接",
   "page.task.ws.connecting": "连接中",
   "page.task.ws.disconnected": "已断开",
+  "page.task.ws.authenticationRequired": "请连接钱包以验证身份",
   "page.task.taskId": "任务 ID：{{id}}",
   "page.task.sync": "同步",
   "page.task.dagTitle": "执行 DAG 状态",

@@ -4,13 +4,20 @@ import type { DAGNode, TaskResponse } from '../types/api';
 import { apiClient } from '../services/api';
 import { useTaskMonitor } from './useTaskMonitor';
 
+const webSocketOptions = vi.hoisted(() => vi.fn());
+
 vi.mock('../services/api', () => ({
   apiClient: { get: vi.fn() },
 }));
 
 vi.mock('./useTaskWebSocket', () => ({
-  useTaskWebSocket: () => ({ isConnected: false, status: 'disconnected' }),
+  useTaskWebSocket: (options: unknown) => {
+    webSocketOptions(options);
+    return { isConnected: false, status: 'disconnected' };
+  },
 }));
+
+vi.mock('./useWallet', () => ({ useWallet: () => ({ publicKey: 'GCONNECTEDWALLET' }) }));
 
 const getTask = vi.mocked(apiClient.get);
 
@@ -36,6 +43,22 @@ const task = (dag: DAGNode[]): TaskResponse => ({
 describe('useTaskMonitor initial payments', () => {
   beforeEach(() => {
     getTask.mockReset();
+    webSocketOptions.mockClear();
+  });
+
+  it('passes the connected wallet key to the authenticated task stream', async () => {
+    getTask.mockResolvedValue(task([]));
+    renderHook(() => useTaskMonitor('task-1'));
+
+    await waitFor(() => expect(getTask).toHaveBeenCalled());
+
+    expect(webSocketOptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'task-1',
+        walletPublicKey: 'GCONNECTEDWALLET',
+        requireAuthentication: true,
+      })
+    );
   });
 
   it('builds a timeline entry from a completed node carrying a payment result', async () => {
@@ -49,7 +72,7 @@ describe('useTaskMonitor initial payments', () => {
             timestamp: '2026-09-01T10:03:00.000Z',
           },
         }),
-      ]),
+      ])
     );
 
     const { result } = renderHook(() => useTaskMonitor('task-1'));
@@ -69,9 +92,7 @@ describe('useTaskMonitor initial payments', () => {
   });
 
   it('falls back to the task updatedAt when the payment result has no timestamp', async () => {
-    getTask.mockResolvedValue(
-      task([node({ result: { txHash: 'abc123', amount: '1.25' } })]),
-    );
+    getTask.mockResolvedValue(task([node({ result: { txHash: 'abc123', amount: '1.25' } })]));
 
     const { result } = renderHook(() => useTaskMonitor('task-1'));
 
@@ -95,7 +116,7 @@ describe('useTaskMonitor initial payments', () => {
           nodeId: 'bad-timestamp',
           result: { txHash: 'abc123', amount: 2, timestamp: 1700000000 },
         }),
-      ]),
+      ])
     );
 
     const { result } = renderHook(() => useTaskMonitor('task-1'));

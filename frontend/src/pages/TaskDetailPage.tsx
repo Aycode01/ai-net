@@ -15,7 +15,6 @@ import { DAGPreview } from '../components/agents/DAGPreview';
 import { NodeDetailPanel, type NodeDetailData } from '../components/agents/NodeDetailPanel';
 import { AlertCircle, CheckCircle2, Play, RefreshCw } from 'lucide-react';
 
-
 /**
  * Context-aware skeleton that mirrors the task detail layout (header, DAG
  * panel, output/payment panels) so there is no layout shift on load.
@@ -24,7 +23,12 @@ export const TaskDetailSkeleton: React.FC = () => {
   const { t } = useTranslation();
 
   return (
-    <div className="space-y-6" data-testid="task-detail-skeleton" aria-busy="true" aria-label={t('a11y.loadingTaskDetails')}>
+    <div
+      className="space-y-6"
+      data-testid="task-detail-skeleton"
+      aria-busy="true"
+      aria-label={t('a11y.loadingTaskDetails')}
+    >
       {/* Details Header */}
       <div className="glass-panel flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div className="w-full md:w-2/3">
@@ -49,9 +53,18 @@ export const TaskDetailSkeleton: React.FC = () => {
           <Skeleton height="80px" />
           <Skeleton height="80px" />
         </div>
-        <div className="w-full bg-slate-950/40 rounded-xl border border-[var(--panel-border)] overflow-hidden flex items-center gap-8 px-8" style={{ height: '280px' }}>
+        <div
+          className="w-full bg-slate-950/40 rounded-xl border border-[var(--panel-border)] overflow-hidden flex items-center gap-8 px-8"
+          style={{ height: '280px' }}
+        >
           {Array.from({ length: 3 }, (_, index) => (
-            <Skeleton key={index} variant="rect" width="160px" height="92px" className="shrink-0 rounded-xl" />
+            <Skeleton
+              key={index}
+              variant="rect"
+              width="160px"
+              height="92px"
+              className="shrink-0 rounded-xl"
+            />
           ))}
         </div>
       </div>
@@ -105,7 +118,7 @@ const TaskDetailPage: React.FC = () => {
 
   // Check if any node is failed
   const failedNode = useMemo(() => {
-    return nodes.find(n => n.status === 'failed');
+    return nodes.find((n) => n.status === 'failed');
   }, [nodes]);
 
   // ── Interactive DAG: node selection with ESC dismissal ───────────────────
@@ -140,7 +153,7 @@ const TaskDetailPage: React.FC = () => {
         (node.dependsOn ?? []).map((depId) => ({
           source: depId,
           target: node.nodeId,
-        })),
+        }))
       ),
     };
   }, [nodes]);
@@ -179,7 +192,9 @@ const TaskDetailPage: React.FC = () => {
     return (
       <div className="glass-panel border-rose-500/30 text-center py-12">
         <AlertCircle className="text-rose-500 mx-auto mb-4" size={48} />
-        <h2 className="text-xl font-bold text-[var(--text-primary)] mb-2">{t('page.task.errorTitle')}</h2>
+        <h2 className="text-xl font-bold text-[var(--text-primary)] mb-2">
+          {t('page.task.errorTitle')}
+        </h2>
         <p className="text-rose-300/80 mb-6">{error.message}</p>
         <button onClick={refetch} className="flex items-center gap-2 mx-auto">
           <RefreshCw size={16} />
@@ -206,6 +221,13 @@ const TaskDetailPage: React.FC = () => {
           color: 'var(--status-warning-text)',
           label: t('page.task.ws.connecting'),
         };
+      case 'authentication-required':
+        return {
+          bg: 'var(--status-warning-surface)',
+          border: 'var(--status-warning-border)',
+          color: 'var(--status-warning-text)',
+          label: t('page.task.ws.authenticationRequired'),
+        };
       case 'error':
       case 'disconnected':
       default:
@@ -224,7 +246,10 @@ const TaskDetailPage: React.FC = () => {
     <div className="space-y-6 fade-in">
       {/* Task failed banner */}
       {failedNode && (
-        <div className="p-4 bg-rose-950/60 border border-rose-500/50 rounded-xl flex items-start gap-3 text-rose-200 animate-fadeIn" role="alert">
+        <div
+          className="p-4 bg-rose-950/60 border border-rose-500/50 rounded-xl flex items-start gap-3 text-rose-200 animate-fadeIn"
+          role="alert"
+        >
           <AlertCircle className="text-rose-400 mt-0.5 shrink-0" size={20} />
           <div>
             <h4 className="font-bold text-sm">{t('page.task.failedTitle')}</h4>
@@ -244,7 +269,10 @@ const TaskDetailPage: React.FC = () => {
 
       {/* Task completed banner */}
       {task?.status === 'completed' && !failedNode && (
-        <div className="p-4 bg-emerald-950/60 border border-emerald-500/50 rounded-xl flex items-start gap-3 text-emerald-200 animate-fadeIn" role="alert">
+        <div
+          className="p-4 bg-emerald-950/60 border border-emerald-500/50 rounded-xl flex items-start gap-3 text-emerald-200 animate-fadeIn"
+          role="alert"
+        >
           <CheckCircle2 className="text-emerald-400 mt-0.5 shrink-0" size={20} />
           <div>
             <h4 className="font-bold text-sm">{t('page.task.completedTitle')}</h4>
@@ -259,7 +287,9 @@ const TaskDetailPage: React.FC = () => {
       <div className="glass-panel flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <div className="flex items-center gap-3">
-            <h1 className="text-xl md:text-2xl font-bold tracking-tight">{t('nav.taskMonitoring')}</h1>
+            <h1 className="text-xl md:text-2xl font-bold tracking-tight">
+              {t('nav.taskMonitoring')}
+            </h1>
             <span
               id="ws-status"
               // The raw state, so tests can assert the connection without
@@ -287,15 +317,25 @@ const TaskDetailPage: React.FC = () => {
 
         <div className="flex items-center gap-3 self-stretch md:self-auto justify-between">
           <div className="text-right hidden sm:block">
-            <div className="text-[10px] uppercase font-bold text-[var(--text-secondary)]">{t('common.status')}</div>
-            <div className={`text-xs font-extrabold capitalize mt-0.5 ${
-              task?.status === 'completed' ? 'text-[var(--status-success)]' :
-              task?.status === 'failed' ? 'text-[var(--status-danger)]' : 'text-[var(--accent-secondary)]'
-            }`}>
+            <div className="text-[10px] uppercase font-bold text-[var(--text-secondary)]">
+              {t('common.status')}
+            </div>
+            <div
+              className={`text-xs font-extrabold capitalize mt-0.5 ${
+                task?.status === 'completed'
+                  ? 'text-[var(--status-success)]'
+                  : task?.status === 'failed'
+                    ? 'text-[var(--status-danger)]'
+                    : 'text-[var(--accent-secondary)]'
+              }`}
+            >
               {task?.status || 'queued'}
             </div>
           </div>
-          <button onClick={refetch} className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-[var(--surface-elevated)] hover:bg-[var(--surface-muted)] border border-[var(--border-strong)] transition">
+          <button
+            onClick={refetch}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-[var(--surface-elevated)] hover:bg-[var(--surface-muted)] border border-[var(--border-strong)] transition"
+          >
             <RefreshCw size={12} />
             <span>{t('page.task.sync')}</span>
           </button>
@@ -306,10 +346,14 @@ const TaskDetailPage: React.FC = () => {
       <div className="glass-panel relative flex flex-col">
         <div className="flex items-center gap-2 mb-3">
           <Play size={16} className="text-[var(--accent-secondary)]" />
-          <h3 className="text-md font-semibold text-[var(--text-primary)]">{t('page.task.dagTitle')}</h3>
-          <span className="text-[10px] text-[var(--text-muted)] ml-auto">{t('page.task.dagHint')}</span>
+          <h3 className="text-md font-semibold text-[var(--text-primary)]">
+            {t('page.task.dagTitle')}
+          </h3>
+          <span className="text-[10px] text-[var(--text-muted)] ml-auto">
+            {t('page.task.dagHint')}
+          </span>
         </div>
-        
+
         <div
           id="dag-preview"
           className="w-full bg-[var(--surface-glass-subtle)] rounded-xl border border-[var(--panel-border)] overflow-hidden relative"
@@ -330,7 +374,10 @@ const TaskDetailPage: React.FC = () => {
               )}
             </div>
           ) : (
-            <div className="flex items-center justify-center h-full text-[var(--text-muted)]" style={{ minHeight: '280px' }}>
+            <div
+              className="flex items-center justify-center h-full text-[var(--text-muted)]"
+              style={{ minHeight: '280px' }}
+            >
               {t('page.task.dagEmpty')}
             </div>
           )}
