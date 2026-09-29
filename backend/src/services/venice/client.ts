@@ -131,7 +131,7 @@ export class VeniceClient implements VeniceClientLike {
   }
 
   constructor(config: VeniceClientConfig) {
-    this.breaker = config.circuitBreaker ?? new CircuitBreaker();
+    this.breaker = config.circuitBreaker ?? new CircuitBreaker({ name: 'venice' });
 
     const env = this.resolveConfig() as any;
     this.modelVersion = config.modelVersion ?? env.VENICE_MODEL_VERSION ?? CONFIG_FALLBACK.VENICE_MODEL_VERSION;

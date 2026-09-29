@@ -11,7 +11,7 @@
  * ────────────────
  * The DDL is defined in exactly one place — the migration system:
  *   backend/src/db/migrations/tasks/002_create_task_events_table.up.sql  (schema B)
- *   backend/src/db/migrations/tasks/005_replace_task_events_schema.up.sql (schema A)
+ *   backend/src/db/migrations/tasks/006_replace_task_events_schema.up.sql (schema A)
  *
  * When `createEventStore` is called without a pre-migrated database (e.g. in
  * unit tests or when operating against an in-memory DB), it applies both
@@ -178,7 +178,7 @@ function applyDDL(db: import('better-sqlite3').Database): void {
     'utf8',
   );
   const migration005 = readFileSync(
-    join(migrationsDir, '005_replace_task_events_schema.up.sql'),
+    join(migrationsDir, '006_replace_task_events_schema.up.sql'),
     'utf8',
   );
   db.exec(migration002);
