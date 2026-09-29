@@ -31,23 +31,3 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # Tests register the real UpgradeManager contract in the test Env, so they need
 # its entry points; the wasm build above does not.
 upgrade-manager = { path = "../upgrade-manager", features = ["contract"] }
-
-[profile.release]
-opt-level = "z"
-overflow-checks = true
-debug = 0
-strip = "symbols"
-debug-assertions = false
-panic = "abort"
-codegen-units = 1
-lto = true
-
-
-
-
-
-
-
-
-
-
