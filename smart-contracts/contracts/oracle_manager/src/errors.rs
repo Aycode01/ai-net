@@ -22,4 +22,8 @@ pub enum Error {
     OracleCallFailed = 7,
     /// Contract is currently paused.
     ContractPaused = 8,
+    /// The oracle contract is not initialized.
+    OracleNotInitialized = 9,
+    /// The oracle contract is currently paused.
+    OraclePaused = 10,
 }

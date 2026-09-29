@@ -3,8 +3,13 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 
 import { useTaskMonitor } from '../hooks/useTaskMonitor';
+import ReactFlow, { Background, Controls, Handle, Position } from 'reactflow';
+import 'reactflow/dist/style.css';
 import { TaskDetailTimeline } from '../components/dashboard/TaskDetailTimeline';
 import { PaymentTimeline } from '../components/dashboard/PaymentTimeline';
+import { TaskCostPanel } from '../components/tasks/TaskCostPanel';
+import { getTaskCost } from '../services/api';
+import type { TaskCost } from '../types/api';
 import { Skeleton, SkeletonText } from '../components/common/Skeleton';
 import { DAGPreview } from '../components/agents/DAGPreview';
 import { NodeDetailPanel, type NodeDetailData } from '../components/agents/NodeDetailPanel';
@@ -68,6 +73,35 @@ const TaskDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const { task, loading, error, wsStatus, nodes, payments, outputs, refetch } = useTaskMonitor(id);
+
+  // Token cost (Issue #390). Fetched separately from the task monitor because
+  // the backend owns the ledger: while the task runs, cost only exists in the
+  // in-memory ledger plus periodic flushes, not in the task payload.
+  const [cost, setCost] = useState<TaskCost | null>(null);
+  const [costLoading, setCostLoading] = useState(true);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    setCostLoading(true);
+
+    getTaskCost(id)
+      .then((res) => {
+        if (!cancelled) setCost(res);
+      })
+      .catch(() => {
+        // Cost is supplementary: a task whose spend cannot be read (older
+        // backend, wrong wallet) should still render its results.
+        if (!cancelled) setCost(null);
+      })
+      .finally(() => {
+        if (!cancelled) setCostLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, task?.status]);
 
   // Check if any node is failed
   const failedNode = useMemo(() => {
@@ -302,6 +336,9 @@ const TaskDetailPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Token cost (Issue #390) */}
+      <TaskCostPanel cost={cost} loading={costLoading} />
 
       {/* Combined Panels */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">

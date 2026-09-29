@@ -78,14 +78,14 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (typeof mql.addEventListener === 'function') {
       mql.addEventListener('change', handler)
     } else if (typeof (mql as any).addListener === 'function') {
-      ;(mql as any).addListener(handler)
+      (mql as any).addListener(handler);
     }
 
     return () => {
       if (typeof mql.removeEventListener === 'function') {
         mql.removeEventListener('change', handler)
       } else if (typeof (mql as any).removeListener === 'function') {
-        ;(mql as any).removeListener(handler)
+        (mql as any).removeListener(handler);
       }
     }
   }, [])
