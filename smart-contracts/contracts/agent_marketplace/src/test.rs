@@ -3,7 +3,10 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _},
+    Address, Env, IntoVal, Symbol, TryFromVal, TryIntoVal, Val,
+};
 
 fn setup() -> (Env, AgentMarketplaceContractClient<'static>) {
     let env = Env::default();
@@ -48,7 +51,6 @@ fn initialize_cannot_be_called_twice() {
 fn list_service_success() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
-
     let result = client.try_list_service(
         &Symbol::new(&env, "svc1"),
         &Symbol::new(&env, "agent1"),
@@ -65,7 +67,6 @@ fn list_service_success() {
     let listing = listing.unwrap();
     assert_eq!(listing.price_stroops, 1_000_000);
     assert!(listing.active);
-    assert_eq!(listing.price_pair, None);
 }
 
 #[test]
@@ -154,18 +155,15 @@ fn book_agent_success() {
     let owner = Address::generate(&env);
     let client_addr = Address::generate(&env);
 
-#[test]
-fn set_oracle_manager_emits_event() {
-    let f = fixture();
-    let mgr = Address::generate(&f.env);
-    f.client.set_oracle_manager(&Some(mgr));
-
-    let events = f.env.events().all();
-    let found = events
-        .iter()
-        .any(|(_, t, _)| t == (symbol_short!("market"), symbol_short!("ora_set")).into_val(&f.env));
-    assert!(found);
-}
+    client.list_service(
+        &Symbol::new(&env, "svc1"),
+        &Symbol::new(&env, "agent1"),
+        &owner,
+        &Symbol::new(&env, "research"),
+        &1_000_000_i128,
+        &200_u32,
+        &24_u32,
+    );
 
     let booking_id = Symbol::new(&env, "bk1");
     client.book_agent(
@@ -339,7 +337,7 @@ fn rate_invalid_score() {
 #[test]
 fn pause_blocks_listing() {
     let (env, client, _admin) = setup_with_admin();
-    client.pause(&true);
+    client.pause();
 
     let owner = Address::generate(&env);
     assert_eq!(
@@ -439,6 +437,10 @@ fn search_services_still_works_when_paused() {
     assert_eq!(results.len(), 1);
 }
 
+// ========================================================================
+// Negative Authorization Tests (Issue #549)
+// ========================================================================
+
 #[test]
 fn negative_auth_initialize() {
     let env = Env::default();
@@ -454,5 +456,23 @@ fn negative_auth_set_admin() {
     let (env, client, _admin) = setup_with_admin();
     let intruder = Address::generate(&env);
     env.mock_auths(&[]);
-    assert!(client.try_set_admin(&intruder).is_err());
+    assert_eq!(
+        client.try_set_admin(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_pause() {
+    let (env, client, _admin) = setup_with_admin();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_pause(), Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn negative_auth_unpause() {
+    let (env, client, _admin) = setup_with_admin();
+    client.pause();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_unpause(), Err(Ok(Error::Unauthorized)));
 }

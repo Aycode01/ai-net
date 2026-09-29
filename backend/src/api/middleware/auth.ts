@@ -75,6 +75,27 @@ export function sessionAuthMiddleware(req: Request, res: Response, next: NextFun
 }
 
 /**
+ * Require a valid session access token.
+ */
+export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const auth = req.headers["authorization"] ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (!token) {
+    res.status(401).json({ error: "Unauthorized", message: "Missing Authorization header" });
+    return;
+  }
+
+  try {
+    const payload = getAuthService().verifyAccessToken(token);
+    req.user = payload;
+    return next();
+  } catch {
+    res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
+  }
+}
+
+/**
  * Optional session auth middleware: extracts user token if present without rejecting unauthenticated requests.
  */
 export function optionalAuthMiddleware(req: Request, _res: Response, next: NextFunction): void {
