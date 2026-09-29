@@ -10,6 +10,7 @@ pub enum DisputeStatus {
     EvidencePhase = 1,
     Voting = 2,
     Resolved = 3,
+    AppealPending = 4,
 }
 
 /// The two non-neutral voting rulings.
@@ -47,6 +48,8 @@ pub struct Dispute {
     pub task_id: Symbol,
     pub filer: Address,
     pub agent_id: Address,
+    pub registry_address: Address,
+    pub registry_agent_id: Symbol,
     pub reason: String,
     pub status: DisputeStatus,
     pub filed_at: u64,
@@ -56,6 +59,8 @@ pub struct Dispute {
     pub voters: Vec<Address>,
     /// 0 = support filer, 1 = support agent, 2 = tie / insufficient votes.
     pub resolution: Option<u32>,
+    pub appeal_deadline: Option<u64>,
+    pub appealed: bool,
     pub filer_votes: u32,
     pub agent_votes: u32,
     pub bond_slashed: i128,
@@ -124,4 +129,14 @@ pub struct DisputeResolvedEvent {
 pub struct AdminChangedEvent {
     pub old_admin: Address,
     pub new_admin: Address,
+}
+
+/// Event: VoteCast
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoteCastEvent {
+    pub dispute_id: Symbol,
+    pub juror: Address,
+    pub side: VoteSide,
+    pub timestamp: u64,
 }

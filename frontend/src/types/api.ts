@@ -64,6 +64,18 @@ export interface TimePoint {
   value: number;
 }
 
+/** Platform-wide LLM spend rollup (Issue #390). */
+export interface CostTotals {
+  tasks: number;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  overBudgetTasks: number;
+  costLast7d?: TimePoint[];
+}
+
 export interface NetworkStats {
   totalAgents: number;
   totalTasks: number;
@@ -74,6 +86,62 @@ export interface NetworkStats {
   /** 7-day daily series for sparklines */
   tasksLast7d?: TimePoint[];
   xlmLast7d?: TimePoint[];
+  /** LLM spend rollup. Absent on older backends. */
+  cost?: CostTotals;
+}
+
+/** One node's slice of a task's LLM spend (Issue #390). */
+export interface TaskNodeCost {
+  nodeId: string;
+  agentId: string;
+  agentType: string;
+  model: string;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  trimmed: boolean;
+  budgetExhausted: boolean;
+}
+
+/** A task's token budget and what it actually consumed. */
+export interface TaskCost {
+  taskId: string;
+  budgetTokens: number;
+  usedTokens: number;
+  remainingTokens: number;
+  costUsd: number;
+  currency: string;
+  exceeded: boolean;
+  calls: number;
+  /** True while the task is still running and these numbers are provisional. */
+  inProgress: boolean;
+  agents: TaskNodeCost[];
+}
+
+/** A persisted watchdog alert (Issue #379). */
+export interface AgentWatchdogAlert {
+  id: string;
+  agentId: string;
+  type: 'heartbeat_stale' | 'quarantined' | 'evicted' | 'recovered' | 'eviction_failed';
+  severity: 'warning' | 'critical';
+  message: string;
+  lastSeenAt: string | null;
+  detectedAt: string;
+  resolvedAt: string | null;
+  metadata: Record<string, unknown>;
+}
+
+/** An agent currently inside its heartbeat grace period (Issue #379). */
+export interface QuarantinedAgent {
+  agentId: string;
+  capabilities: string[];
+  endpoint: string;
+  lastSeenAt: string;
+  silentForMs: number | null;
+  quarantinedSince: string | null;
+  reputationScore: number;
 }
 
 export interface PaymentEvent {

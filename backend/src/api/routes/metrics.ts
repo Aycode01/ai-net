@@ -10,6 +10,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { adminAuthMiddleware } from "../middleware/auth";
 import { metricsService, MetricsService } from "../../services/metrics";
+import { generatePrometheusMetrics } from "../../services/prometheus";
 
 export interface MetricsRouterOptions {
   service?: MetricsService;
@@ -37,7 +38,7 @@ export function createMetricsRouter(options: MetricsRouterOptions = {}): Router 
    */
   router.get("/", async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const output = await service.exportPrometheusMetrics();
+      const output = generatePrometheusMetrics();
       res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
       res.status(200).send(output);
     } catch (err) {

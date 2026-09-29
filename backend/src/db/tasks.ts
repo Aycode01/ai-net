@@ -11,9 +11,11 @@ const logger = createLogger({ component: "task-db" });
 const MIGRATIONS_DIR = path.join(__dirname, "migrations", "tasks");
 
 let _taskPool: SqlitePool | null = null;
+let _taskPoolClosing: Promise<void> | null = null;
 
 /** Lazily open (or reopen) the pooled task database. */
 export function getTaskPool(dbPath?: string): SqlitePool {
+  if (_taskPoolClosing) throw new Error("Task database is closing");
   if (!_taskPool || _taskPool.closed) {
     const filePath = dbPath ?? path.join(process.cwd(), "tasks.db");
     _taskPool = createPool({
@@ -51,9 +53,15 @@ export function currentTaskPool(): SqlitePool | null {
   return _taskPool && !_taskPool.closed ? _taskPool : null;
 }
 
-export function closeTaskDb(): void {
-  void _taskPool?.close();
-  _taskPool = null;
+export function closeTaskDb(): Promise<void> {
+  if (_taskPoolClosing) return _taskPoolClosing;
+  const pool = _taskPool;
+  if (!pool) return Promise.resolve();
+  _taskPoolClosing = pool.close().finally(() => {
+    if (_taskPool === pool) _taskPool = null;
+    _taskPoolClosing = null;
+  });
+  return _taskPoolClosing;
 }
 
 export interface TaskEvent {
@@ -83,6 +91,60 @@ export interface TaskCursorOptions {
   sort?: "createdAt:asc" | "createdAt:desc";
 }
 
+/** A task's settled billing snapshot, as stored in `task_costs`. */
+export interface PersistedTaskCost {
+  taskId: string;
+  walletPublicKey: string;
+  budgetTokens: number;
+  usedTokens: number;
+  costUsd: number;
+  currency: string;
+  exceeded: boolean;
+  calls: number;
+  createdAt: string;
+  settledAt: string;
+}
+
+/** One node's contribution to a task's cost, as stored in `task_token_usage`. */
+export interface PersistedNodeUsage {
+  taskId: string;
+  nodeId: string;
+  agentId: string;
+  agentType: string;
+  model: string;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  trimmed: boolean;
+  budgetExhausted: boolean;
+  updatedAt: string;
+}
+
+/** Cross-task cost rollup for a single agent. */
+export interface AgentCostTotal {
+  agentId: string;
+  agentType: string;
+  tasks: number;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+/** Platform-wide cost totals. */
+export interface CostTotals {
+  tasks: number;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  overBudgetTasks: number;
+}
+
 export interface TaskDb {
   insert(task: Task): void;
   findById(id: string): Task | undefined;
@@ -107,6 +169,36 @@ export interface TaskDb {
   failRunningTasks(): void;
   insertQualityScore(record: QualityScoreRecord): void;
   listQualityScores(agentId?: string, limit?: number): QualityScoreRecord[];
+
+  /**
+   * Write (or overwrite) a task's billing snapshot. Called once the task
+   * settles, so re-snapshotting the same task is idempotent.
+   */
+  upsertTaskCost(record: PersistedTaskCost): void;
+  getTaskCost(taskId: string): PersistedTaskCost | undefined;
+  /**
+   * Fold one node's usage into its row.
+   *
+   * Upsert-and-add rather than insert: a node retried after a transient
+   * provider error should accumulate onto the same row, and concurrent nodes
+   * of one task must not clobber each other's counters.
+   */
+  addNodeUsage(record: PersistedNodeUsage): void;
+  /**
+   * Overwrite a node's row with the authoritative running total.
+   *
+   * Distinct from `addNodeUsage`, which accumulates deltas. The budget ledger
+   * holds cumulative per-node totals, so re-persisting the same total (on a
+   * retry, a second flush, or settlement) must be idempotent — adding it again
+   * would double-count the node's spend.
+   */
+  setNodeUsage(record: PersistedNodeUsage): void;
+  listNodeUsage(taskId: string): PersistedNodeUsage[];
+  /** Cost rollup per agent across all tasks, for the stats endpoint. */
+  listAgentCostTotals(limit?: number): AgentCostTotal[];
+  /** Platform-wide totals plus a recent-spend series, for the stats endpoint. */
+  getCostTotals(): CostTotals;
+  listRecentCosts(limit?: number): PersistedTaskCost[];
 }
 
 export function createTaskDb(db: Database.Database): TaskDb {
@@ -380,5 +472,251 @@ export function createTaskDb(db: Database.Database): TaskDb {
         timestamp: r.timestamp,
       }));
     },
+
+    upsertTaskCost(record: PersistedTaskCost): void {
+      db.prepare(
+        `
+        INSERT INTO task_costs (
+          taskId, walletPublicKey, budgetTokens, usedTokens, costUsd,
+          currency, exceeded, calls, createdAt, settledAt
+        )
+        VALUES (
+          @taskId, @walletPublicKey, @budgetTokens, @usedTokens, @costUsd,
+          @currency, @exceeded, @calls, @createdAt, @settledAt
+        )
+        ON CONFLICT(taskId) DO UPDATE SET
+          walletPublicKey = excluded.walletPublicKey,
+          budgetTokens   = excluded.budgetTokens,
+          usedTokens     = excluded.usedTokens,
+          costUsd        = excluded.costUsd,
+          currency       = excluded.currency,
+          exceeded       = excluded.exceeded,
+          calls          = excluded.calls,
+          settledAt      = excluded.settledAt
+      `,
+      ).run({
+        taskId: record.taskId,
+        walletPublicKey: record.walletPublicKey,
+        budgetTokens: record.budgetTokens,
+        usedTokens: record.usedTokens,
+        costUsd: record.costUsd,
+        currency: record.currency,
+        exceeded: record.exceeded ? 1 : 0,
+        calls: record.calls,
+        createdAt: record.createdAt,
+        settledAt: record.settledAt,
+      });
+    },
+
+    getTaskCost(taskId: string): PersistedTaskCost | undefined {
+      const row = db.prepare("SELECT * FROM task_costs WHERE taskId = ?").get(taskId) as any;
+      return row ? toPersistedTaskCost(row) : undefined;
+    },
+
+    addNodeUsage(record: PersistedNodeUsage): void {
+      // ON CONFLICT DO UPDATE with column = column + excluded.column, so a
+      // retried node accumulates instead of overwriting the earlier attempt.
+      // `trimmed` / `budgetExhausted` are sticky flags: once either is set it
+      // stays set, since the flag describes the node's history.
+      db.prepare(
+        `
+        INSERT INTO task_token_usage (
+          taskId, nodeId, agentId, agentType, model, calls,
+          promptTokens, completionTokens, totalTokens, costUsd,
+          trimmed, budgetExhausted, updatedAt
+        )
+        VALUES (
+          @taskId, @nodeId, @agentId, @agentType, @model, @calls,
+          @promptTokens, @completionTokens, @totalTokens, @costUsd,
+          @trimmed, @budgetExhausted, @updatedAt
+        )
+        ON CONFLICT(taskId, nodeId) DO UPDATE SET
+          agentId          = CASE WHEN excluded.agentId <> '' THEN excluded.agentId ELSE task_token_usage.agentId END,
+          agentType        = CASE WHEN excluded.agentType <> '' THEN excluded.agentType ELSE task_token_usage.agentType END,
+          model            = CASE WHEN excluded.model <> '' THEN excluded.model ELSE task_token_usage.model END,
+          calls            = task_token_usage.calls + excluded.calls,
+          promptTokens     = task_token_usage.promptTokens + excluded.promptTokens,
+          completionTokens = task_token_usage.completionTokens + excluded.completionTokens,
+          totalTokens      = task_token_usage.totalTokens + excluded.totalTokens,
+          costUsd          = task_token_usage.costUsd + excluded.costUsd,
+          trimmed          = MAX(task_token_usage.trimmed, excluded.trimmed),
+          budgetExhausted  = MAX(task_token_usage.budgetExhausted, excluded.budgetExhausted),
+          updatedAt        = excluded.updatedAt
+      `,
+      ).run({
+        taskId: record.taskId,
+        nodeId: record.nodeId,
+        agentId: record.agentId,
+        agentType: record.agentType,
+        model: record.model,
+        calls: record.calls,
+        promptTokens: record.promptTokens,
+        completionTokens: record.completionTokens,
+        totalTokens: record.totalTokens,
+        costUsd: record.costUsd,
+        trimmed: record.trimmed ? 1 : 0,
+        budgetExhausted: record.budgetExhausted ? 1 : 0,
+        updatedAt: record.updatedAt,
+      });
+    },
+
+    setNodeUsage(record: PersistedNodeUsage): void {
+      // Overwrite with the caller's running total rather than adding to it.
+      // Sticky flags still latch: a node that was trimmed on any attempt keeps
+      // `trimmed = 1` even if a later total is written with it false.
+      db.prepare(
+        `
+        INSERT INTO task_token_usage (
+          taskId, nodeId, agentId, agentType, model, calls,
+          promptTokens, completionTokens, totalTokens, costUsd,
+          trimmed, budgetExhausted, updatedAt
+        )
+        VALUES (
+          @taskId, @nodeId, @agentId, @agentType, @model, @calls,
+          @promptTokens, @completionTokens, @totalTokens, @costUsd,
+          @trimmed, @budgetExhausted, @updatedAt
+        )
+        ON CONFLICT(taskId, nodeId) DO UPDATE SET
+          agentId          = CASE WHEN excluded.agentId <> '' THEN excluded.agentId ELSE task_token_usage.agentId END,
+          agentType        = CASE WHEN excluded.agentType <> '' THEN excluded.agentType ELSE task_token_usage.agentType END,
+          model            = CASE WHEN excluded.model <> '' THEN excluded.model ELSE task_token_usage.model END,
+          calls            = excluded.calls,
+          promptTokens     = excluded.promptTokens,
+          completionTokens = excluded.completionTokens,
+          totalTokens      = excluded.totalTokens,
+          costUsd          = excluded.costUsd,
+          trimmed          = MAX(task_token_usage.trimmed, excluded.trimmed),
+          budgetExhausted  = MAX(task_token_usage.budgetExhausted, excluded.budgetExhausted),
+          updatedAt        = excluded.updatedAt
+      `,
+      ).run({
+        taskId: record.taskId,
+        nodeId: record.nodeId,
+        agentId: record.agentId,
+        agentType: record.agentType,
+        model: record.model,
+        calls: record.calls,
+        promptTokens: record.promptTokens,
+        completionTokens: record.completionTokens,
+        totalTokens: record.totalTokens,
+        costUsd: record.costUsd,
+        trimmed: record.trimmed ? 1 : 0,
+        budgetExhausted: record.budgetExhausted ? 1 : 0,
+        updatedAt: record.updatedAt,
+      });
+    },
+
+    listNodeUsage(taskId: string): PersistedNodeUsage[] {
+      const rows = db
+        .prepare(
+          "SELECT * FROM task_token_usage WHERE taskId = ? ORDER BY costUsd DESC, nodeId ASC",
+        )
+        .all(taskId) as any[];
+      return rows.map(toPersistedNodeUsage);
+    },
+
+    listAgentCostTotals(limit: number = 50): AgentCostTotal[] {
+      const rows = db
+        .prepare(
+          `
+          SELECT
+            agentId,
+            agentType,
+            COUNT(DISTINCT taskId)  AS tasks,
+            SUM(calls)              AS calls,
+            SUM(promptTokens)       AS promptTokens,
+            SUM(completionTokens)   AS completionTokens,
+            SUM(totalTokens)        AS totalTokens,
+            SUM(costUsd)            AS costUsd
+          FROM task_token_usage
+          WHERE agentId <> ''
+          GROUP BY agentId, agentType
+          ORDER BY costUsd DESC
+          LIMIT ?
+        `,
+        )
+        .all(limit) as any[];
+      return rows.map((r) => ({
+        agentId: r.agentId,
+        agentType: r.agentType,
+        tasks: r.tasks ?? 0,
+        calls: r.calls ?? 0,
+        promptTokens: r.promptTokens ?? 0,
+        completionTokens: r.completionTokens ?? 0,
+        totalTokens: r.totalTokens ?? 0,
+        costUsd: round6(r.costUsd ?? 0),
+      }));
+    },
+
+    getCostTotals(): CostTotals {
+      const row = db
+        .prepare(
+          `
+          SELECT
+            COUNT(*)              AS tasks,
+            SUM(calls)            AS calls,
+            SUM(promptTokens)     AS promptTokens,
+            SUM(completionTokens) AS completionTokens,
+            SUM(totalTokens)      AS totalTokens,
+            SUM(costUsd)          AS costUsd,
+            SUM(exceeded)         AS overBudgetTasks
+          FROM task_costs
+        `,
+        )
+        .get() as any;
+      return {
+        tasks: row?.tasks ?? 0,
+        calls: row?.calls ?? 0,
+        promptTokens: row?.promptTokens ?? 0,
+        completionTokens: row?.completionTokens ?? 0,
+        totalTokens: row?.totalTokens ?? 0,
+        costUsd: round6(row?.costUsd ?? 0),
+        overBudgetTasks: row?.overBudgetTasks ?? 0,
+      };
+    },
+
+    listRecentCosts(limit: number = 20): PersistedTaskCost[] {
+      const rows = db
+        .prepare("SELECT * FROM task_costs ORDER BY settledAt DESC LIMIT ?")
+        .all(limit) as any[];
+      return rows.map(toPersistedTaskCost);
+    },
+  };
+}
+
+function round6(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+function toPersistedTaskCost(row: any): PersistedTaskCost {
+  return {
+    taskId: row.taskId,
+    walletPublicKey: row.walletPublicKey ?? '',
+    budgetTokens: row.budgetTokens ?? 0,
+    usedTokens: row.usedTokens ?? 0,
+    costUsd: row.costUsd ?? 0,
+    currency: row.currency ?? 'USD',
+    exceeded: row.exceeded === 1,
+    calls: row.calls ?? 0,
+    createdAt: row.createdAt,
+    settledAt: row.settledAt,
+  };
+}
+
+function toPersistedNodeUsage(row: any): PersistedNodeUsage {
+  return {
+    taskId: row.taskId,
+    nodeId: row.nodeId,
+    agentId: row.agentId ?? '',
+    agentType: row.agentType ?? '',
+    model: row.model ?? '',
+    calls: row.calls ?? 0,
+    promptTokens: row.promptTokens ?? 0,
+    completionTokens: row.completionTokens ?? 0,
+    totalTokens: row.totalTokens ?? 0,
+    costUsd: row.costUsd ?? 0,
+    trimmed: row.trimmed === 1,
+    budgetExhausted: row.budgetExhausted === 1,
+    updatedAt: row.updatedAt,
   };
 }

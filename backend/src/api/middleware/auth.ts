@@ -51,26 +51,21 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 /**
- * Required session auth middleware: rejects the request unless it carries a
- * valid, non-revoked session access token.
- *
- * Unlike {@link authMiddleware} this **fails closed** — a missing or invalid
- * `Authorization: Bearer <token>` always responds 401. Used by the routes that
- * are scoped to an authenticated wallet (`/api/auth/sessions`,
- * `/api/auth/revoke-all`, `/api/auth/audit-logs`).
+ * Require a valid session access token.
  */
 export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
   const auth = req.headers["authorization"] ?? "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
 
   if (!token) {
-    res.status(401).json({ error: "Unauthorized", message: "Missing bearer token" });
+    res.status(401).json({ error: "Unauthorized", message: "Missing Authorization header" });
     return;
   }
 
   try {
-    req.user = getAuthService().verifyAccessToken(token);
-    next();
+    const payload = getAuthService().verifyAccessToken(token);
+    req.user = payload;
+    return next();
   } catch {
     res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
   }

@@ -38,7 +38,7 @@ import { metricsRouter } from "./routes/metrics";
 import { createStatsRouter } from "./routes/stats";
 import { createReconciliationRouter, type ReconciliationRouterOptions } from "./routes/reconciliation";
 import { rateLimitMiddleware, registerRateLimitMiddleware, publicLimiter, authedLimiter, adminLimiter } from "./middleware/rateLimit";
-import { authMiddleware } from "./middleware/auth";
+import { authMiddleware, adminAuthMiddleware } from "./middleware/auth";
 import { createCorsMiddleware } from "./middleware/cors";
 import { compressionMiddleware } from "./middleware/compression";
 import { errorHandler } from "./middleware/errorHandler";
@@ -46,7 +46,11 @@ import { readOnlyMiddleware } from "./middleware/readOnly";
 import { requestId } from "./middleware/requestId";
 import { requestLogger } from "./middleware/requestLogger";
 import { versioningMiddleware } from "./middleware/versioning";
-import { getOpenapiJson, getOpenapiYaml, swaggerUiOptions } from "./docs";
+import { getOpenapiJson, getOpenapiYaml, openapiSpec, swaggerUiOptions } from "./docs";
+import { createCostRouter } from "./routes/costs";
+import { createAgentWatchdogRouter } from "./routes/agentWatchdog";
+import { createAgentWatchdog } from "../services/agentWatchdog";
+import { flushActiveCosts, setPricingOverrides } from "../services/budget";
 import { createAdminRouter, createAdminQueueRouter } from "./routes/admin";
 import { createFlagsRouter } from "./routes/flags";
 import { createRateLimitRouter } from "./routes/ratelimit";
@@ -77,11 +81,9 @@ export interface AppOptions {
   /** Enable background queue worker (default: true) */
   enableQueueWorker?: boolean;
   /**
-   * How long close() waits for in-flight jobs to finish before closing the
-   * HTTP/WS server anyway. Default: 10000 (10s). A job still running when
-   * this elapses is left in the queue's "active" state — the next worker
-   * start (see JobWorker.start()/recoverIncompleteJobs()) resets it to
-   * "pending" and retries it, rather than losing the work.
+   * How long close() waits before the worker logs that jobs remain active.
+   * Default: 10000 (10s). The server and database connections stay open until
+   * those jobs finish so their final task/event writes are not interrupted.
    */
   jobWorkerStopTimeoutMs?: number;
 }
@@ -97,19 +99,28 @@ function tryLoadStellarRelease(): StellarReleasePaymentFn | undefined {
 }
 
 /**
- * Routes that are selected per-request rather than mounted as sub-routers.
+ * Reconcile a watchdog eviction against the agent registry (Issue #379).
  *
- * The task endpoints dispatch on the negotiated `API-Version` header, so they
- * live behind a dispatcher function and cannot be recovered by walking the
- * Express router stack. They are published here so route-introspection tooling
- * (the OpenAPI parity test) can see the same routers the server dispatches to,
- * instead of re-deriving the mount path and re-instantiating the factories.
+ * Read-only on purpose. `deregister_agent` is a `require_auth`'d on-chain
+ * mutation, and silently issuing it from a heartbeat timer would both bypass the
+ * contract's authorization model and remove a registration without an operator
+ * having chosen to. So this only *detects* divergence — an agent the watchdog
+ * just dropped locally that is still present in the registry — and reports it
+ * through the eviction alert as `deregisterRequired`, leaving the actual
+ * deregistration to an authorized operator or job.
  */
-export interface VersionDispatchedRoutes {
-  /** Path the dispatching middleware is mounted at. */
-  mountPath: string;
-  /** Every router the dispatcher can route to, for the given mount path. */
-  routers: Router[];
+function tryLoadRegistryLookup():
+  | { getAgent: (id: string) => unknown }
+  | undefined {
+  if (!getConfig().REGISTRY_CONTRACT_ID) return undefined;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require("../../../smart-contracts/src/registry/registry") as {
+      getAgent: (id: string) => unknown;
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export function createApp(opts: AppOptions = {}): {
@@ -163,12 +174,64 @@ export function createApp(opts: AppOptions = {}): {
     jobWorker.start();
   }
 
-  const heartbeatService = createHeartbeatService(opts.heartbeatOptions);
+  // The watchdog owns liveness detection from here on, so the heartbeat
+  // service's own stale→offline sweep is disabled: it would flip an agent
+  // offline on a shorter timer, without a grace clock or an alert, leaving the
+  // agent invisible to the watchdog and unalerted until the 24h delete.
+  const heartbeatService = createHeartbeatService({
+    ...opts.heartbeatOptions,
+    enableMarkStale: false,
+  });
   if (
     opts.enableHeartbeatCleanup ||
     (opts.enableHeartbeatCleanup !== false && config.NODE_ENV !== "test")
   ) {
     heartbeatService.start();
+  }
+
+  // ── Token budget + cost accounting (Issue #390) ───────────────────────────
+  // Install env pricing overrides once, so every ledger and every reprice uses
+  // the same rates.
+  setPricingOverrides(config.VENICE_PRICING);
+
+  // Flush in-flight costs on a timer. Without this, a crash mid-task loses the
+  // spend for every task that never reached a terminal state — which are
+  // exactly the runs an operator wants to see.
+  const costFlushMs = config.COST_FLUSH_INTERVAL_MS;
+  const costFlushTimer =
+    config.NODE_ENV === "test"
+      ? null
+      : setInterval(() => {
+          try {
+            flushActiveCosts();
+          } catch (err) {
+            logger.error({ err }, "cost flush failed");
+          }
+        }, costFlushMs);
+  // Do not hold the event loop open on this timer alone.
+  costFlushTimer?.unref?.();
+
+  // ── Agent heartbeat watchdog (Issue #379) ─────────────────────────────────
+  const registryLookup = tryLoadRegistryLookup();
+  const watchdog = createAgentWatchdog({
+    intervalMs: config.AGENT_WATCHDOG_INTERVAL_MS,
+    gracePeriodMinutes: config.AGENT_WATCHDOG_GRACE_MINUTES,
+    onEvict: registryLookup
+      ? async (agent) => {
+          const stillRegistered = registryLookup.getAgent(agent.id) !== undefined;
+          logger.warn(
+            {
+              agentId: agent.id,
+              stillRegistered,
+              deregisterRequired: stillRegistered,
+            },
+            "agent evicted locally but still present in the registry; authorized deregistration required",
+          );
+        }
+      : undefined,
+  });
+  if (config.NODE_ENV !== "test") {
+    watchdog.start();
   }
 
   // ── Health routes ───────────────────────────────────────────────────────────
@@ -181,6 +244,13 @@ export function createApp(opts: AppOptions = {}): {
   // ── Stats routes ───────────────────────────────────────────────────────────
   app.use("/api/stats", publicLimiter.middleware, createStatsRouter(getTaskDb()));
 
+  // Cost routes (Issue #390): /api/costs (operator rollup) and
+  // /api/tasks/:id/cost (wallet-scoped, ownership-checked in the handler).
+  // Mounted before the task router so the cost path is matched first; the two
+  // do not actually collide, because the task router's `/:id` matches a single
+  // path segment and `/:id/cost` is two.
+  app.use("/api", publicLimiter.middleware, createCostRouter());
+
   // ── Auth routes ────────────────────────────────────────────────────────────
   app.use("/api/auth", createAuthRouter(opts.authService));
 
@@ -191,61 +261,13 @@ export function createApp(opts: AppOptions = {}): {
   app.post("/api/agents/register", registerRateLimitMiddleware);
   app.use("/api/agents", agentsRouter);
 
-  // ── Rate limit introspection (Issue #499) ─────────────────────────────────
-  app.use("/api/ratelimit", adminLimiter.middleware, createRateLimitRouter());
+  // ── Agent watchdog alerts (Issue #379) ─────────────────────────────────────
+  app.use(
+    "/api/agent-watchdog",
+    publicLimiter.middleware,
+    createAgentWatchdogRouter({ tick: () => watchdog.tick() }),
+  );
 
-  // ── API documentation (Issue #572) ───────────────────────────────────────
-  // Interactive Swagger UI, plus the raw spec in both serializations. The YAML
-  // is generated from the exact same object as the JSON, so the two can never
-  // drift apart.
-  /**
-   * @openapi
-   * /openapi.json:
-   *   get:
-   *     summary: OpenAPI specification (JSON)
-   *     operationId: getOpenapiJsonRoute
-   *     description: The canonical OpenAPI 3.1.0 document describing every route registered on this server.
-   *     tags: [Documentation]
-   *     security: []
-   *     responses:
-   *       200:
-   *         description: The OpenAPI document
-   *         content:
-   *           application/json:
-   *             schema:
-   *               type: object
-   * /openapi.yaml:
-   *   get:
-   *     summary: OpenAPI specification (YAML)
-   *     operationId: getOpenapiYamlRoute
-   *     description: >
-   *       The same OpenAPI 3.1.0 document as `GET /openapi.json`, serialized as
-   *       YAML. Both are generated from one in-memory object, so they are
-   *       semantically identical.
-   *     tags: [Documentation]
-   *     security: []
-   *     responses:
-   *       200:
-   *         description: The OpenAPI document, serialized as YAML
-   *         content:
-   *           text/yaml:
-   *             schema:
-   *               type: string
-   * /api-docs:
-   *   get:
-   *     summary: Interactive Swagger UI
-   *     operationId: getApiDocs
-   *     description: Browsable, "try it out" documentation for the live API. Backed by the same spec object as `/openapi.json`.
-   *     tags: [Documentation]
-   *     security: []
-   *     responses:
-   *       200:
-   *         description: Swagger UI HTML
-   *         content:
-   *           text/html:
-   *             schema:
-   *               type: string
-   */
   app.get("/openapi.json", (_req: Request, res: Response) => {
     res.json(getOpenapiJson());
   });
@@ -280,6 +302,9 @@ export function createApp(opts: AppOptions = {}): {
 
   // ── Feature-flag admin routes (#425) ───────────────────────────────────────
   app.use("/api/admin/flags", createFlagsRouter());
+
+  // ── Rate limit status endpoint ─────────────────────────────────────────────
+  app.use("/api/ratelimit", adminAuthMiddleware, createRateLimitRouter());
 
   // ── Versioning lifecycle endpoint (#426) ───────────────────────────────────
   app.use("/api/versions", createVersionsRouter());
@@ -326,19 +351,32 @@ export function createApp(opts: AppOptions = {}): {
   }));
 
   function close(callback?: () => void): void {
-    // Drain first: wait for in-flight jobs to finish (bounded by
-    // jobWorkerStopTimeoutMs) before we stop accepting connections. A job
-    // still active when the drain window elapses is NOT force-failed — it
-    // stays "active" in the store and is picked back up by the next
-    // JobWorker.start() via recoverIncompleteJobs().
-    jobWorker.stop(opts.jobWorkerStopTimeoutMs ?? 10_000).finally(() => {
+    // Stop new claims, then keep database handles available until active jobs settle.
+    const drainWorker = async () => {
+      await jobWorker.stop(opts.jobWorkerStopTimeoutMs ?? 10_000);
+      while (jobWorker.getActiveCount() > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    drainWorker().finally(() => {
       heartbeatService.stop();
+      // Stop the watchdog before the server goes away, and clear the cost flush
+      // timer last so any final in-flight spend still gets written.
+      watchdog.stop();
       metricsService.setWebSocketProbe(null);
       detachStream();
       if (httpServer.listening) {
         httpServer.close(callback);
       } else if (callback) {
         callback();
+      }
+      if (costFlushTimer) {
+        clearInterval(costFlushTimer);
+        try {
+          flushActiveCosts();
+        } catch (err) {
+          logger.error({ err }, "final cost flush failed");
+        }
       }
     });
   }
