@@ -16,7 +16,11 @@ export interface DAGNode {
   status: NodeStatus;
   result?: unknown;
   error?: string;
+  id?: string;
+  label?: string;
 }
+
+export type DagNode = DAGNode;
 
 export interface TaskResponse {
   taskId: string;
@@ -27,11 +31,6 @@ export interface TaskResponse {
   dag: DAGNode[];
   createdAt: string;
   updatedAt: string;
-}
-
-export interface DagNode {
-  id: string;
-  label: string;
 }
 
 export interface DagEdge {
@@ -195,13 +194,13 @@ export interface CursorPage<T> {
     nextCursor: string | null;
     hasNextPage: boolean;
   };
-}
-
-export interface CursorPageEnvelope<T> {
-  data: CursorPage<T>;
   _links?: {
     self: string;
     next?: string;
   };
 }
+
+export type CursorPageEnvelope<T> = CursorPage<T> & {
+  data?: CursorPage<T>;
+};
 
