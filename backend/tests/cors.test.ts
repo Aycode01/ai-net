@@ -62,6 +62,21 @@ describe('CORS Middleware', () => {
     expect(methods).toContain('GET');
   });
 
+  // #658: the idempotency middleware reads the `Idempotency-Key` header, but
+  // browsers can only send it if the preflight approves it. While it was
+  // missing, POST /api/tasks was unreachable from a browser.
+  it('permits the Idempotency-Key header through preflight', async () => {
+    const res = await request(app)
+      .options('/test')
+      .set('Origin', 'http://trusted.com')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'idempotency-key, content-type');
+
+    expect(res.status).toBeLessThan(300);
+    const allowed = String(res.headers['access-control-allow-headers'] || '').toLowerCase();
+    expect(allowed).toContain('idempotency-key');
+  });
+
   it('falls back to http://localhost:3000 when ALLOWED_ORIGINS is unset', async () => {
     jest.resetModules();
     delete process.env.ALLOWED_ORIGINS;
