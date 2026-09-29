@@ -141,7 +141,11 @@ export function createApp(opts: AppOptions = {}): {
     }
     next();
   });
-  app.use(createCorsMiddleware());
+  // Pass `app` so `Access-Control-Allow-Methods` is derived from the routes
+  // that actually get registered below, rather than a hand-maintained list
+  // (issue #659). The derivation is per-request, so the mount order here is
+  // fine.
+  app.use(createCorsMiddleware(app));
   app.use(requestId);
   app.use(requestLogger);
   app.use(metricsMiddleware);
