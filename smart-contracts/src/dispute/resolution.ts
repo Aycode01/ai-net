@@ -1,7 +1,7 @@
 /**
  * TypeScript SDK wrapper for the multi-phase Soroban dispute contract.
- * Settlement amounts and bond slashes are emitted by the contract for the
- * configured payment and agent-registry coordinators to apply.
+ * Final escrow settlement is emitted after the appeal window closes, while
+ * verified bond slashes are applied directly to the configured agent registry.
  */
 
 /** Thin wrapper around an assembled Soroban transaction. */
@@ -12,6 +12,7 @@ export interface AssembledTransaction<T> {
 
 export const EVIDENCE_PHASE_SECS = 48 * 60 * 60;
 export const VOTING_PHASE_SECS = 72 * 60 * 60;
+export const APPEAL_PHASE_SECS = 24 * 60 * 60;
 export const MINIMUM_VOTES = 3;
 export const MAX_VOTERS = 50;
 export const MAX_EVIDENCE_PER_DISPUTE = 20;
@@ -20,6 +21,7 @@ export enum DisputePhase {
   Filed = 'Filed',
   Evidence = 'EvidencePhase',
   Voting = 'Voting',
+  AppealPending = 'AppealPending',
   Resolved = 'Resolved',
 }
 
@@ -45,13 +47,17 @@ export interface DisputeInfo {
   taskId: string;
   filer: string;
   agentId: string;
+  registryAddress: string;
+  registryAgentId: string;
   reason: string;
   status: DisputePhase;
   filedAt: bigint;
   evidenceDeadline: bigint;
   votingDeadline: bigint;
+  appealDeadline: bigint | null;
   voters: string[];
   resolution: number | null;
+  appealed: boolean;
   filerVotes: number;
   agentVotes: number;
   bondSlashed: bigint;
@@ -82,6 +88,11 @@ export interface DisputeResolutionContractClient {
     agent_id: string;
     bond_amount: bigint;
   }): AssembledTransaction<void>;
+  set_agent_registry(args: { registry: string }): AssembledTransaction<void>;
+  set_agent_registry_id(args: {
+    agent: string;
+    registry_agent_id: string;
+  }): AssembledTransaction<void>;
   set_task_escrow(args: {
     task_id: string;
     amount: bigint;
@@ -103,6 +114,11 @@ export interface DisputeResolutionContractClient {
     ruling: DisputeRuling;
   }): AssembledTransaction<void>;
   resolve(args: { dispute_id: string }): AssembledTransaction<DisputeOutcome>;
+  appeal_dispute(args: {
+    dispute_id: string;
+    appellant: string;
+  }): AssembledTransaction<void>;
+  finalize_dispute(args: { dispute_id: string }): AssembledTransaction<void>;
   get_dispute(dispute_id: string): AssembledTransaction<DisputeInfo | null>;
   get_evidence_count(dispute_id: string): AssembledTransaction<number>;
   get_evidence(args: {
@@ -134,6 +150,16 @@ export class DisputeResolutionSDK {
   async setAgentBond(agentId: string, bondAmount: bigint): Promise<void> {
     return this.client
       .set_agent_bond({ agent_id: agentId, bond_amount: bondAmount })
+      .signAndSend();
+  }
+
+  async setAgentRegistry(registry: string): Promise<void> {
+    return this.client.set_agent_registry({ registry }).signAndSend();
+  }
+
+  async setAgentRegistryId(agent: string, registryAgentId: string): Promise<void> {
+    return this.client
+      .set_agent_registry_id({ agent, registry_agent_id: registryAgentId })
       .signAndSend();
   }
 
@@ -187,7 +213,17 @@ export class DisputeResolutionSDK {
       .signAndSend();
   }
 
-  /** Anyone may submit this after the 72-hour voting deadline. */
+  async appealDispute(disputeId: string, appellant: string): Promise<void> {
+    return this.client
+      .appeal_dispute({ dispute_id: disputeId, appellant })
+      .signAndSend();
+  }
+
+  async finalizeDispute(disputeId: string): Promise<void> {
+    return this.client.finalize_dispute({ dispute_id: disputeId }).signAndSend();
+  }
+
+  /** Records a provisional outcome once a voting round has ended. */
   async resolve(disputeId: string): Promise<DisputeOutcome> {
     return this.client.resolve({ dispute_id: disputeId }).signAndSend();
   }

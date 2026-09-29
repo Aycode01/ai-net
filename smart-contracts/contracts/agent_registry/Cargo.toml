@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { version = "=22.0.11" }
+gas-interface = { path = "../gas_interface" }
 # default-features = false drops the UpgradeManager contract entry points.
 # Only the Upgradeable trait and the shared version/migration types are needed
 # here, and a dependency exporting contract symbols collides with this
@@ -40,3 +41,13 @@ debug-assertions = false
 panic = "abort"
 codegen-units = 1
 lto = true
+
+
+
+
+
+
+
+
+
+

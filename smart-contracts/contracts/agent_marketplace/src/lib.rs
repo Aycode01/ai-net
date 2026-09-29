@@ -7,6 +7,7 @@
 //! booking with escrow, and rating.
 
 mod errors;
+pub mod gas;
 mod types;
 
 pub use errors::Error;
@@ -59,6 +60,10 @@ impl AgentMarketplaceContract {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (symbol_short!("market"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -108,6 +113,22 @@ impl AgentMarketplaceContract {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
+    }
+
+    /// Estimate CPU instructions for listing, searching, or purchasing.
+    /// `count` is the number of listings scanned for search or operations.
+    pub fn estimate_gas(env: Env, operation: Symbol, count: u32) -> u64 {
+        let _ = env;
+        gas::estimate(operation, count)
+    }
+
+    pub fn estimate(
+        env: Env,
+        operation: Symbol,
+        params: soroban_sdk::Map<Symbol, soroban_sdk::Val>,
+    ) -> u64 {
+        let _ = env;
+        <AgentMarketplaceContract as gas_interface::GasEstimator>::estimate(operation, params)
     }
 
     /// List a service on the marketplace.
@@ -341,7 +362,7 @@ impl AgentMarketplaceContract {
     pub fn rate_booking(env: Env, booking_id: Symbol, rating: u32) -> Result<(), Error> {
         require_not_paused(&env)?;
 
-        if rating < 1 || rating > 5 {
+        if !(1..=5).contains(&rating) {
             return Err(Error::InvalidPrice);
         }
 
@@ -380,6 +401,15 @@ impl AgentMarketplaceContract {
         agent_rating.rating_sum += rating as u64;
         env.storage().persistent().set(&rating_key, &agent_rating);
 
+        env.events().publish(
+            (symbol_short!("market"), symbol_short!("svc_rate")),
+            ServiceRatedEvent {
+                booking_id,
+                agent_id: booking.agent_id,
+                rating,
+            },
+        );
+
         Ok(())
     }
 
@@ -407,6 +437,12 @@ impl AgentMarketplaceContract {
                 total_ratings: 0,
                 rating_sum: 0,
             })
+    }
+}
+
+impl gas_interface::GasEstimator for AgentMarketplaceContract {
+    fn estimate(operation: Symbol, params: soroban_sdk::Map<Symbol, soroban_sdk::Val>) -> u64 {
+        gas::estimate(operation, params.len())
     }
 }
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { CursorPageEnvelope, TaskResponse, NodeStatus } from '../types/api';
 import { ApiError, apiClient } from '../services/api';
+import { readWalletSession } from '../services/walletSession';
 
 // ─── Filter types ────────────────────────────────────────────────────────────
 
@@ -201,10 +202,9 @@ export function useTaskHistory(
     setLoading(true);
     setError(null);
     try {
-      const walletAddress =
-        localStorage.getItem('wallet_pubkey') ||
-        localStorage.getItem('walletAddress') ||
-        '';
+      // Read through the shared session layer (#477) so this stays in step with
+      // WalletContext after the move from localStorage to sessionStorage.
+      const walletAddress = readWalletSession()?.publicKey ?? '';
 
       if (!walletAddress) {
         setAllTasks([]);
