@@ -304,3 +304,13 @@ pub struct CallerActivity {
     /// Timestamp of this caller's most recent audited operation.
     pub last_seen: u64,
 }
+
+/// Upgrade tracking record
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeRecord {
+    pub version: String,
+    pub wasm_hash: BytesN<32>,
+    pub upgraded_at: u64,
+    pub admin: Address,
+}
