@@ -246,17 +246,12 @@ pub struct Escrow {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
-<<<<<<< HEAD
     /// Contract admin address.
     Admin,
     /// Whether the contract is paused.
     Paused,
-=======
-    /// Admin address allowed to upgrade this contract.
-    Admin,
     /// Current semantic contract version.
     Version,
->>>>>>> 2df3e3b3a809dfb3562e65cb0d42cb71b77b6d25
     /// Stores the root [`Auction`] record for a task.
     Auction(Symbol),
     /// Stores a single [`SealedBid`] for a given (task, bidder) pair.
@@ -355,3 +350,44 @@ pub struct RefundClaimedEvent {
 }
 
 pub type BondRefundClaimedEvent = RefundClaimedEvent;
+
+// ─── Bond lifecycle events (issue #486) ─────────────────────────────────────
+
+/// Data payload for `("bidding", "bond_dep")`.
+///
+/// Published by `submit_bid` after the sealed bid (with its locked bond) has
+/// been persisted, so indexers can track locked bond value per auction and
+/// bidder without replaying auction configs.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BondDeposited {
+    /// Auction the bond was locked in.
+    pub task_id: Symbol,
+    /// Bidder whose bond was locked.
+    pub bidder: Address,
+    /// Bond locked, in stroops (always the auction's required bond).
+    pub amount_stroops: i128,
+    /// 1-based position of this bid within the auction.
+    pub bid_index: u32,
+    /// Ledger timestamp at which the bond was locked.
+    pub deposited_at: u64,
+}
+
+/// Data payload for `("bidding", "bond_slsh")`.
+///
+/// Published by `award_contract` for every non-revealing bidder whose bond is
+/// forfeited. `remaining_stroops` is always `0` here (a forfeit zeroes the
+/// recoverable bond), but the field mirrors the registry's `BondSlashed` shape
+/// so indexers can reuse one handler.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BondSlashed {
+    /// Auction the forfeited bond belonged to.
+    pub task_id: Symbol,
+    /// Bidder whose bond was slashed.
+    pub bidder: Address,
+    /// Amount deducted, in stroops (= the full locked bond).
+    pub penalty_stroops: i128,
+    /// Bond remaining after the slash (0 for a full forfeit).
+    pub remaining_stroops: i128,
+}

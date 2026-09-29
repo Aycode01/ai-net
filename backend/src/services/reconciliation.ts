@@ -174,6 +174,8 @@ export class ReconciliationService {
   private readonly logger: Pick<typeof log, 'info' | 'warn' | 'error'>;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private stopped = false;
+  private readonly scheduledRuns = new Set<Promise<void>>();
 
   constructor(options: ReconciliationServiceOptions) {
     this.paymentDb = options.paymentDb;
@@ -307,12 +309,9 @@ export class ReconciliationService {
   /** Schedule automated (daily) reconciliation runs. Idempotent. */
   startDaily(intervalMs: number = DEFAULT_DAILY_INTERVAL_MS): void {
     if (this.timer) return;
+    this.stopped = false;
     const tick = async () => {
-      try {
-        await this.run('scheduled');
-      } catch (err) {
-        this.logger.error({ err }, 'Scheduled reconciliation run failed');
-      }
+      await this.runScheduled('Scheduled reconciliation run failed');
     };
     this.timer = setInterval(tick, intervalMs);
     this.timer.unref?.();
@@ -322,25 +321,38 @@ export class ReconciliationService {
   /** Schedule automated (frequent) reconciliation runs for drift detection (default 5 min). */
   startFrequent(intervalMs: number = DEFAULT_FREQUENT_INTERVAL_MS): void {
     if (this.timer) return;
+    this.stopped = false;
     const tick = async () => {
-      try {
-        await this.run('scheduled');
-      } catch (err) {
-        this.logger.error({ err }, 'Frequent reconciliation run failed');
-      }
+      await this.runScheduled('Frequent reconciliation run failed');
     };
     this.timer = setInterval(tick, intervalMs);
     this.timer.unref?.();
     this.logger.info({ intervalMs }, 'Frequent reconciliation scheduled');
   }
 
+  private runScheduled(failureMessage: string): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    const trackedRun = this.run('scheduled')
+      .then(() => undefined)
+      .catch((err) => {
+        this.logger.error({ err }, failureMessage);
+      });
+    this.scheduledRuns.add(trackedRun);
+    void trackedRun.finally(() => {
+      this.scheduledRuns.delete(trackedRun);
+    });
+    return trackedRun;
+  }
+
   /** Stop the automated scheduler. */
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
       this.logger.info('Reconciliation scheduler stopped');
     }
+    await Promise.all(this.scheduledRuns);
   }
 
   /**

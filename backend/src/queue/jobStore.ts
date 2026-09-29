@@ -36,7 +36,21 @@ export interface JobStore {
   insert(job: Job): void;
   findById(id: string): Job | undefined;
   findByTaskId(taskId: string): Job | undefined;
+  /**
+   * Read-only inspection of the next runnable job. This does **not** claim it:
+   * two callers can be handed the same row. Use {@link JobStore.claimNextPendingJob}
+   * to take ownership of a job.
+   */
   getNextPendingJob(nowIso?: string): Job | undefined;
+  /**
+   * Atomically claim the next runnable job and mark it `active`.
+   *
+   * The claim is a single conditional `UPDATE ... RETURNING *` executed inside
+   * a `BEGIN IMMEDIATE` transaction, so two workers — or two processes sharing
+   * the same SQLite file — can never be handed the same row. Returns
+   * `undefined` when nothing is runnable.
+   */
+  claimNextPendingJob(nowIso?: string): Job | undefined;
   updateStatus(
     id: string,
     status: JobStatus,
@@ -73,6 +87,24 @@ export interface JobStore {
 
 let _jobDb: Database.Database | null = null;
 
+/**
+ * How many times `claimNextPendingJob` retries when SQLite reports the database
+ * is busy. `busy_timeout` (set in {@link getJobDb}) already makes SQLite wait
+ * for the write lock; these retries cover the case where a second process
+ * exhausts that window. After the last attempt the caller's poll loop takes
+ * over, which is why the claim gives up instead of throwing.
+ */
+const CLAIM_BUSY_ATTEMPTS = 3;
+
+/**
+ * `SQLITE_BUSY` / `SQLITE_BUSY_*` (e.g. `SQLITE_BUSY_SNAPSHOT`) as reported by
+ * better-sqlite3.
+ */
+function isBusyError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && code.startsWith("SQLITE_BUSY");
+}
+
 export function getJobDb(dbPath?: string): Database.Database {
   if (!_jobDb) {
     const filePath = dbPath ?? path.join(process.cwd(), "jobs.db");
@@ -91,8 +123,10 @@ export function getJobDb(dbPath?: string): Database.Database {
   return _jobDb;
 }
 
-export function closeJobDb(): void {
-  _jobDb?.close();
+export async function closeJobDb(): Promise<void> {
+  const db = _jobDb;
+  if (!db) return;
+  db.close();
   _jobDb = null;
 }
 
@@ -151,6 +185,41 @@ function mapRowToJob(row: any): Job {
 
 export function createJobStore(db: Database.Database): JobStore {
   initJobSchema(db);
+
+  // ---------------------------------------------------------------------------
+  // Atomic claim (#647)
+  //
+  // The claim used to be a SELECT (`getNextPendingJob`) followed by a separate
+  // UPDATE (`updateStatus`). Between those two statements another worker or
+  // process could read the same row, and the handler would then run twice —
+  // which is a money bug for payment-settling jobs.
+  //
+  // The statement below both chooses the next runnable row and flips it to
+  // 'active' in one go. The trailing condition repeats the runnable predicate
+  // so that a row which stopped being claimable in between is not claimed;
+  // `RETURNING *` yields the row that was actually updated, and no row when the
+  // predicate matched nothing. Running it via `.immediate()` opens the
+  // transaction with BEGIN IMMEDIATE and takes the write lock up front, so
+  // concurrent claimers serialise instead of racing.
+  // ---------------------------------------------------------------------------
+  const claimNextStmt = db.prepare(`
+    UPDATE jobs
+    SET status = 'active',
+        updatedAt = @now
+    WHERE id = (
+      SELECT id FROM jobs
+      WHERE (status = 'pending' OR (status = 'failed' AND attempts < maxAttempts))
+        AND nextRunAt <= @now
+      ORDER BY priorityNum DESC, createdAt ASC
+      LIMIT 1
+    )
+      AND (status = 'pending' OR (status = 'failed' AND attempts < maxAttempts))
+    RETURNING *
+  `);
+  const claimNextTx = db.transaction((nowIso: string) => {
+    const row = claimNextStmt.get({ now: nowIso }) as any;
+    return row ?? undefined;
+  });
 
   return {
     insert(job: Job): void {
@@ -217,6 +286,28 @@ export function createJobStore(db: Database.Database): JobStore {
 
       if (!row) return undefined;
       return mapRowToJob(row);
+    },
+
+    claimNextPendingJob(nowIso?: string): Job | undefined {
+      const now = nowIso ?? new Date().toISOString();
+
+      for (let attempt = 0; attempt < CLAIM_BUSY_ATTEMPTS; attempt++) {
+        try {
+          const row = claimNextTx.immediate(now);
+          return row ? mapRowToJob(row) : undefined;
+        } catch (err) {
+          if (!isBusyError(err)) throw err;
+          logger.warn(
+            { attempt, err },
+            "job claim hit a busy database; retrying the claim transaction"
+          );
+        }
+      }
+
+      // Hand the claim back to the caller's poll loop instead of throwing into
+      // it: a busy database means "try again shortly", not "this cycle failed".
+      logger.warn("job claim gave up on a busy database; will retry on the next poll");
+      return undefined;
     },
 
     updateStatus(

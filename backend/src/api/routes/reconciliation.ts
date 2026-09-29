@@ -4,6 +4,7 @@ import {
   createDefaultReconciliationService,
 } from '../../services/reconciliation';
 import type { ReconciliationTrigger } from '../../services/reconciliation.types';
+import { adminAuthMiddleware } from '../middleware/auth';
 import { createLogger } from '../../utils/logger';
 import { NotFoundError, AppError } from '../../errors';
 
@@ -19,6 +20,8 @@ export interface ReconciliationRouterOptions {
  *     summary: Trigger a payment reconciliation check
  *     operationId: runReconciliation
  *     tags: [Reconciliation]
+ *     security:
+ *       - adminApiKey: []
  *     requestBody:
  *       content:
  *         application/json:
@@ -47,6 +50,8 @@ export interface ReconciliationRouterOptions {
  *     summary: Get the latest reconciliation report
  *     operationId: getLatestReconciliationReport
  *     tags: [Reconciliation]
+ *     security:
+ *       - adminApiKey: []
  *     responses:
  *       200:
  *         description: Latest reconciliation report
@@ -66,6 +71,9 @@ export function createReconciliationRouter(
 ): Router {
   const router = Router();
   const logger = createLogger({ module: "reconciliation" });
+
+  router.use(adminAuthMiddleware);
+
   let service: ReconciliationService | null = null;
   const getService = (): ReconciliationService =>
     (service ??= options.service ?? createDefaultReconciliationService());

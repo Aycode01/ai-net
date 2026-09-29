@@ -5,7 +5,10 @@
  * All tests use an in-memory SQLite database.
  */
 import Database from "better-sqlite3";
-import { createTaskDb } from "./tasks";
+import { mkdtempSync, rmSync } from "fs";
+import os from "os";
+import path from "path";
+import { closeTaskDb, createTaskDb, getTaskPool } from "./tasks";
 import type { Task } from "../types/task";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -23,13 +26,18 @@ function makeDb(): Database.Database {
       updatedAt       TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS task_events (
-      id        INTEGER PRIMARY KEY AUTOINCREMENT,
-      taskId    TEXT    NOT NULL,
-      type      TEXT    NOT NULL,
-      nodeId    TEXT,
-      payload   TEXT,
-      timestamp TEXT    NOT NULL
+      global_seq  INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_seq    INTEGER NOT NULL,
+      version     INTEGER NOT NULL DEFAULT 1,
+      type        TEXT    NOT NULL,
+      task_id     TEXT    NOT NULL,
+      node_id     TEXT,
+      occurred_at TEXT    NOT NULL,
+      payload     TEXT,
+      UNIQUE (task_id, task_seq)
     );
+    CREATE INDEX IF NOT EXISTS idx_events_task_seq
+      ON task_events (task_id, task_seq ASC);
   `);
   return db;
 }
@@ -292,5 +300,28 @@ describe("createTaskDb — failRunningTasks", () => {
   it("is safe to call when no running tasks exist", () => {
     const db = createTaskDb(makeDb());
     expect(() => db.failRunningTasks()).not.toThrow();
+  });
+});
+
+describe("closeTaskDb", () => {
+  it("drains active reads and rejects pool recreation while closing", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "ai-net-task-pool-"));
+    const dbPath = path.join(directory, "tasks.db");
+    const pool = getTaskPool(dbPath);
+    let finishRead!: () => void;
+    const readPromise = pool.read(async () => {
+      await new Promise<void>((resolve) => { finishRead = resolve; });
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const closePromise = closeTaskDb();
+    expect(closePromise).toBeInstanceOf(Promise);
+    expect(() => getTaskPool(dbPath)).toThrow("Task database is closing");
+
+    finishRead();
+    await Promise.all([readPromise, closePromise]);
+    expect(getTaskPool(dbPath)).not.toBe(pool);
+    await closeTaskDb();
+    rmSync(directory, { recursive: true, force: true });
   });
 });

@@ -5,7 +5,7 @@
 //! callers can branch on the numeric code without coupling to a specific SDK
 //! build.
 //!
-//! The code range used here (`1..=26`) is local to this contract. Codes are
+//! The code range used here (`1..=33`) is local to this contract. Codes are
 //! chosen to read naturally in logs while remaining stable across releases:
 //! **never renumber an existing variant** once the contract is deployed.
 
@@ -50,7 +50,6 @@ pub enum Error {
     WinnerNotDetermined = 16,
     /// The escrow for this auction has already been created.
     EscrowAlreadyCreated = 17,
-
     // ── Added by the front-running / commit-reveal hardening pass (#350) ────
     /// The reveal window has closed; this bid can no longer be revealed.
     RevealPeriodEnded = 18,
@@ -74,4 +73,16 @@ pub enum Error {
     AuctionNotAbortable = 25,
     /// An arithmetic operation overflowed while scoring bids.
     ArithmeticOverflow = 26,
+    /// Contract instance has already been initialized.
+    AlreadyInitialized = 27,
+    /// Contract is currently paused.
+    ContractPaused = 28,
+    /// Winner cannot claim refund via bond refund path.
+    WinnerCannotClaimRefund = 29,
+    /// Refund has already been claimed for this bidder.
+    RefundAlreadyClaimed = 30,
+    /// Claim window has expired.
+    ClaimWindowExpired = 31,
+    /// Bond has already been refunded.
+    AlreadyRefunded = 32,
 }

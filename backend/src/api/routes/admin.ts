@@ -68,7 +68,7 @@ function auditAdminRequests(req: Request, res: Response, next: NextFunction): vo
       at: new Date().toISOString(),
       actor: actorFromRequest(req),
       action: `${req.method} ${req.baseUrl}${req.path}`,
-      target: req.params.id,
+      target: req.params?.id,
       statusCode: res.statusCode,
       requestId:
         (res.locals.requestId as string | undefined) ??
@@ -92,8 +92,65 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
   const jobQueue = options.queue ?? getGlobalJobQueue();
   const reconciliationService = getReconciliationService(options.reconciliation);
 
+  router.use(adminAuthMiddleware);
   router.use(auditAdminRequests);
 
+  /**
+   * @openapi
+   * /api/admin/read-only:
+   *   get:
+   *     summary: Get read-only mode state
+   *     operationId: getReadOnlyMode
+   *     description: Reports whether mutations are currently disabled, and by whom.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     responses:
+   *       200:
+   *         description: Current read-only state
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ReadOnlyState'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   *   put:
+   *     summary: Set read-only mode
+   *     operationId: setReadOnlyMode
+   *     description: Enables or disables read-only mode. While enabled every mutation outside `/api/admin` and `/api/reconciliation` responds 503.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required: [enabled]
+   *             properties:
+   *               enabled: { type: boolean }
+   *               reason: { type: string, maxLength: 500 }
+   *     responses:
+   *       200:
+   *         description: Read-only state updated
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ReadOnlyState'
+   *       400:
+   *         description: Invalid request body
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ValidationError'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.get("/read-only", (_req: Request, res: Response) => {
     res.json(getReadOnlyState());
   });
@@ -117,6 +174,35 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
     res.json(state);
   });
 
+  /**
+   * @openapi
+   * /api/admin/agents:
+   *   get:
+   *     summary: List agents for administration
+   *     operationId: listAdminAgents
+   *     description: Returns the agent registry from the operator's point of view, including enable/disable state.
+   *     tags: [Admin, Agents]
+   *     security:
+   *       - adminApiKey: []
+   *     parameters:
+   *       - in: query
+   *         name: status
+   *         schema: { type: string, enum: [online, offline] }
+   *         description: Filter agents by presence status
+   *     responses:
+   *       200:
+   *         description: Agents with administrative state
+   *       400:
+   *         description: Invalid query parameters
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ValidationError'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.get("/agents", (req: Request, res: Response, next: NextFunction) => {
     const parsed = agentListSchema.safeParse(req.query);
     if (!parsed.success) {
@@ -130,6 +216,36 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
     res.json({ agents: listAgentsForAdmin(parsed.data.status) });
   });
 
+  /**
+   * @openapi
+   * /api/admin/agents/{id}/enable:
+   *   post:
+   *     summary: Enable an agent
+   *     operationId: enableAgent
+   *     description: Re-enables a previously disabled agent in the registry.
+   *     tags: [Admin, Agents]
+   *     security:
+   *       - adminApiKey: []
+   *     parameters:
+   *       - in: path
+   *         name: id
+   *         required: true
+   *         schema: { type: string }
+   *         description: Unique agent identifier
+   *     responses:
+   *       200:
+   *         description: Agent enabled
+   *       404:
+   *         description: Agent not found
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/NotFoundError'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.post("/agents/:id/enable", (req: Request, res: Response, next: NextFunction) => {
     const agent = setAgentEnabled(req.params.id, true);
     if (!agent) {
@@ -139,6 +255,36 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
     res.json({ enabled: true, agent });
   });
 
+  /**
+   * @openapi
+   * /api/admin/agents/{id}/disable:
+   *   post:
+   *     summary: Disable an agent
+   *     operationId: disableAgent
+   *     description: Stops dispatching new work to the agent without removing it from the registry.
+   *     tags: [Admin, Agents]
+   *     security:
+   *       - adminApiKey: []
+   *     parameters:
+   *       - in: path
+   *         name: id
+   *         required: true
+   *         schema: { type: string }
+   *         description: Unique agent identifier
+   *     responses:
+   *       200:
+   *         description: Agent disabled
+   *       404:
+   *         description: Agent not found
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/NotFoundError'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.post("/agents/:id/disable", (req: Request, res: Response, next: NextFunction) => {
     const agent = setAgentEnabled(req.params.id, false);
     if (!agent) {
@@ -148,6 +294,43 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
     res.json({ enabled: false, agent });
   });
 
+  /**
+   * @openapi
+   * /api/admin/reconciliation/run:
+   *   post:
+   *     summary: Trigger a payment reconciliation run
+   *     operationId: runAdminReconciliation
+   *     description: >
+   *       Runs payment reconciliation and returns the report. Equivalent to
+   *       `POST /api/reconciliation/run`, reachable under the `/api/admin`
+   *       control-plane prefix alongside the other operator endpoints.
+   *     tags: [Admin, Reconciliation]
+   *     security:
+   *       - adminApiKey: []
+   *     requestBody:
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             properties:
+   *               triggeredBy:
+   *                 type: string
+   *                 enum: [manual, scheduled, release]
+   *                 default: manual
+   *     responses:
+   *       200:
+   *         description: Reconciliation report for this run
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ReconciliationReport'
+   *       400:
+   *         description: Invalid request body
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.post(
     "/reconciliation/run",
     asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
@@ -167,10 +350,62 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
     }),
   );
 
+  /**
+   * @openapi
+   * /api/admin/maintenance/vacuum:
+   *   post:
+   *     summary: Vacuum the application databases
+   *     operationId: vacuumDatabases
+   *     description: Runs `VACUUM` across the task, payment, agent, job and auth databases to reclaim space and defragment indexes.
+   *     tags: [Admin, Maintenance]
+   *     security:
+   *       - adminApiKey: []
+   *     responses:
+   *       200:
+   *         description: Per-database vacuum results
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.post("/maintenance/vacuum", (_req: Request, res: Response) => {
     res.json({ results: vacuumDatabases() });
   });
 
+  /**
+   * @openapi
+   * /api/admin/maintenance/backup:
+   *   post:
+   *     summary: Back up the application databases
+   *     operationId: backupDatabases
+   *     description: Copies the SQLite database files to a backup directory. Omit `directory` to use the configured default.
+   *     tags: [Admin, Maintenance]
+   *     security:
+   *       - adminApiKey: []
+   *     requestBody:
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             properties:
+   *               directory:
+   *                 type: string
+   *                 minLength: 1
+   *                 description: Target directory for the backup
+   *     responses:
+   *       200:
+   *         description: Per-database backup results
+   *       400:
+   *         description: Invalid request body
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ValidationError'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.post(
     "/maintenance/backup",
     asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
@@ -189,6 +424,41 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
     }),
   );
 
+  /**
+   * @openapi
+   * /api/admin/audit-log:
+   *   get:
+   *     summary: Read the administrative audit log
+   *     operationId: getAdminAuditLog
+   *     description: Every mutating admin request is recorded with actor, target and status code. Set `format=csv` to download it.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     parameters:
+   *       - in: query
+   *         name: limit
+   *         schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+   *       - in: query
+   *         name: offset
+   *         schema: { type: integer, minimum: 0, default: 0 }
+   *       - in: query
+   *         name: format
+   *         schema: { type: string, enum: [json, csv], default: json }
+   *         description: Set to csv for a downloadable comma-separated log
+   *     responses:
+   *       200:
+   *         description: Audit log entries (JSON, or CSV when `format=csv`)
+   *       400:
+   *         description: Invalid query parameters
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ValidationError'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.get("/audit-log", (req: Request, res: Response, next: NextFunction) => {
     const parsed = auditLogQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -209,7 +479,9 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
     res.json({ entries });
   });
 
-  router.use("/queue", createAdminQueueRouter(jobQueue));
+  // The queue sub-router is mounted once, at `/api/admin/queue`, by the app
+  // factory. Mounting it here as well used to expose a duplicated
+  // `/api/admin/queue/queue/*` tree and shadowed the canonical paths.
   router.use("/", createAdminQueueRouter(jobQueue));
 
   router.use((err: Error, _req: Request, _res: Response, next: NextFunction) => {
@@ -223,6 +495,8 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
 export function createAdminQueueRouter(queue?: JobQueue): Router {
   const router = Router();
   const jobQueue = queue ?? getGlobalJobQueue();
+
+  router.use(adminAuthMiddleware);
 
   /**
    * @openapi
@@ -264,7 +538,7 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
    *       503:
    *         description: ADMIN_API_KEY is not configured
    */
-  router.get("/traces/:id", adminAuthMiddleware, (req: Request, res: Response) => {
+  router.get("/traces/:id", (req: Request, res: Response) => {
     const id = req.params.id;
 
     // Resolve requestId → correlationId when the id is not already a trace.
@@ -286,6 +560,8 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
    *     summary: Get background job queue status and statistics
    *     description: Returns aggregated metrics on pending, active, completed, failed, and dead-letter jobs along with worker status.
    *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
    *     responses:
    *       200:
    *         description: Queue status and metrics
@@ -331,6 +607,32 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
     });
   });
 
+  /**
+   * @openapi
+   * /api/admin/queue:
+   *   get:
+   *     summary: Queue status (index alias)
+   *     operationId: getQueueIndex
+   *     description: >
+   *       Index alias of `GET /api/admin/queue/status`, returning only the
+   *       summary counters and worker status (no active-job listing). Registered
+   *       on the queue router root, so it is reachable at both `/api/admin/queue`
+   *       and `/api/admin`.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     responses:
+   *       200:
+   *         description: Queue status and worker metrics
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/QueueStatusResponse'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
   router.get("/", (_req: Request, res: Response) => {
     const stats = jobQueue.getStats();
     const worker = jobQueue.getWorker();
@@ -349,12 +651,183 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
   });
 
   /**
+   * The queue router is also mounted at the `/api/admin` root, so every
+   * operation above is reachable both under `/api/admin/queue/*` (canonical)
+   * and under `/api/admin/*` (alias). Documented here so the spec matches the
+   * routes that are actually registered.
+   *
+   * @openapi
+   * /api/admin:
+   *   get:
+   *     summary: Queue status (admin-root alias)
+   *     operationId: getAdminRootQueueIndex
+   *     description: Alias of `GET /api/admin/queue` reached at the admin root.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     responses:
+   *       200:
+   *         description: Queue status and worker metrics
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/QueueStatusResponse'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   * /api/admin/status:
+   *   get:
+   *     summary: Get background job queue status and statistics (admin-root alias)
+   *     operationId: getAdminRootQueueStatus
+   *     description: Alias of `GET /api/admin/queue/status` reached at the admin root.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     responses:
+   *       200:
+   *         description: Queue status and metrics
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/QueueStatusResponse'
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   * /api/admin/jobs:
+   *   get:
+   *     summary: List background jobs in queue (admin-root alias)
+   *     operationId: getAdminRootQueueJobs
+   *     description: Alias of `GET /api/admin/queue/jobs` reached at the admin root.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     parameters:
+   *       - in: query
+   *         name: status
+   *         schema:
+   *           type: string
+   *           enum: [queued, active, completed, failed, dead_letter]
+   *       - in: query
+   *         name: taskId
+   *         schema: { type: string }
+   *       - in: query
+   *         name: page
+   *         schema: { type: integer, default: 1 }
+   *       - in: query
+   *         name: pageSize
+   *         schema: { type: integer, default: 50 }
+   *     responses:
+   *       200:
+   *         description: List of jobs
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 jobs:
+   *                   type: array
+   *                   items:
+   *                     $ref: '#/components/schemas/QueueJob'
+   *                 total: { type: integer }
+   *                 page: { type: integer }
+   *                 pageSize: { type: integer }
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   * /api/admin/dead-letter:
+   *   get:
+   *     summary: List dead-letter jobs (admin-root alias)
+   *     operationId: getAdminRootDeadLetter
+   *     description: Alias of `GET /api/admin/queue/dead-letter` reached at the admin root.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     parameters:
+   *       - in: query
+   *         name: page
+   *         schema: { type: integer, default: 1 }
+   *       - in: query
+   *         name: pageSize
+   *         schema: { type: integer, default: 50 }
+   *     responses:
+   *       200:
+   *         description: List of dead-letter jobs
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 jobs:
+   *                   type: array
+   *                   items:
+   *                     $ref: '#/components/schemas/QueueJob'
+   *                 total: { type: integer }
+   *                 page: { type: integer }
+   *                 pageSize: { type: integer }
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   * /api/admin/retry/{id}:
+   *   post:
+   *     summary: Retry a dead-letter job (admin-root alias)
+   *     operationId: postAdminRootQueueRetry
+   *     description: Alias of `POST /api/admin/queue/retry/{id}` reached at the admin root.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     parameters:
+   *       - in: path
+   *         name: id
+   *         required: true
+   *         schema: { type: string }
+   *         description: Unique Job ID
+   *     responses:
+   *       200:
+   *         description: Job moved back to queue for retry
+   *       404:
+   *         description: Job not found or not in dead-letter state
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   * /api/admin/queue/traces/{id}:
+   *   get:
+   *     summary: Retrieve a distributed trace (queue-prefixed alias)
+   *     operationId: getAdminQueueTrace
+   *     description: Alias of `GET /api/admin/traces/{id}` reachable under the queue prefix.
+   *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
+   *     parameters:
+   *       - in: path
+   *         name: id
+   *         required: true
+   *         schema: { type: string }
+   *         description: traceId (correlationId) or requestId to look up
+   *     responses:
+   *       200:
+   *         description: Trace found
+   *       404:
+   *         description: No trace found for the given id
+   *       401:
+   *         description: Missing or invalid admin API key
+   *       503:
+   *         description: ADMIN_API_KEY is not configured
+   */
+
+  /**
    * @openapi
    * /api/admin/queue/jobs:
    *   get:
    *     summary: List background jobs in queue
    *     description: Query jobs filtered by status (queued, active, completed, failed, dead_letter) or taskId with pagination.
    *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
    *     parameters:
    *       - in: query
    *         name: status
@@ -405,6 +878,8 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
    *     summary: List dead-letter jobs
    *     description: Retrieves jobs that permanently failed after exhausting maximum retry attempts.
    *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
    *     parameters:
    *       - in: query
    *         name: page
@@ -443,6 +918,8 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
    *     summary: Retry a dead-letter job
    *     description: Resets attempt count and moves a dead-letter job back to queued status for worker processing.
    *     tags: [Admin]
+   *     security:
+   *       - adminApiKey: []
    *     parameters:
    *       - in: path
    *         name: id

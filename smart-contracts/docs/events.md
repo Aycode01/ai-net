@@ -65,3 +65,28 @@ Emitted when an agent is deregistered and removed from the contract index.
       pub agent_id: Symbol,       // Unique ID of the removed agent
   }
   ```
+
+---
+
+## Admin Changed Events
+
+Emitted when contract administration rights are transferred via `set_admin`.
+
+### Event Topics & Payloads
+
+- **Data (Structure)**: `AdminChangedEvent`
+  ```rust
+  pub struct AdminChangedEvent {
+      pub old_admin: Address,     // Address of outgoing admin
+      pub new_admin: Address,     // Address of incoming admin
+  }
+  ```
+
+| Contract | Topic 1 | Topic 2 | Payload |
+|---|---|---|---|
+| `oracle_manager` | `Symbol::new(env, "mgr")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `price_oracle` | `Symbol::new(env, "oracle")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `agent_marketplace` | `Symbol::new(env, "market")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `dispute_resolution` | `Symbol::new(env, "dispute")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `agent_registry` | `Symbol::new(env, "registry")` | `Symbol::new(env, "adm_chngd")` | `AdminChangedEvent` |
+
