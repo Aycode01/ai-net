@@ -8,7 +8,8 @@
 //! ## Features
 //!
 //! - **Version Tracking**: Each contract version is stored with metadata
-//! - **Migration Hooks**: Pre-upgrade validation and post-upgrade data migration
+//! - **Migration Hooks**: Pre-upgrade validation; post-upgrade data migration
+//!   is delegated to the upgraded contract's own `post_upgrade_hook`
 //! - **Rollback Support**: Admin can revert to previous version within 48h window
 //! - **Gas Budget Estimation**: Calculate gas costs for migration operations
 //! - **Event System**: Comprehensive upgrade tracking via events
@@ -19,7 +20,7 @@
 //! 1. `propose_upgrade` - Admin proposes new WASM hash with validation
 //! 2. Pre-upgrade hook validates compatibility and estimates gas
 //! 3. `execute_upgrade` - Admin executes the upgrade after validation
-//! 4. Post-upgrade hook migrates data to new format
+//! 4. The upgraded contract's `post_upgrade_hook` migrates its own data
 //! 5. `rollback_upgrade` - Optional rollback within 48h window
 //!
 //! ## Security Model
@@ -56,6 +57,10 @@ pub const TTL_EXTEND_TO: u32 = 535_680;
 pub const GAS_UPGRADE_BASE: u64 = 500_000;
 pub const GAS_MIGRATION_PER_ITEM: u64 = 10_000;
 pub const GAS_ROLLBACK_BASE: u64 = 200_000;
+
+/// Maximum number of versions retained in the version-history index.
+/// Older entries are dropped from the index first.
+pub const MAX_VERSION_HISTORY: u32 = 100;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -124,6 +129,8 @@ pub enum DataKey {
     MigrationState,
     /// Contract-specific upgrade hooks
     UpgradeHooks,
+    /// Ordered index (oldest first) of version strings written to `Version`
+    VersionIndex,
 }
 
 /// Upgrade operation errors
@@ -157,6 +164,8 @@ pub enum UpgradeError {
     DowngradeNotAllowed = 12,
     /// The contract is paused and cannot accept mutations
     ContractPaused = 13,
+    /// The contract has not been initialized (no current version recorded)
+    NotInitialized = 14,
 }
 
 /// Main upgrade manager contract
@@ -199,6 +208,25 @@ fn get_current_version(env: &Env) -> Option<ContractVersion> {
     env.storage().persistent().get(&DataKey::CurrentVersion)
 }
 
+/// Append `version` to the bounded version-history index.
+fn record_version(env: &Env, version: &String) {
+    let mut index: Vec<String> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::VersionIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    if !index.contains(version) {
+        index.push_back(version.clone());
+    }
+    while index.len() > MAX_VERSION_HISTORY {
+        index.pop_front();
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::VersionIndex, &index);
+    extend_ttl_for_key(env, &DataKey::VersionIndex);
+}
+
 fn parse_version_tuple(s: &soroban_sdk::String) -> (u32, u32, u32) {
     let len = s.len() as usize;
     if len == 0 || len > strutil::MAX_TAG_LEN {
@@ -215,7 +243,9 @@ fn parse_version_tuple(s: &soroban_sdk::String) -> (u32, u32, u32) {
 
     for &b in bytes {
         if b.is_ascii_digit() {
-            current_num = current_num.saturating_mul(10).saturating_add((b - b'0') as u32);
+            current_num = current_num
+                .saturating_mul(10)
+                .saturating_add((b - b'0') as u32);
             has_digit = true;
         } else if b == b'.' {
             if idx < 3 {
@@ -283,6 +313,7 @@ impl UpgradeManager {
 
         extend_ttl_for_key(&env, &DataKey::CurrentVersion);
         extend_ttl_for_key(&env, &DataKey::Version(initial_version.clone()));
+        record_version(&env, &initial_version);
 
         env.events().publish(
             (symbol_short!("upgrade"), symbol_short!("init")),
@@ -481,6 +512,7 @@ impl UpgradeManager {
             &DataKey::Version(proposal.new_version.clone()),
             &new_version,
         );
+        record_version(&env, &proposal.new_version);
 
         // Store rollback info if we had a previous version
         if let Some(ref prev_version) = current_version {
@@ -498,8 +530,9 @@ impl UpgradeManager {
         // Clean up proposal
         env.storage().persistent().remove(&DataKey::Proposal);
 
-        // Execute post-upgrade migration
-        execute_post_upgrade_migration(&env, &proposal.migration_plan)?;
+        // Publish migration completion; data transformations are delegated
+        // to the upgraded contract's post_upgrade_hook.
+        execute_post_upgrade_migration(&env, &proposal.new_version, &proposal.migration_plan);
 
         extend_ttl_for_key(&env, &DataKey::CurrentVersion);
         extend_ttl_for_key(&env, &DataKey::Version(proposal.new_version.clone()));
@@ -541,7 +574,7 @@ impl UpgradeManager {
             return Err(UpgradeError::RollbackDeadlineExpired);
         }
 
-        let current_version = get_current_version(&env).unwrap();
+        let current_version = get_current_version(&env).ok_or(UpgradeError::NotInitialized)?;
 
         // Perform the rollback
         #[cfg(all(target_arch = "wasm32", not(any(test, feature = "testutils"))))]
@@ -597,13 +630,27 @@ impl UpgradeManager {
         estimate_migration_gas(&env, &migration_plan)
     }
 
-    /// Get all version history (for debugging/auditing)
+    /// Get every recorded version (newest first), read from the `Version`
+    /// persistent entries via the bounded `VersionIndex`
+    /// (at most [`MAX_VERSION_HISTORY`] entries).
     pub fn get_version_history(env: Env) -> Vec<ContractVersion> {
-        // In a real implementation, you'd maintain a separate index
-        // For now, this is a placeholder that returns current version only
+        let index: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VersionIndex)
+            .unwrap_or_else(|| Vec::new(&env));
         let mut history = Vec::new(&env);
-        if let Some(current) = get_current_version(&env) {
-            history.push_back(current);
+        let mut i = index.len();
+        while i > 0 {
+            i -= 1;
+            let tag = index.get_unchecked(i);
+            if let Some(v) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, ContractVersion>(&DataKey::Version(tag))
+            {
+                history.push_back(v);
+            }
         }
         history
     }
@@ -800,6 +847,42 @@ mod tests {
 
         let expected = GAS_UPGRADE_BASE + (GAS_MIGRATION_PER_ITEM * 100) + (3 * 5000);
         assert_eq!(gas_estimate, expected);
+    }
+
+    #[test]
+    fn test_version_history_newest_first() {
+        let (env, client, admin) = create_test_env();
+        client.initialize(
+            &admin,
+            &String::from_str(&env, "1.0.0"),
+            &test_wasm_hash(&env, 1),
+        );
+
+        let migration_plan = MigrationPlan {
+            pre_migration_checks: Vec::new(&env),
+            data_transformations: Vec::new(&env),
+            post_migration_validations: Vec::new(&env),
+            estimated_items: 0,
+        };
+        client.propose_upgrade(
+            &String::from_str(&env, "2.0.0"),
+            &test_wasm_hash(&env, 2),
+            &String::from_str(&env, "Upgrade"),
+            &migration_plan,
+        );
+        client.validate_proposal();
+        client.execute_upgrade();
+
+        let history = client.get_version_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.get_unchecked(0).version,
+            String::from_str(&env, "2.0.0")
+        );
+        assert_eq!(
+            history.get_unchecked(1).version,
+            String::from_str(&env, "1.0.0")
+        );
     }
 
     // ========================================================================
