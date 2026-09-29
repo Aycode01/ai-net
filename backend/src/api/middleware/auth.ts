@@ -101,10 +101,9 @@ export function resolveAdminApiKey(): string | undefined {
     fromConfig = (require("../../config") as typeof import("../../config")).getConfig()
       .ADMIN_API_KEY;
   } catch {
-    // Config not loaded — fall through to the environment.
+    // Config not loaded — ignore.
   }
-  const key = fromConfig ?? process.env.ADMIN_API_KEY;
-  return key && key.length > 0 ? key : undefined;
+  return fromConfig && fromConfig.length > 0 ? fromConfig : undefined;
 }
 
 /** Constant-time string comparison; length differences short-circuit safely. */

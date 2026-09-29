@@ -10,15 +10,14 @@ import { createLogger } from "../../utils/logger";
 import { validate } from "../middleware/validate";
 import { rateLimitMiddleware } from "../middleware/rateLimit";
 import { idempotencyMiddleware } from "../middleware/idempotency";
-import { ValidationError, NotFoundError, AppError, RateLimitError } from "../../errors";
+import { ValidationError, NotFoundError, AppError, RateLimitError, ForbiddenError, ConflictError } from "../../errors";
 
 import { getGlobalJobQueue, type JobQueue, type JobPriority } from "../../queue";
 
+import { getConfig } from "../../config";
+
 // ── Validation config ────────────────────────────────────────────────────────
-// Read at module load time so the value is stable for the lifetime of the
-// process. Tests that need a different value should set process.env before
-// importing (or use jest.resetModules() + re-require).
-const DAILY_TASK_LIMIT = Number(process.env.DAILY_TASK_LIMIT_PER_WALLET ?? 100);
+const getDailyTaskLimit = () => getConfig().DAILY_TASK_LIMIT_PER_WALLET;
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 

@@ -241,9 +241,12 @@ let _defaultStore: IdempotencyStore | null = null;
  *
  * The store is lazily initialised on first call.
  */
+import { getConfig } from '../config';
+
 export function getDefaultIdempotencyStore(config?: Pick<Config, 'NODE_ENV' | 'IDEMPOTENCY_TTL_MS' | 'IDEMPOTENCY_CLEANUP_MS'>): IdempotencyStore {
   if (!_defaultStore) {
-    const isTest = (config?.NODE_ENV ?? process.env.NODE_ENV) === 'test';
+    const sysConfig = getConfig();
+    const isTest = (config?.NODE_ENV ?? sysConfig.NODE_ENV) === 'test';
 
     let db: Database.Database;
     if (isTest) {
@@ -257,8 +260,8 @@ export function getDefaultIdempotencyStore(config?: Pick<Config, 'NODE_ENV' | 'I
     }
 
     _defaultStore = createIdempotencyStore(db, {
-      ttlMs: config?.IDEMPOTENCY_TTL_MS ?? (Number(process.env.IDEMPOTENCY_TTL_MS) || DEFAULT_TTL_MS),
-      cleanupIntervalMs: config?.IDEMPOTENCY_CLEANUP_MS ?? (Number(process.env.IDEMPOTENCY_CLEANUP_MS) || DEFAULT_CLEANUP_MS),
+      ttlMs: config?.IDEMPOTENCY_TTL_MS ?? sysConfig.IDEMPOTENCY_TTL_MS ?? DEFAULT_TTL_MS,
+      cleanupIntervalMs: config?.IDEMPOTENCY_CLEANUP_MS ?? sysConfig.IDEMPOTENCY_CLEANUP_MS ?? DEFAULT_CLEANUP_MS,
     });
   }
   return _defaultStore;

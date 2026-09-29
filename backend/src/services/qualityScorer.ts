@@ -46,18 +46,19 @@ export const DEFAULT_WEIGHTS: Record<QualityDimension, number> = {
 
 export const DEFAULT_REVIEW_THRESHOLD = 60;
 
+import { getConfig } from '../config';
+
 /**
- * Load quality scorer configuration from process.env.
- * Called lazily so config changes (env vars) take effect without redeploy.
- * Falls back to defaults when env vars are not set.
+ * Load quality scorer configuration from config.
  */
 export function loadScorerConfig(): QualityScorerConfig {
-  const weightComp = Number(process.env.QUALITY_WEIGHT_COMPLETENESS ?? 0.4);
-  const weightRel = Number(process.env.QUALITY_WEIGHT_RELEVANCE ?? 0.3);
-  const weightFmt = Number(process.env.QUALITY_WEIGHT_FORMAT ?? 0.3);
-  const reviewThreshold = Number(process.env.QUALITY_REVIEW_THRESHOLD ?? 60);
-  const percentileEnabled = process.env.QUALITY_PERCENTILE_ENABLED === 'true';
-  const percentileMinSamples = Number(process.env.QUALITY_PERCENTILE_MIN_SAMPLES ?? 10);
+  const cfg = getConfig();
+  const weightComp = cfg.QUALITY_WEIGHT_COMPLETENESS;
+  const weightRel = cfg.QUALITY_WEIGHT_RELEVANCE;
+  const weightFmt = cfg.QUALITY_WEIGHT_FORMAT;
+  const reviewThreshold = cfg.QUALITY_REVIEW_THRESHOLD;
+  const percentileEnabled = cfg.QUALITY_PERCENTILE_ENABLED;
+  const percentileMinSamples = cfg.QUALITY_PERCENTILE_MIN_SAMPLES;
 
   return {
     weightCompleteness: clamp(weightComp, 0, 1),

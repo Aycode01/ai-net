@@ -16,8 +16,6 @@ import { NotFoundError, ForbiddenError, ConflictError, RateLimitError } from "..
 
 import { getGlobalJobQueue, type JobQueue, type JobPriority } from "../../../queue";
 
-// ── Validation config ────────────────────────────────────────────────────────
-const DAILY_TASK_LIMIT = Number(process.env.DAILY_TASK_LIMIT_PER_WALLET ?? 100);
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 

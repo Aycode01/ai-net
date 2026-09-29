@@ -8,18 +8,13 @@
 
 import { z } from "zod";
 import { idParamSchema, sortSchema, withPagination } from "./common";
+import { getConfig } from "../config";
 
 /**
  * Prompt ceiling, in characters.
- *
- * Bounded because Venice AI is billed per token: an unbounded prompt is an
- * unbounded invoice (issue #181).
- *
- * Read from the environment at module load, matching the behaviour of the
- * route modules this schema replaces. Tests that need a different ceiling must
- * set the variable before importing, or use `jest.resetModules()`.
  */
-export const MAX_PROMPT_LENGTH = Number(process.env.MAX_PROMPT_LENGTH ?? 10_000);
+export const getMaxPromptLength = (): number => getConfig().MAX_PROMPT_LENGTH;
+export const MAX_PROMPT_LENGTH = 10_000;
 
 /** Task lifecycle states a caller may filter on. */
 export const taskStatusSchema = z.enum([
@@ -44,7 +39,18 @@ export const taskPrioritySchema = z.enum(["low", "normal", "high", "critical"]);
 export const promptSchema = z
   .string()
   .min(1, "Prompt is required")
-  .max(MAX_PROMPT_LENGTH, `Prompt too long (max ${MAX_PROMPT_LENGTH} characters)`)
+  .superRefine((val, ctx) => {
+    const max = getMaxPromptLength();
+    if (val.length > max) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.too_big,
+        maximum: max,
+        type: "string",
+        inclusive: true,
+        message: `Prompt too long (max ${max} characters)`,
+      });
+    }
+  })
   .transform((s) => s.replace(/[\x00-\x08\x0E-\x1F]/g, "").trim());
 
 /**

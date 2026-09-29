@@ -8,6 +8,8 @@ import { getTaskDb } from "../db/tasks";
 import { getJobDb } from "../queue";
 import { createLogger } from "../utils/logger";
 
+import { getConfig } from "../config";
+
 const logger = createLogger({ component: "admin-control" });
 
 const DEFAULT_AUDIT_DB = path.join(process.cwd(), "admin_audit.db");
@@ -31,18 +33,30 @@ export interface AdminAuditEntry {
   details?: unknown;
 }
 
-let readOnlyState: ReadOnlyState = {
-  enabled: process.env.AI_NET_READ_ONLY === "true",
-  reason: process.env.AI_NET_READ_ONLY_REASON,
-  changedAt: new Date().toISOString(),
-  changedBy: "boot",
-};
+let readOnlyState: ReadOnlyState | null = null;
+
+export function getReadOnlyState(): ReadOnlyState {
+  if (!readOnlyState) {
+    const cfg = getConfig();
+    readOnlyState = {
+      enabled: cfg.AI_NET_READ_ONLY,
+      reason: cfg.AI_NET_READ_ONLY_REASON,
+      changedAt: new Date().toISOString(),
+      changedBy: "boot",
+    };
+  }
+  return { ...readOnlyState };
+}
+
+export function isReadOnly(): boolean {
+  return getReadOnlyState().enabled;
+}
 
 let auditDb: Database.Database | null = null;
 
 function getAuditDb(): Database.Database {
   if (!auditDb) {
-    const dbPath = process.env.ADMIN_AUDIT_DB_PATH ?? DEFAULT_AUDIT_DB;
+    const dbPath = getConfig().ADMIN_AUDIT_DB_PATH ?? DEFAULT_AUDIT_DB;
     auditDb = new Database(dbPath);
     auditDb.pragma("busy_timeout = 5000");
     auditDb.pragma("journal_mode = WAL");
@@ -64,14 +78,6 @@ function getAuditDb(): Database.Database {
     `);
   }
   return auditDb;
-}
-
-export function getReadOnlyState(): ReadOnlyState {
-  return { ...readOnlyState };
-}
-
-export function isReadOnly(): boolean {
-  return readOnlyState.enabled;
 }
 
 export function setReadOnlyState(enabled: boolean, actor: string, reason?: string): ReadOnlyState {
@@ -225,7 +231,7 @@ export function vacuumDatabases(): MaintenanceResult[] {
 }
 
 export async function backupDatabases(directory?: string): Promise<MaintenanceResult[]> {
-  const targetDir = directory ?? process.env.ADMIN_BACKUP_DIR ?? DEFAULT_BACKUP_DIR;
+  const targetDir = directory ?? getConfig().ADMIN_BACKUP_DIR ?? DEFAULT_BACKUP_DIR;
   fs.mkdirSync(targetDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 

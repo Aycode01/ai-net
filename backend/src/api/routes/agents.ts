@@ -6,7 +6,7 @@ import { heartbeatRateLimitMiddleware } from "../middleware/rateLimit";
 import { NotFoundError, ValidationError, UnauthorizedError, AppError } from "../../errors";
 import { cacheMiddleware } from "../middleware/cache";
 import { invalidateAgentsCache } from "../../cache/invalidation";
-import { ttlForRoute } from "../../config";
+import { ttlForRoute, getConfig } from "../../config";
 
 const AgentCursorListSchema = z.object({
   cursor: z.string().optional(),
@@ -34,8 +34,7 @@ const RegisterAgentSchema = z.object({
 });
 
 const DEFAULT_HEALTH_TIMEOUT_MS = 3_000;
-const HORIZON_URL = process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org";
-const horizon = new Horizon.Server(HORIZON_URL);
+const getHorizon = () => new Horizon.Server(getConfig().STELLAR_HORIZON_URL);
 
 export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
   const router = Router();
@@ -264,9 +263,9 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
       const data = parse.data;
 
       // Verify Stellar account exists
-      if (process.env.SKIP_STELLAR_ACCOUNT_VERIFY !== "true") {
+      if (!getConfig().SKIP_STELLAR_ACCOUNT_VERIFY) {
         try {
-          await horizon.loadAccount(data.stellarPublicKey);
+          await getHorizon().loadAccount(data.stellarPublicKey);
         } catch (error: any) {
           if (error?.response?.status === 404) {
             throw new ValidationError(
@@ -275,7 +274,7 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
               correlationId,
             );
           }
-          if (process.env.NODE_ENV !== "test") {
+          if (getConfig().NODE_ENV !== "test") {
             throw new AppError(
               "Failed to verify Stellar account",
               503,
