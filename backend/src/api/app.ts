@@ -132,7 +132,7 @@ export function createApp(opts: AppOptions = {}): {
   const logger = createLogger({ module: "api-app" });
   const app = express();
   const httpServer = createServer(app);
-  const eventStore = opts.eventStore ?? eventBus.store;
+  const eventStore = opts.eventStore ?? getEventStore();
 
   app.use(express.json());
   app.use((_req, res, next) => {

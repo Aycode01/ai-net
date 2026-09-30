@@ -99,6 +99,31 @@ export function sessionAuthMiddleware(req: Request, res: Response, next: NextFun
 }
 
 /**
+ * Require a valid session access token.
+ *
+ * Unlike {@link authMiddleware} this **fails closed**: a request with no
+ * token, an expired token, or a static API key is rejected. Routes that act on
+ * `req.user` (session revocation, session listing, audit logs) depend on that
+ * invariant, because they would otherwise dereference `undefined`.
+ */
+export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const auth = req.headers["authorization"] ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (!token) {
+    res.status(401).json({ error: "Unauthorized", message: "Bearer access token required" });
+    return;
+  }
+
+  try {
+    req.user = getAuthService().verifyAccessToken(token);
+    next();
+  } catch {
+    res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
+  }
+}
+
+/**
  * Optional session auth middleware: extracts user token if present without rejecting unauthenticated requests.
  */
 export function optionalAuthMiddleware(req: Request, _res: Response, next: NextFunction): void {
