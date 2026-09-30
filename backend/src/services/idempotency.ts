@@ -54,6 +54,7 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { createLogger } from '../utils/logger';
+import { config } from '../config';
 import { resolveDatabasePath, isInMemoryPath, openDatabase } from '../db/index';
 import type { Config } from '../config';
 
@@ -474,7 +475,7 @@ export function getDefaultIdempotencyStore(
   >,
 ): IdempotencyStore {
   if (!_defaultStore) {
-    const isTest = (config?.NODE_ENV ?? process.env.NODE_ENV) === 'test';
+    const isTest = (configOverride?.NODE_ENV ?? config.NODE_ENV) === 'test';
 
     let db: Database.Database;
     if (isTest) {
@@ -488,8 +489,8 @@ export function getDefaultIdempotencyStore(
     }
 
     _defaultStore = createIdempotencyStore(db, {
-      ttlMs: config?.IDEMPOTENCY_TTL_MS ?? (Number(process.env.IDEMPOTENCY_TTL_MS) || DEFAULT_TTL_MS),
-      cleanupIntervalMs: config?.IDEMPOTENCY_CLEANUP_MS ?? (Number(process.env.IDEMPOTENCY_CLEANUP_MS) || DEFAULT_CLEANUP_MS),
+      ttlMs: configOverride?.IDEMPOTENCY_TTL_MS ?? config.IDEMPOTENCY_TTL_MS,
+      cleanupIntervalMs: configOverride?.IDEMPOTENCY_CLEANUP_MS ?? config.IDEMPOTENCY_CLEANUP_MS,
     });
   }
   return _defaultStore;
