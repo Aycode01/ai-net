@@ -21,8 +21,22 @@
 //! voting_power = stake + reputation * REPUTATION_POWER_UNIT
 //! ```
 //!
-//! The electorate's total voting power is snapshotted into each proposal at
-//! creation time, so quorum is measured against a stable denominator.
+//! ### Snapshot point
+//!
+//! Both sides of the quorum check are measured at a single, documented point:
+//! **the ledger timestamp at which the proposal was created**
+//! (`Proposal::created_at`).
+//!
+//! * The quorum denominator (`total_power_snapshot`) is the electorate's
+//!   aggregate power at that timestamp.
+//! * Each vote's weight is the voter's power **as of that same timestamp**,
+//!   read from a bounded per-agent checkpoint history
+//!   ([`PowerCheckpoint`]). Raising reputation or stake after the proposal was
+//!   created therefore cannot inflate a vote on it. Agents registered after
+//!   the snapshot have zero weight on that proposal.
+//!
+//! Power changes recorded in the same ledger timestamp as proposal creation
+//! are treated as having happened at the snapshot point.
 //!
 //! ## Passing Rules
 //!
@@ -39,8 +53,22 @@
 //! | `vote_on_proposal` | `vote_cast`   | `VoteCastEvent`         |
 //! | `execute_proposal` | `executed`    | `ProposalExecutedEvent` |
 //! | `execute_proposal` | `failed`      | `ProposalFailedEvent`   |
+//! | `pause`            | `paused`      | `Address` (admin)       |
+//! | `unpause`          | `unpaused`    | `Address` (admin)       |
+//! | `set_admin`        | `admin_set`   | `(old, new)`            |
+//! | `remove_agent`     | `agent_rm`    | `(agent, power)`        |
+//!
+//! ## Execution Payload
+//!
+//! `ParameterChange` and `ProtocolUpgrade` proposals carry an executable
+//! payload: a `target` contract, a `function` name, and bounded `calldata`
+//! (at most [`MAX_CALLDATA_LEN`] bytes). On a passing vote,
+//! `execute_proposal` invokes `target.function(calldata)` from the governance
+//! contract. `ParameterChange` proposals always target the configured
+//! parameter registry. `expected_hash` (SHA-256 of `calldata`) is pinned at
+//! creation and re-verified at execution to guard against payload drift.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -69,6 +97,13 @@ pub const MAJORITY_BPS: i128 = 5_000;
 /// same unit as `stake` (stroops). One reputation point == 0.1 XLM of weight.
 pub const REPUTATION_POWER_UNIT: i128 = 1_000_000;
 
+/// Maximum byte length of a proposal's execution `calldata`.
+pub const MAX_CALLDATA_LEN: u32 = 4_096;
+
+/// Maximum number of power checkpoints retained per agent. Older entries are
+/// pruned first; a pruned history yields zero weight for very old snapshots.
+pub const MAX_CHECKPOINTS: u32 = 32;
+
 /// Compute an agent's voting power from its stake and reputation score.
 pub fn voting_power(stake: i128, reputation: u32) -> i128 {
     stake.saturating_add((reputation as i128).saturating_mul(REPUTATION_POWER_UNIT))
@@ -87,6 +122,16 @@ pub struct AgentInfo {
     /// Staked amount in stroops.
     pub stake: i128,
     /// Derived voting power (`voting_power(stake, reputation)`), cached.
+    pub power: i128,
+}
+
+/// A point-in-time record of an agent's voting power.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PowerCheckpoint {
+    /// Ledger timestamp at which this power took effect.
+    pub timestamp: u64,
+    /// Voting power from `timestamp` onward (0 after removal).
     pub power: i128,
 }
 
@@ -112,9 +157,11 @@ pub enum ProposalType {
 pub enum ProposalStatus {
     /// Voting is open.
     Active = 0,
-    /// Voting closed, quorum + majority met — the proposal passed.
+    /// Voting closed, quorum + majority met, and the payload (if any) was
+    /// invoked successfully.
     Executed = 1,
-    /// Voting closed, quorum or majority not met — the proposal failed.
+    /// Voting closed, quorum or majority not met, or the execution payload
+    /// invocation failed — the proposal failed.
     Failed = 2,
 }
 
@@ -126,6 +173,22 @@ pub enum VoteChoice {
     For = 0,
     Against = 1,
     Abstain = 2,
+}
+
+/// Execution payload supplied when creating a proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionPayload {
+    /// Contract to invoke on success. Required for `ProtocolUpgrade`; for
+    /// `ParameterChange` it defaults to (and must equal) the parameter
+    /// registry; optional for `AgentDispute`.
+    pub target: Option<Address>,
+    /// Function invoked on `target`; it receives `calldata` as its sole arg.
+    pub function: Symbol,
+    /// Opaque argument bytes, at most [`MAX_CALLDATA_LEN`].
+    pub calldata: Bytes,
+    /// Optional SHA-256 of `calldata`; verified at creation if supplied.
+    pub expected_hash: Option<BytesN<32>>,
 }
 
 /// On-chain governance proposal record.
@@ -156,6 +219,14 @@ pub struct Proposal {
     pub abstain_power: i128,
     /// Total electorate voting power at creation time (quorum denominator).
     pub total_power_snapshot: i128,
+    /// Contract invoked on execution (`None` → signal-only proposal).
+    pub target: Option<Address>,
+    /// Function invoked on `target`.
+    pub function: Symbol,
+    /// Bounded argument bytes passed to `function`.
+    pub calldata: Bytes,
+    /// SHA-256 of `calldata`, pinned at creation and re-checked at execution.
+    pub expected_hash: Option<BytesN<32>>,
 }
 
 /// A single agent's vote on a proposal.
@@ -165,7 +236,8 @@ pub struct VoteRecord {
     pub proposal_id: u64,
     pub voter: Address,
     pub choice: VoteChoice,
-    /// Voting power applied to this vote (snapshotted at vote time).
+    /// Voting power applied to this vote (the voter's power at the
+    /// proposal's creation-time snapshot).
     pub weight: i128,
 }
 
@@ -186,6 +258,8 @@ pub enum DataKey {
     Proposal(u64),
     /// [`VoteRecord`] for a given (proposal, voter) pair.
     Vote(u64, Address),
+    /// Agent Registry contract address.
+    AgentRegistry,
 }
 
 // ─── Event payloads ──────────────────────────────────────────────────────────
@@ -230,6 +304,8 @@ pub struct ProposalFailedEvent {
     pub quorum_met: bool,
     /// Whether the majority threshold was met.
     pub majority_met: bool,
+    /// Whether the vote passed but the payload invocation failed.
+    pub execution_failed: bool,
     pub for_power: i128,
     pub against_power: i128,
     pub abstain_power: i128,

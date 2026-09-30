@@ -4,7 +4,6 @@ import { AppError } from "../../errors";
 import { getConfig } from "../../config";
 import { HTTP_STATUS_FOR_CODE } from "../../errors/ErrorCode";
 
-const isProduction = process.env.NODE_ENV === "production";
 
 /**
  * Build the canonical error envelope for every API response.
@@ -164,7 +163,10 @@ export function errorHandler(
     "unhandled error",
   );
 
-  const message = isProduction
+  const isProd = getConfig().NODE_ENV === "production";
+  const isDev = getConfig().NODE_ENV === "development";
+
+  const message = isProd
     ? "Internal server error"
     : err instanceof Error
       ? err.message || "Internal server error"
@@ -176,7 +178,7 @@ export function errorHandler(
     statusCode,
     path,
     correlationId,
-    details: isDevelopment && err instanceof Error ? { stack: err.stack } : undefined,
+    details: isDev && err instanceof Error ? { stack: err.stack } : undefined,
   });
 
   res.status(statusCode).json(body);

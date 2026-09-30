@@ -160,6 +160,7 @@ MAX_PROMPT_LENGTH=10000
 RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX_REQUESTS=100
 DAILY_TASK_LIMIT_PER_WALLET=500
+TRUST_PROXY=none
 
 # ── Health & Cleanup ──────────────────────────────────────────────────────────
 HEARTBEAT_INTERVAL_MS=300000
@@ -167,6 +168,11 @@ HEARTBEAT_STALE_THRESHOLD_MINUTES=5
 AGENT_OFFLINE_DELETE_HOURS=24
 GRACEFUL_SHUTDOWN_TIMEOUT=30
 ```
+
+`TRUST_PROXY` defaults to `none`, so client addresses come from the socket and
+forwarded headers are ignored. Set it to a trusted proxy hop count or trusted
+IP/CIDR ranges only when the backend is reachable exclusively through those
+proxies.
 
 ---
 

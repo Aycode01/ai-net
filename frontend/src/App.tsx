@@ -4,6 +4,9 @@ import { I18nextProvider } from 'react-i18next'
 import i18n from './i18n'
 import { WalletProvider } from './context/WalletContext'
 import { ToastProvider } from './context/ToastContext'
+import { NotificationProvider } from './context/NotificationContext'
+import { RouteProgressProvider } from './context/RouteProgressContext'
+import RouteProgressBar from './components/layout/RouteProgressBar'
 import { ThemeProvider } from './context/ThemeContext'
 import { NotFoundPage } from './pages/NotFoundPage'
 import AppShell from './components/layout/AppShell'
@@ -118,9 +121,14 @@ const App: React.FC = () => {
         <ThemeProvider>
           <WalletProvider>
             <ToastProvider>
-              <Router>
-                <RoutedContent />
-              </Router>
+              <NotificationProvider>
+                <RouteProgressProvider>
+                  <Router>
+                    <RouteProgressBar />
+                    <RoutedContent />
+                  </Router>
+                </RouteProgressProvider>
+              </NotificationProvider>
             </ToastProvider>
           </WalletProvider>
         </ThemeProvider>

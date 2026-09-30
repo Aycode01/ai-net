@@ -17,7 +17,7 @@ describe('VeniceClient caching & deduplication', () => {
 
   beforeEach(() => {
     mockFetch.mockReset();
-    client = new VeniceClient({ apiKey: 'test-key', circuitBreaker: new CircuitBreaker() });
+    client = new VeniceClient({ apiKey: 'test-key', circuitBreaker: new CircuitBreaker({ name: 'test' }) });
   });
 
   it('serves a repeat prompt from cache without a second upstream call', async () => {

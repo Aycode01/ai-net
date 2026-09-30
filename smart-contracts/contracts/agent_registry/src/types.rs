@@ -4,6 +4,7 @@
 //! and threshold configuration.
 
 use crate::GasConfig;
+use crate::AgentRecord;
 use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
 /// On-chain metrics for an agent, combining SLA terms and analytics.
@@ -185,6 +186,45 @@ pub struct DiscoveryStats {
     pub total_matches_found: u64,
     /// Number of queries served from in-memory / temporary storage cache.
     pub cache_hits: u64,
+}
+
+// ─── Agent capability versioning (issue #243) ────────────────────────────────
+
+/// Semantic version for an agent capability.
+///
+/// `major` bumps indicate breaking changes; `minor` bumps add features in a
+/// backwards-compatible way; `patch` bumps are backwards-compatible fixes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+/// A versioned snapshot of an agent's registration record.
+///
+/// Every call to `register_agent_version` stores one of these. The
+/// previous latest version is kept intact but its `superseded` flag is set
+/// to `true`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionedAgentRecord {
+    /// Core registration details (capability, price, endpoint, …).
+    pub record: AgentRecord,
+    /// Semantic version published with this registration.
+    pub version: AgentVersion,
+    /// `true` when a newer version of this agent has been published.
+    pub superseded: bool,
+    /// Ledger timestamp when this version was published.
+    pub published_at: u64,
+}
+
+/// All versions published for one agent, ordered oldest-first.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentVersionPage {
+    pub versions: Vec<VersionedAgentRecord>,
 }
 
 // ─── Cross-chain identity bridging (issue #259) ──────────────────────────────

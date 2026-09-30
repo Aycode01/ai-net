@@ -30,6 +30,27 @@ export interface Job<T = any> {
   updatedAt: string;
   completedAt?: string | null;
   failedAt?: string | null;
+  /**
+   * Worker process that currently owns this job (issue #648). Set while the job
+   * is `active` and cleared as soon as it leaves that state.
+   */
+  leaseOwner?: string | null;
+  /**
+   * When the owning worker's lease lapses (ISO-8601 UTC). Startup recovery only
+   * reclaims `active` jobs whose lease has expired, so a job a live worker is
+   * mid-flight on is never re-queued. `NULL` means "no owner" and is treated as
+   * expired, which also recovers legacy `active` rows written before the lease
+   * columns existed.
+   */
+  leaseExpiresAt?: string | null;
+}
+
+/** Ownership record a worker writes in the same statement that claims a job. */
+export interface JobLease {
+  /** Unique id of the claiming worker process. */
+  owner: string;
+  /** `now + LEASE_TTL` as an ISO-8601 UTC string. */
+  expiresAt: string;
 }
 
 export interface JobStore {
@@ -43,14 +64,33 @@ export interface JobStore {
    */
   getNextPendingJob(nowIso?: string): Job | undefined;
   /**
-   * Atomically claim the next runnable job and mark it `active`.
+   * Atomically claim the next runnable job, mark it `active` and take the
+   * lease, all in one statement.
    *
    * The claim is a single conditional `UPDATE ... RETURNING *` executed inside
    * a `BEGIN IMMEDIATE` transaction, so two workers — or two processes sharing
-   * the same SQLite file — can never be handed the same row. Returns
-   * `undefined` when nothing is runnable.
+   * the same SQLite file — can never be handed the same row. The same UPDATE
+   * writes `leaseOwner`/`leaseExpiresAt` (issue #648), so a claimed row is
+   * owned from the instant it turns `active`. Returns `undefined` when nothing
+   * is runnable.
    */
-  claimNextPendingJob(nowIso?: string): Job | undefined;
+  claimNextPendingJob(nowIso?: string, lease?: JobLease): Job | undefined;
+  /**
+   * Renew the lease on a job this worker still owns, by moving
+   * `leaseExpiresAt` to the supplied instant. The `WHERE` clause pins the
+   * update to `leaseOwner = owner AND status = 'active'`, so a heartbeat can
+   * never resurrect a lease on a job that finished or was reclaimed by another
+   * worker. Returns `true` when this worker still owned the job.
+   */
+  extendLease(jobId: string, owner: string, expiresAt: string): boolean;
+  /**
+   * Drop the lease on a job this worker owns, leaving the row `active`.
+   *
+   * Called on graceful shutdown: the job is no longer being progressed, and a
+   * `NULL` lease reads as "no owner" to the next recovery pass, so the work is
+   * resumed instead of stranded for a full lease TTL.
+   */
+  releaseLease(jobId: string, owner: string): boolean;
   updateStatus(
     id: string,
     status: JobStatus,
@@ -61,8 +101,9 @@ export interface JobStore {
       progress?: number;
       completedAt?: string | null;
       failedAt?: string | null;
+      expectedStatus?: JobStatus | JobStatus[];
     }
-  ): void;
+  ): boolean;
   updateProgress(id: string, progress: number): void;
   list(filter?: {
     status?: JobStatus;
@@ -80,7 +121,18 @@ export interface JobStore {
   };
   getDeadLetterJobs(page?: number, pageSize?: number): { jobs: Job[]; total: number };
   retryDeadLetterJob(id: string): boolean;
-  recoverIncompleteJobs(): number;
+  /**
+   * Reclaim `active` jobs whose lease has lapsed — left behind by a crash or an
+   * ungraceful restart — back to `pending` so they are retried.
+   *
+   * A job is only reclaimed when it has no owner (`leaseExpiresAt IS NULL`) or
+   * its owner stopped heartbeating before `nowIso`, so jobs a live worker is
+   * still processing are left untouched. The pass is a single conditional
+   * `UPDATE`, which keeps it atomic without a transaction of its own.
+   *
+   * Returns the number of jobs recovered.
+   */
+  recoverIncompleteJobs(nowIso?: string): number;
   delete(id: string): boolean;
   clear(): void;
 }
@@ -123,8 +175,10 @@ export function getJobDb(dbPath?: string): Database.Database {
   return _jobDb;
 }
 
-export function closeJobDb(): void {
-  _jobDb?.close();
+export async function closeJobDb(): Promise<void> {
+  const db = _jobDb;
+  if (!db) return;
+  db.close();
   _jobDb = null;
 }
 
@@ -146,12 +200,38 @@ export function initJobSchema(db: Database.Database): void {
       createdAt    TEXT NOT NULL,
       updatedAt    TEXT NOT NULL,
       completedAt  TEXT,
-      failedAt     TEXT
+      failedAt     TEXT,
+      leaseOwner      TEXT,
+      leaseExpiresAt  TEXT
+    );
+    CREATE TABLE IF NOT EXISTS job_history (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      jobId      TEXT NOT NULL,
+      status     TEXT NOT NULL,
+      createdAt  TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_jobs_status_nextRun ON jobs (status, nextRunAt);
     CREATE INDEX IF NOT EXISTS idx_jobs_taskId ON jobs (taskId);
     CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs (priorityNum DESC, createdAt ASC);
   `);
+
+  // Idempotent column guards for databases created before lease-based recovery
+  // (issue #648). Mirrors the ALTER-guard pattern in src/db/agents.ts: each
+  // statement throws when the column already exists — the expected case on
+  // every startup after the first — so the error is swallowed. This keeps
+  // `initJobSchema` safe to call on every boot, on a fresh database and on one
+  // that has already been migrated.
+  const leaseColumnMigrations = [
+    "ALTER TABLE jobs ADD COLUMN leaseOwner TEXT",
+    "ALTER TABLE jobs ADD COLUMN leaseExpiresAt TEXT",
+  ];
+  for (const sql of leaseColumnMigrations) {
+    try {
+      db.exec(sql);
+    } catch {
+      // Ignored if the column already exists.
+    }
+  }
 }
 
 function mapRowToJob(row: any): Job {
@@ -178,6 +258,8 @@ function mapRowToJob(row: any): Job {
     updatedAt: row.updatedAt,
     completedAt: row.completedAt,
     failedAt: row.failedAt,
+    leaseOwner: row.leaseOwner ?? null,
+    leaseExpiresAt: row.leaseExpiresAt ?? null,
   };
 }
 
@@ -203,7 +285,9 @@ export function createJobStore(db: Database.Database): JobStore {
   const claimNextStmt = db.prepare(`
     UPDATE jobs
     SET status = 'active',
-        updatedAt = @now
+        updatedAt = @now,
+        leaseOwner = @leaseOwner,
+        leaseExpiresAt = @leaseExpiresAt
     WHERE id = (
       SELECT id FROM jobs
       WHERE (status = 'pending' OR (status = 'failed' AND attempts < maxAttempts))
@@ -214,10 +298,12 @@ export function createJobStore(db: Database.Database): JobStore {
       AND (status = 'pending' OR (status = 'failed' AND attempts < maxAttempts))
     RETURNING *
   `);
-  const claimNextTx = db.transaction((nowIso: string) => {
-    const row = claimNextStmt.get({ now: nowIso }) as any;
-    return row ?? undefined;
-  });
+  const claimNextTx = db.transaction(
+    (nowIso: string, leaseOwner: string | null, leaseExpiresAt: string | null) => {
+      const row = claimNextStmt.get({ now: nowIso, leaseOwner, leaseExpiresAt }) as any;
+      return row ?? undefined;
+    }
+  );
 
   return {
     insert(job: Job): void {
@@ -226,11 +312,13 @@ export function createJobStore(db: Database.Database): JobStore {
         INSERT INTO jobs (
           id, taskId, type, payloadJson, status, priority, priorityNum,
           progress, attempts, maxAttempts, lastError, nextRunAt,
-          createdAt, updatedAt, completedAt, failedAt
+          createdAt, updatedAt, completedAt, failedAt,
+          leaseOwner, leaseExpiresAt
         ) VALUES (
           @id, @taskId, @type, @payloadJson, @status, @priority, @priorityNum,
           @progress, @attempts, @maxAttempts, @lastError, @nextRunAt,
-          @createdAt, @updatedAt, @completedAt, @failedAt
+          @createdAt, @updatedAt, @completedAt, @failedAt,
+          @leaseOwner, @leaseExpiresAt
         )
       `);
 
@@ -251,6 +339,8 @@ export function createJobStore(db: Database.Database): JobStore {
         updatedAt: job.updatedAt ?? new Date().toISOString(),
         completedAt: job.completedAt ?? null,
         failedAt: job.failedAt ?? null,
+        leaseOwner: job.leaseOwner ?? null,
+        leaseExpiresAt: job.leaseExpiresAt ?? null,
       });
     },
 
@@ -286,12 +376,14 @@ export function createJobStore(db: Database.Database): JobStore {
       return mapRowToJob(row);
     },
 
-    claimNextPendingJob(nowIso?: string): Job | undefined {
+    claimNextPendingJob(nowIso?: string, lease?: JobLease): Job | undefined {
       const now = nowIso ?? new Date().toISOString();
+      const leaseOwner = lease?.owner ?? null;
+      const leaseExpiresAt = lease?.expiresAt ?? null;
 
       for (let attempt = 0; attempt < CLAIM_BUSY_ATTEMPTS; attempt++) {
         try {
-          const row = claimNextTx.immediate(now);
+          const row = claimNextTx.immediate(now, leaseOwner, leaseExpiresAt);
           return row ? mapRowToJob(row) : undefined;
         } catch (err) {
           if (!isBusyError(err)) throw err;
@@ -308,6 +400,35 @@ export function createJobStore(db: Database.Database): JobStore {
       return undefined;
     },
 
+    extendLease(jobId: string, owner: string, expiresAt: string): boolean {
+      // The UPDATE is scoped to an active row this worker owns, so a heartbeat
+      // that arrives after the job was reclaimed, completed or failed cannot
+      // take ownership back or revive a stale lease (#648).
+      const info = db
+        .prepare(`
+          UPDATE jobs
+          SET leaseExpiresAt = ?, updatedAt = ?
+          WHERE id = ? AND status = 'active' AND leaseOwner = ?
+        `)
+        .run(expiresAt, new Date().toISOString(), jobId, owner);
+
+      return info.changes > 0;
+    },
+
+    releaseLease(jobId: string, owner: string): boolean {
+      // Leaves `status` alone: recovery, not this method, decides when an
+      // unowned active row is re-queued.
+      const info = db
+        .prepare(`
+          UPDATE jobs
+          SET leaseOwner = NULL, leaseExpiresAt = NULL, updatedAt = ?
+          WHERE id = ? AND status = 'active' AND leaseOwner = ?
+        `)
+        .run(new Date().toISOString(), jobId, owner);
+
+      return info.changes > 0;
+    },
+
     updateStatus(
       id: string,
       status: JobStatus,
@@ -318,32 +439,68 @@ export function createJobStore(db: Database.Database): JobStore {
         progress?: number;
         completedAt?: string | null;
         failedAt?: string | null;
+        expectedStatus?: JobStatus | JobStatus[];
       }
-    ): void {
+    ): boolean {
       const now = new Date().toISOString();
-      const current = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as any;
-      if (!current) return;
+      const setClauses: string[] = ["status = ?", "updatedAt = ?"];
+      const params: any[] = [status, now];
 
-      const attempts = updates?.attempts !== undefined ? updates.attempts : current.attempts;
-      const progress = updates?.progress !== undefined ? updates.progress : current.progress;
-      const lastError = updates?.lastError !== undefined ? updates.lastError : current.lastError;
-      const nextRunAt = updates?.nextRunAt !== undefined ? updates.nextRunAt : current.nextRunAt;
-      const completedAt =
-        updates?.completedAt !== undefined ? updates.completedAt : current.completedAt;
-      const failedAt = updates?.failedAt !== undefined ? updates.failedAt : current.failedAt;
+      if (updates) {
+        if (updates.attempts !== undefined) {
+          setClauses.push("attempts = ?");
+          params.push(updates.attempts);
+        }
+        if (updates.progress !== undefined) {
+          setClauses.push("progress = ?");
+          params.push(updates.progress);
+        }
+        if (updates.lastError !== undefined) {
+          setClauses.push("lastError = ?");
+          params.push(updates.lastError);
+        }
+        if (updates.nextRunAt !== undefined) {
+          setClauses.push("nextRunAt = ?");
+          params.push(updates.nextRunAt);
+        }
+        if (updates.completedAt !== undefined) {
+          setClauses.push("completedAt = ?");
+          params.push(updates.completedAt);
+        }
+        if (updates.failedAt !== undefined) {
+          setClauses.push("failedAt = ?");
+          params.push(updates.failedAt);
+        }
+      }
 
-      db.prepare(`
-        UPDATE jobs
-        SET status = ?,
-            attempts = ?,
-            progress = ?,
-            lastError = ?,
-            nextRunAt = ?,
-            completedAt = ?,
-            failedAt = ?,
-            updatedAt = ?
-        WHERE id = ?
-      `).run(status, attempts, progress, lastError, nextRunAt, completedAt, failedAt, now, id);
+      let whereClause = "WHERE id = ?";
+      params.push(id);
+
+      if (updates?.expectedStatus) {
+        const expected = Array.isArray(updates.expectedStatus)
+          ? updates.expectedStatus
+          : [updates.expectedStatus];
+        if (expected.length > 0) {
+          const placeholders = expected.map(() => "?").join(", ");
+          whereClause += ` AND status IN (${placeholders})`;
+          params.push(...expected);
+        }
+      }
+
+      const query = `UPDATE jobs SET ${setClauses.join(", ")} ${whereClause}`;
+
+      const updateTx = db.transaction(() => {
+        const info = db.prepare(query).run(...params);
+        if (info.changes > 0) {
+          db.prepare(`
+            INSERT INTO job_history (jobId, status, createdAt)
+            VALUES (?, ?, ?)
+          `).run(id, status, now);
+        }
+        return info.changes > 0;
+      });
+
+      return updateTx();
     },
 
     updateProgress(id: string, progress: number): void {
@@ -358,8 +515,10 @@ export function createJobStore(db: Database.Database): JobStore {
       page?: number;
       pageSize?: number;
     } = {}): { jobs: Job[]; total: number } {
-      const page = filter.page ?? 1;
-      const pageSize = filter.pageSize ?? 50;
+      // Clamp both parameters so callers can never produce an unbounded LIMIT
+      // or a negative OFFSET. Mirrors the clamp in agents.ts listCursor().
+      const page = Math.max(1, Math.floor(filter.page ?? 1) || 1);
+      const pageSize = Math.min(100, Math.max(1, Math.floor(filter.pageSize ?? 50) || 1));
       const offset = (page - 1) * pageSize;
 
       const conditions: string[] = [];
@@ -435,6 +594,8 @@ export function createJobStore(db: Database.Database): JobStore {
               lastError = NULL,
               nextRunAt = ?,
               failedAt = NULL,
+              leaseOwner = NULL,
+              leaseExpiresAt = NULL,
               updatedAt = ?
           WHERE id = ? AND status = 'dead-letter'
         `)
@@ -443,21 +604,39 @@ export function createJobStore(db: Database.Database): JobStore {
       return info.changes > 0;
     },
 
-    recoverIncompleteJobs(): number {
-      const now = new Date().toISOString();
-      // On server restart, active jobs were interrupted — reset them to pending
+    recoverIncompleteJobs(nowIso?: string): number {
+      const now = nowIso ?? new Date().toISOString();
+      // Startup recovery only reclaims jobs that are genuinely orphaned: those
+      // whose owner died mid-flight (#648). A job whose lease is still in the
+      // future belongs to a worker that is alive — possibly this very process if
+      // `start()` ran twice — and re-queueing it would run the handler twice,
+      // which is a money bug for payment-settling jobs.
+      //
+      // `NULL` means "no owner": either a row written before the lease columns
+      // existed, or one released by a worker draining on graceful shutdown. Both
+      // are safe to resume, so NULL counts as expired.
+      //
+      // One conditional UPDATE, deliberately: SQLite applies it atomically, so
+      // there is no window between reading a row and resetting it in which
+      // another worker could claim it.
       const info = db
         .prepare(`
           UPDATE jobs
           SET status = 'pending',
               nextRunAt = ?,
-              updatedAt = ?
+              updatedAt = ?,
+              leaseOwner = NULL,
+              leaseExpiresAt = NULL
           WHERE status = 'active'
+            AND (leaseExpiresAt IS NULL OR leaseExpiresAt < ?)
         `)
-        .run(now, now);
+        .run(now, now, now);
 
       if (info.changes > 0) {
-        logger.info({ count: info.changes }, "recovered incomplete active jobs to pending");
+        logger.info(
+          { count: info.changes, now },
+          "reclaimed active jobs with an expired lease back to pending"
+        );
       }
       return info.changes;
     },
