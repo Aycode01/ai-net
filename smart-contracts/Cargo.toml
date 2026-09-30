@@ -24,3 +24,8 @@ debug-assertions = false
 panic = "abort"
 codegen-units = 1
 lto = true
+
+# Release build with debug assertions (and therefore contract logs) enabled.
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

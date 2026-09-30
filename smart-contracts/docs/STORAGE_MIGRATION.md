@@ -27,6 +27,35 @@ let migration_plan = contract.get_migration_plan("2.0.0")?;
 // Returns: required checks, transformations, validations, estimated items
 ```
 
+### Who actually migrates data
+
+The `upgrade-manager` contract does **not** transform or validate another
+contract's records — it has no access to that contract's storage. Its role in
+`execute_upgrade` is limited to:
+
+1. Swapping the Wasm hash and recording the new `ContractVersion` under
+   `DataKey::Version(<tag>)`, indexed in the bounded `DataKey::VersionIndex`
+   (at most `MAX_VERSION_HISTORY` = 100 entries). `get_version_history`
+   returns every indexed version, newest first.
+2. Emitting `(upgrade, complete)` with a `MigrationCompleteEvent` carrying the
+   **actual** applied `version`, the `data_transformations` and
+   `post_migration_validations` from the plan as *delegated* steps, and the
+   plan's `estimated_items` (an estimate, never a count).
+
+The data transformations and post-migration validations listed in a
+`MigrationPlan` are executed by the upgraded contract's own
+`Upgradeable::post_upgrade_hook` (for example `agent_registry`'s
+`execute_migration_step` / `validate_post_migration_state`). The
+upgrade-manager no longer ships simulated migration steps that returned
+hard-coded item counts, nor a post-migration validation that always
+succeeded, nor per-step `gas_used` figures (the `MigrationProgressEvent`
+was removed). `validate_proposal` still returns the formula-based
+`estimate_migration_gas` value, which is an estimate and is labelled as such.
+
+`get_current_version` returns `Option`, and every internal storage read
+returns `Result` (`UpgradeError::NotInitialized` when no current version is
+recorded) — the crate contains no `.unwrap()` outside tests.
+
 ## Storage Layout Compatibility
 
 ### Safe Operations

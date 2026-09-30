@@ -133,6 +133,19 @@ Below is the canonical storage layout table for each Soroban smart contract, det
 | `DataKey::Winner(Symbol)` | Persistent | Extended on write | Single `Address` |
 | `DataKey::Escrow(Symbol)` | Persistent | Extended on write | Single `Escrow` |
 
+### `agent_governance`
+| Key | Tier | TTL Strategy | Bound / Limit |
+|---|---|---|---|
+| `DataKey::Admin` | Instance | Contract Lifecycle | 1 Address |
+| `DataKey::Paused` | Instance | Contract Lifecycle | `bool` |
+| `DataKey::ParamRegistry` | Instance | Contract Lifecycle | 1 Address |
+| `DataKey::TotalPower` | Instance | Contract Lifecycle | `i128` |
+| `DataKey::ProposalCount` | Instance | Contract Lifecycle | `u64` |
+| `DataKey::Agent(Address)` | Persistent | Extended on write | Single `AgentInfo` |
+| `DataKey::Checkpoints(Address)` | Persistent | Extended on write | Max 32 `PowerCheckpoint`s per agent |
+| `DataKey::Proposal(u64)` | Persistent | Extended on write | Single `Proposal`; calldata max 4096 bytes |
+| `DataKey::Vote(u64, Address)` | Persistent | Extended on write | Single `VoteRecord` |
+
 ### `error-registry`
 | Key | Tier | TTL Strategy | Bound / Limit |
 |---|---|---|---|
@@ -146,3 +159,58 @@ Below is the canonical storage layout table for each Soroban smart contract, det
 | `DataKey::Admin` | Instance | Contract Lifecycle | 1 Address |
 | `DataKey::AuthorizedCallers` | Instance | Contract Lifecycle | Max 32 authorized contracts |
 | `DataKey::AgentErrorCount(Symbol)` | Persistent | Extended on `record_error` | `u32` counter |
+
+## Governance (`agent_governance`)
+
+### Admin model
+
+The admin written by `initialize` is enforced through `require_admin`, which
+loads `DataKey::Admin` and calls `require_auth()` on it. Admin-gated entry
+points:
+
+| Function | Notes |
+|---|---|
+| `set_admin(new_admin)` | Requires auth from **both** the current admin and `new_admin`; emits `(gov, admin_set)` with `(old, new)`. |
+| `pause()` / `unpause()` | Toggle `DataKey::Paused`; emit `(gov, paused)` / `(gov, unpaused)` with the admin address. While paused, `create_proposal` and `vote_on_proposal` return `ContractPaused`. `execute_proposal` remains callable so closed votes can still be finalised. |
+| `set_param_registry(registry)` | Sets the contract that `ParameterChange` proposals write through. |
+
+`get_admin`, `is_paused` and `get_param_registry` are unauthenticated views.
+The admin cannot create, vote on, or force-execute proposals.
+
+### Execution payload
+
+Every proposal carries an `ExecutionPayload`: `target: Option<Address>`,
+`function: Symbol`, `calldata: Bytes` (max `MAX_CALLDATA_LEN` = 4096 bytes)
+and an optional `expected_hash` (SHA-256 of `calldata`). The hash is verified
+at creation, pinned on the proposal, and re-verified before execution.
+
+* `ProtocolUpgrade` — `target` is required and must be a contract address
+  other than the governance contract itself (`InvalidTarget` otherwise).
+* `ParameterChange` — always targets the admin-configured parameter registry
+  (`RegistryNotSet` if none; `InvalidTarget` if a different target is given).
+  Parameters are written through the registry, never into governance storage.
+* `AgentDispute` — may be signal-only (`target: None`).
+
+When a vote passes, `execute_proposal` calls
+`target.function(calldata)` via `try_invoke_contract`. The proposal becomes
+`Executed` only if that invocation succeeds; a failed invocation marks it
+`Failed` and the `(gov, failed)` event reports `execution_failed = true`.
+Because governance is the direct invoker, the target can gate its entry point
+with `governance_address.require_auth()`.
+
+### Voting-power model
+
+* Voting power = `stake + reputation * REPUTATION_POWER_UNIT`. Stakes are
+  self-declared (no token escrow backs them yet).
+* **Snapshot point:** the ledger timestamp at which the proposal is created
+  (`Proposal::created_at`). The quorum denominator (`total_power_snapshot`)
+  and every vote weight are both measured at this point. Vote weight is read
+  from a bounded per-agent `PowerCheckpoint` history (max 32 entries), so
+  raising reputation or stake mid-vote cannot inflate a vote, and agents
+  registered after the snapshot cannot vote (`NoSnapshotPower`). Changes in
+  the same ledger timestamp as creation are treated as part of the snapshot.
+* `remove_agent` lets an agent unlock its stake and leave the electorate:
+  its record is deleted, a zero checkpoint is written, and `TotalPower` is
+  reduced — so aggregate power is no longer monotonically increasing. A
+  removed agent cannot vote on open proposals.
+

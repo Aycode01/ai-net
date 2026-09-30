@@ -335,21 +335,35 @@ impl AgentBiddingContract {
     }
 
     /// Admin: pause the contract.
+    ///
+    /// Blocks auction creation, bid submission, reveal, and award until
+    /// `unpause`. Emits `(bidding, paused)` with `(admin, ledger_sequence)`.
     pub fn pause(env: Env) -> Result<(), Error> {
-        require_admin(&env)?;
+        let admin = require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((symbol_short!("bidding"), symbol_short!("paused")), ());
+        env.events().publish(
+            (symbol_short!("bidding"), symbol_short!("paused")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
     /// Admin: unpause the contract.
+    ///
+    /// Emits `(bidding, unpaused)` with `(admin, ledger_sequence)`.
     pub fn unpause(env: Env) -> Result<(), Error> {
-        require_admin(&env)?;
+        let admin = require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((symbol_short!("bidding"), symbol_short!("unpaused")), ());
+        env.events().publish(
+            (symbol_short!("bidding"), symbol_short!("unpaused")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
+    }
+
+    /// Alias of [`is_paused`](Self::is_paused) for coordinator reads.
+    pub fn get_paused(env: Env) -> bool {
+        Self::is_paused(env)
     }
 
     /// Returns whether the contract is currently paused.

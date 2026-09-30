@@ -117,6 +117,10 @@ pub const GAS_ROLLBACK_BASE: u64 = 200_000;
 /// Fixed overhead charged per migration step (check, transformation or validation)
 pub const GAS_MIGRATION_STEP_OVERHEAD: u64 = 5_000;
 
+/// Maximum number of versions retained in the version-history index.
+/// Older entries are dropped from the index first.
+pub const MAX_VERSION_HISTORY: u32 = 100;
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 /// Contract version information
@@ -385,6 +389,7 @@ impl UpgradeManager {
 
         extend_ttl_for_key(&env, &DataKey::CurrentVersion);
         extend_ttl_for_key(&env, &DataKey::Version(initial_version.clone()));
+        record_version(&env, &initial_version);
 
         env.events().publish(
             (symbol_short!("upgrade"), symbol_short!("init")),
@@ -754,6 +759,7 @@ impl UpgradeManager {
             &DataKey::Version(proposal.new_version.clone()),
             &new_version,
         );
+        record_version(&env, &proposal.new_version);
 
         if let Some(ref prev) = previous_version {
             env.storage().persistent().set(
@@ -951,8 +957,17 @@ impl UpgradeManager {
     /// Get all version history (for debugging/auditing).
     pub fn get_version_history(env: Env) -> Vec<ContractVersion> {
         let mut history = Vec::new(&env);
-        if let Some(current) = get_current_version(&env) {
-            history.push_back(current);
+        let mut i = index.len();
+        while i > 0 {
+            i -= 1;
+            let tag = index.get_unchecked(i);
+            if let Some(v) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, ContractVersion>(&DataKey::Version(tag))
+            {
+                history.push_back(v);
+            }
         }
         history
     }
@@ -1243,6 +1258,42 @@ mod tests {
 
         let expected = GAS_UPGRADE_BASE + (GAS_MIGRATION_PER_ITEM * 100) + (3 * 5000);
         assert_eq!(gas_estimate, expected);
+    }
+
+    #[test]
+    fn test_version_history_newest_first() {
+        let (env, client, admin) = create_test_env();
+        client.initialize(
+            &admin,
+            &String::from_str(&env, "1.0.0"),
+            &test_wasm_hash(&env, 1),
+        );
+
+        let migration_plan = MigrationPlan {
+            pre_migration_checks: Vec::new(&env),
+            data_transformations: Vec::new(&env),
+            post_migration_validations: Vec::new(&env),
+            estimated_items: 0,
+        };
+        client.propose_upgrade(
+            &String::from_str(&env, "2.0.0"),
+            &test_wasm_hash(&env, 2),
+            &String::from_str(&env, "Upgrade"),
+            &migration_plan,
+        );
+        client.validate_proposal();
+        client.execute_upgrade();
+
+        let history = client.get_version_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.get_unchecked(0).version,
+            String::from_str(&env, "2.0.0")
+        );
+        assert_eq!(
+            history.get_unchecked(1).version,
+            String::from_str(&env, "1.0.0")
+        );
     }
 
     // ========================================================================

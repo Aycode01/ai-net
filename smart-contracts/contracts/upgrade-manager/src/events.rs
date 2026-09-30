@@ -110,22 +110,20 @@ pub struct ExpiredProposalsSweptEvent {
     pub admin: Address,
 }
 
-/// Event emitted during migration progress
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MigrationProgressEvent {
-    pub phase: String,
-    pub items_processed: u32,
-    pub total_items: u32,
-    pub gas_used: u64,
-}
-
-/// Event emitted when migration completes
+/// Event emitted when the upgrade-manager side of a migration completes.
+///
+/// Data transformations and post-migration validations are executed by the
+/// upgraded contract's `post_upgrade_hook`; they are listed here as
+/// delegated, not as performed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MigrationCompleteEvent {
+    /// The version that was applied.
     pub version: String,
-    pub items_migrated: u32,
-    pub total_gas_used: u64,
-    pub success: bool,
+    /// Transformation steps delegated to the upgraded contract.
+    pub delegated_transformations: Vec<String>,
+    /// Post-migration validations delegated to the upgraded contract.
+    pub delegated_validations: Vec<String>,
+    /// Item count declared in the migration plan (an estimate, not a count).
+    pub estimated_items: u32,
 }

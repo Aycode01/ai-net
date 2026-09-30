@@ -4,7 +4,7 @@
 //! variant maps to a stable `u32` status code so off-chain callers can branch
 //! on the numeric code without coupling to a specific SDK build.
 //!
-//! The code range used here (`1..=16`) is local to this contract. **Never
+//! The code range used here (`1..=23`) is local to this contract. **Never
 //! renumber an existing variant** once the contract is deployed.
 
 use soroban_sdk::contracterror;
