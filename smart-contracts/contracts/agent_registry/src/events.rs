@@ -309,7 +309,7 @@ pub struct BondLocked {
 
 /// Data payload for `(registry, bond_slsh)`.
 ///
-/// Published by `slash_bond` when an admin penalises an agent's bond.
+/// Published when an admin or verified dispute ruling penalises an agent's bond.
 /// Both the penalty applied and the resulting remaining balance are included
 /// so indexers don't need to recompute the residual from prior state.
 #[contracttype]
@@ -625,4 +625,139 @@ pub struct AnomalyDetectedEvent {
     /// Observed value: the operation count for a rate anomaly, the amount in
     /// stroops for a high-value one, and zero for a first-seen caller.
     pub observed: i128,
+}
+
+// ─── Agent freeze/resume events (issue #486) ─────────────────────────────────
+
+/// Data payload for `("registry", "frz_upd")`.
+///
+/// Published by `freeze_agent` / `unfreeze_agent` after the frozen flag has
+/// been written, so indexers can maintain a full freeze/resume history with
+/// the acting admin without reconstructing it from two separate topics.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentFrozen {
+    /// The agent whose frozen flag changed.
+    pub agent_id: Symbol,
+    /// `true` after `freeze_agent`, `false` after `unfreeze_agent`.
+    pub frozen: bool,
+    /// Admin that performed the change.
+    pub admin: Address,
+    /// Ledger sequence at which the flag was written.
+    pub frozen_at_ledger: u64,
+}
+
+/// Alias so callers can name the resume half of the pair explicitly.
+///
+/// topic: `("registry", "frz_upd")` (same payload shape as [`AgentFrozen`]).
+pub type AgentResumed = AgentFrozen;
+
+/// Data payload for `("registry", "msig_set")`.
+///
+/// Published by `set_multisig_config` after the configuration is committed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultisigConfigSetEvent {
+    /// Addresses that make up the multi-sig admin set.
+    pub admins: Vec<Address>,
+    /// Number of approvals required to execute a proposal.
+    pub threshold: u32,
+    /// Timelock delay in seconds applied to proposal execution.
+    pub timelock_delay: u64,
+}
+
+/// Data payload for `("registry", "minbond")`.
+///
+/// Published by `set_min_bond` after the new minimum is committed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MinBondSetEvent {
+    /// Admin that performed the change.
+    pub admin: Address,
+    /// New minimum bond in stroops.
+    pub amount_stroops: i128,
+}
+
+/// Data payload for `("registry", "errttl")`.
+///
+/// Published by `set_error_ttl` after the new retention is committed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ErrorTtlSetEvent {
+    /// Admin that performed the change.
+    pub admin: Address,
+    /// New error retention, in ledger sequences.
+    pub ttl_ledgers: u64,
+}
+
+/// Data payload for `("registry", "errcln")`.
+///
+/// Published by `cleanup_expired_errors` when at least one entry was removed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ErrorsCleanedEvent {
+    /// Number of entries removed by this pass.
+    pub removed: u32,
+}
+
+/// Data payload for `("registry", "gas_cfg")`.
+///
+/// Published by `set_gas_config` after the new configuration is committed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct GasConfigSetEvent {
+    /// Admin that performed the change.
+    pub admin: Address,
+    /// Fixed per-transaction overhead, in CPU instructions.
+    pub tx_overhead: u64,
+    /// Cost of a single agent registration.
+    pub register_agent: u64,
+    /// Cost of a single error resolution.
+    pub resolve_error: u64,
+}
+
+/// Data payload for `("registry", "store_cfg")`.
+///
+/// Published by `set_storage_config` after the new limits are committed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageConfigSetEvent {
+    /// Admin that performed the change.
+    pub admin: Address,
+    /// Global agent limit (0 = unlimited).
+    pub max_agents: u32,
+    /// Per-capability agent limit (0 = unlimited).
+    pub max_per_capability: u32,
+}
+
+/// Data payload for `("registry", "gcfg_set")`.
+///
+/// Published by the `SetGasConfig` arm of `execute_operation`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct GasConfigUpdatedEvent {
+    /// Proposal that carried the change.
+    pub proposal_id: u64,
+    /// Fixed per-transaction overhead, in CPU instructions.
+    pub tx_overhead: u64,
+    /// Cost of a single agent registration.
+    pub register_agent: u64,
+    /// Cost of a single error resolution.
+    pub resolve_error: u64,
+}
+
+/// Data payload for `("registry", "msig_upd")`.
+///
+/// Published by the `SetMultisigConfig` arm of `execute_operation`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultisigConfigUpdatedEvent {
+    /// Proposal that carried the change.
+    pub proposal_id: u64,
+    /// Addresses that make up the new multi-sig admin set.
+    pub admins: Vec<Address>,
+    /// Number of approvals required to execute a proposal.
+    pub threshold: u32,
+    /// Timelock delay in seconds applied to proposal execution.
+    pub timelock_delay: u64,
 }

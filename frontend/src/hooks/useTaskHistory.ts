@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { CursorPageEnvelope, TaskResponse, NodeStatus } from '../types/api';
 import { ApiError, apiClient } from '../services/api';
+import { readWalletSession } from '../services/walletSession';
 
 // ─── Filter types ────────────────────────────────────────────────────────────
 
@@ -201,10 +202,9 @@ export function useTaskHistory(
     setLoading(true);
     setError(null);
     try {
-      const walletAddress =
-        localStorage.getItem('wallet_pubkey') ||
-        localStorage.getItem('walletAddress') ||
-        '';
+      // Read through the shared session layer (#477) so this stays in step with
+      // WalletContext after the move from localStorage to sessionStorage.
+      const walletAddress = readWalletSession()?.publicKey ?? '';
 
       if (!walletAddress) {
         setAllTasks([]);
@@ -273,19 +273,15 @@ export function useTaskHistory(
   }, [filters.status]);
 
   useEffect(() => {
-    // Reset and fetch from the start whenever filters change
+    // `fetchTasks` is recreated only when `filters.status` changes, so this
+    // effect fetches exactly once on mount and refetches exactly once per
+    // status change. Non-status filters are applied client-side and never
+    // trigger a new request.
     setAllTasks([]);
     setNextCursor(null);
     setHasNextPage(false);
     fetchTasks(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.status]);
-
-  // Initial load (non-status filters are applied client-side)
-  useEffect(() => {
-    fetchTasks(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchTasks]);
 
   const refetch = useCallback(() => {
     setAllTasks([]);

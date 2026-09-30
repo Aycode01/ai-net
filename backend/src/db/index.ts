@@ -80,6 +80,7 @@ export function openDatabase(dbPath: string): Database.Database {
 }
 
 let _pool: SqlitePool | null = null;
+let _poolClosing: Promise<void> | null = null;
 
 /** Create the payments schema. Runs once, on the pool's writer connection. */
 function applyPaymentSchema(db: Database.Database): void {
@@ -104,6 +105,7 @@ function applyPaymentSchema(db: Database.Database): void {
 
 /** The payment database's connection pool. */
 export function getPaymentPool(dbPath?: string): SqlitePool {
+  if (_poolClosing) throw new Error("Payment database is closing");
   if (!_pool || _pool.closed) {
     const filePath = dbPath ?? path.join(process.cwd(), "payments.db");
     _pool = createPool({
@@ -136,9 +138,15 @@ export function getDb(dbPath?: string): Database.Database {
   return getPaymentPool(dbPath).writer;
 }
 
-export function closeDb(): void {
-  void _pool?.close();
-  _pool = null;
+export function closeDb(): Promise<void> {
+  if (_poolClosing) return _poolClosing;
+  const pool = _pool;
+  if (!pool) return Promise.resolve();
+  _poolClosing = pool.close().finally(() => {
+    if (_pool === pool) _pool = null;
+    _poolClosing = null;
+  });
+  return _poolClosing;
 }
 
 /** The payments pool if one is open, else null. Used by the metrics endpoint. */
