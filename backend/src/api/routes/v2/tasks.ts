@@ -16,9 +16,10 @@ import { RateLimitError, NotFoundError, ForbiddenError, ConflictError } from "..
 import { taskStreamUrl } from "../stream";
 
 import { getGlobalJobQueue, type JobQueue, type JobPriority } from "../../../queue";
+import { config } from "../../../config";
 
 // ── Validation config ────────────────────────────────────────────────────────
-const DAILY_TASK_LIMIT = Number(process.env.DAILY_TASK_LIMIT_PER_WALLET ?? 100);
+const DAILY_TASK_LIMIT = config.DAILY_TASK_LIMIT_PER_WALLET;
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 
