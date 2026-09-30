@@ -18,6 +18,12 @@ pub enum Error {
     SlaViolation = 10,
     NotOwner = 11,
     ServiceNotAvailable = 12,
+    /// No payment asset (Stellar Asset Contract) has been configured.
+    AssetNotConfigured = 13,
+    /// The supplied asset or its decimals do not match the configured asset.
+    AssetMismatch = 14,
+    /// An amount is negative or not representable in the asset's decimals.
+    InvalidAmount = 15,
 }
 
 impl Error {
@@ -35,6 +41,9 @@ impl Error {
             10 => Some(Error::SlaViolation),
             11 => Some(Error::NotOwner),
             12 => Some(Error::ServiceNotAvailable),
+            13 => Some(Error::AssetNotConfigured),
+            14 => Some(Error::AssetMismatch),
+            15 => Some(Error::InvalidAmount),
             _ => None,
         }
     }

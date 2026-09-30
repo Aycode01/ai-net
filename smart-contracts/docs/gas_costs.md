@@ -67,6 +67,22 @@ Measured examples: listing 75,390 CU, booking 73,021 CU, searching one listing
 Measured examples: create 88,859 CU, update 104,078 CU, one task query 53,604 CU,
 and a two-task batch query 90,137 CU.
 
+## Token Transfers (escrow)
+
+`agent_marketplace` (`book_agent`, `complete_booking`, `cancel_booking`) and
+`agent_bidding` (`create_auction`, `submit_bid`, `award_contract`,
+`abort_auction`, `claim_refund`, `claim_bid_refund`, `release_escrow`,
+`refund_escrow`) now perform cross-contract Stellar Asset Contract calls: one
+`decimals()` check plus one `transfer` per moved amount. `award_contract` and
+`abort_auction` transfer once per bidder (bounded by `MAX_BIDDERS`) plus once
+to the creator.
+
+The per-operation figures in the tables above predate these transfers and
+**understate** the affected operations. They must be re-measured with
+`cargo test -p agent-marketplace -p agent-bidding` against the
+`Env::cost_estimate()` budget and the `gas.rs` constants updated; until then,
+always use transaction simulation for these calls.
+
 ## Runtime Budget Guard
 
 Soroban SDK 22 exposes budget consumption through test utilities, not to
