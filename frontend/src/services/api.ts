@@ -178,3 +178,14 @@ export const getAgentsPage = async (cursor?: string): Promise<AgentPage> => {
 export const getAgents = async (): Promise<AgentRecord[]> => {
   return (await getAgentsPage()).items;
 };
+
+/**
+ * Fetch reputation data for a single agent by id (Issue #629).
+ *
+ * Returns dimensions scores plus a chronological score history so the
+ * reputation hook and the AgentReputationTrend chart can render without
+ * importing a non-existent symbol.
+ */
+export const getAgentReputation = async (agentId: string): Promise<import('../types/agent').AgentReputation> => {
+  return apiClient.get<import('../types/agent').AgentReputation>(`/api/agents/${agentId}/reputation`);
+};
