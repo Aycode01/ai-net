@@ -1,4 +1,3 @@
-import { describe, it, expect, beforeEach } from 'vitest';
 import {
   CircuitBreaker,
   CircuitOpenError,
@@ -6,7 +5,7 @@ import {
   getCircuitBreaker,
   getAllCircuitBreakerStatuses,
   _resetCircuitBreakerRegistry,
-} from '../circuitBreaker.js';
+} from './circuitBreaker';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -236,7 +235,7 @@ describe('Circuit breaker registry', () => {
     getCircuitBreaker({ name: 'venice' });
     getCircuitBreaker({ name: 'horizon' });
     const statuses = getAllCircuitBreakerStatuses();
-    expect(statuses.map((s) => s.name)).toEqual(expect.arrayContaining(['venice', 'horizon']));
+    expect(statuses.map((s: { name: string }) => s.name)).toEqual(expect.arrayContaining(['venice', 'horizon']));
   });
 });
 

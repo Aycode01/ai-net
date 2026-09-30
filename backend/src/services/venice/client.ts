@@ -131,7 +131,7 @@ export class VeniceClient implements VeniceClientLike {
   }
 
   constructor(config: VeniceClientConfig) {
-    this.breaker = config.circuitBreaker ?? new CircuitBreaker();
+    this.breaker = config.circuitBreaker ?? new CircuitBreaker({ name: 'venice' });
 
     const env = this.resolveConfig() as any;
     this.modelVersion = config.modelVersion ?? env.VENICE_MODEL_VERSION ?? CONFIG_FALLBACK.VENICE_MODEL_VERSION;
@@ -528,6 +528,41 @@ export class VeniceClient implements VeniceClientLike {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let done = false;
+        // Chunk boundaries land wherever the network puts them, so a `data:`
+        // line can be split across two reads. Carry the trailing partial line
+        // between iterations instead of parsing each chunk in isolation —
+        // otherwise both halves fail to parse and the content is dropped with
+        // no error, which is silent output corruption (issue #660).
+        let buffer = '';
+        let parseFailures = 0;
+
+        const handleLine = (line: string): void => {
+          if (!line.startsWith('data: ')) return;
+          const payload = line.slice(6).trim();
+          if (payload === '[DONE]') return;
+          try {
+            const parsed = JSON.parse(payload);
+            const delta = parsed?.choices?.[0]?.delta?.content;
+            if (typeof delta === 'string' && delta.length > 0) {
+              accumulated += delta;
+              onChunk(delta);
+            }
+          } catch (err) {
+            // A complete-but-unparseable frame is counted and surfaced rather
+            // than swallowed, so a provider regression is visible in the logs
+            // instead of showing up only as shorter output.
+            parseFailures += 1;
+            log.warn(
+              {
+                error: err instanceof Error ? err.message : String(err),
+                agentType,
+                model,
+                payloadPreview: payload.slice(0, 200),
+              },
+              'venice SSE frame failed to parse — frame dropped'
+            );
+          }
+        };
 
         while (!done) {
           const result = await reader.read();
@@ -551,6 +586,27 @@ export class VeniceClient implements VeniceClientLike {
               }
             }
           }
+
+          // Everything up to the last newline is a complete line; the remainder
+          // is a partial line that must survive until the next chunk.
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            handleLine(line);
+          }
+        }
+
+        // The stream ended without a trailing newline, so the retained partial
+        // line is a complete frame after all.
+        if (buffer.length > 0) {
+          handleLine(buffer);
+        }
+
+        if (parseFailures > 0) {
+          log.warn(
+            { agentType, model, parseFailures, provider: provider.name },
+            'venice SSE stream completed with unparseable frames'
+          );
         }
 
         // The attempt completed, so this output is authoritative. Only now is

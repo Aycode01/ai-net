@@ -154,8 +154,14 @@ const envSchema = z.object({
     .default("true"),
 
   // ── Idempotency store (Issue #657) ───────────────────────────────────────────
-  /** How long idempotency keys are retained before they can be replayed. Default: 24 h. */
+  /** How long completed idempotency keys are retained for replay. Default: 24 h. */
   IDEMPOTENCY_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  /**
+   * How long an in-flight idempotency reservation is honoured before it is
+   * treated as abandoned and the key becomes reusable. Kept short so a handler
+   * that dies without releasing its slot does not block the key for a full day.
+   */
+  IDEMPOTENCY_PENDING_TTL_MS: z.coerce.number().int().positive().default(300_000),
   /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
   IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
 

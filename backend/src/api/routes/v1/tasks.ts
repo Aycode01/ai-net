@@ -5,7 +5,7 @@ import { getTaskDb, createTaskDb } from "../../../db/tasks";
 import { decompose } from "../../../coordinator";
 import type { Task } from "../../../types/task";
 import { executeDAG, type DispatchFn, type PaymentReleaseFn } from "../../../coordinator/coordinator";
-import { createTask, getTask } from "../../../coordinator/taskStore";
+import { createTask, getTask, abortTask } from "../../../coordinator/taskStore";
 import { createLogger } from "../../../utils/logger";
 import { validate } from "../../middleware/validate";
 import { rateLimitMiddleware } from "../../middleware/rateLimit";
@@ -135,13 +135,21 @@ export function createV1TasksRouter(
       throw new ForbiddenError("Not authorized to cancel this task");
     }
 
-    if (task.status !== "queued") {
-      throw new ConflictError(`Cannot cancel task in '${task.status}' status`);
+    if (task.status === "queued") {
+      db.updateStatus(req.params.id, "cancelled");
+      res.json({ taskId: req.params.id, status: "cancelled" });
+      return;
     }
 
-    db.updateStatus(req.params.id, "cancelled");
-    // v1 response format
-    res.json({ taskId: req.params.id, status: "cancelled" });
+    if (task.status === "running") {
+      abortTask(req.params.id);
+      db.updateStatus(req.params.id, "cancelled");
+      // v1 response format
+      res.json({ taskId: req.params.id, status: "cancelling" });
+      return;
+    }
+
+    throw new ConflictError(`Cannot cancel task in '${task.status}' status`);
   });
 
   return tasksRouter;

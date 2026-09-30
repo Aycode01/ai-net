@@ -488,3 +488,79 @@ fn negative_auth_set_task_escrow() {
         Err(Ok(Error::Unauthorized))
     );
 }
+
+/// Force a dispute into `status` with ledger time positioned relative to its
+/// voting deadline (`offset` of -1, 0 or +1 seconds).
+fn force_state(fixture: &Fixture, status: DisputeStatus, offset: i64) {
+    let mut dispute = fixture.client.get_dispute(&fixture.task_id).unwrap();
+    dispute.status = status.clone();
+    if status == DisputeStatus::AppealPending {
+        dispute.resolution = Some(0);
+        dispute.appeal_deadline = Some(dispute.voting_deadline + APPEAL_PHASE);
+    }
+    let deadline = dispute.voting_deadline;
+    let contract_id = fixture.client.address.clone();
+    fixture.env.as_contract(&contract_id, || save_dispute(&fixture.env, &dispute));
+    fixture.env.ledger().with_mut(|ledger| {
+        ledger.timestamp = (deadline as i64 + offset) as u64;
+    });
+}
+
+const STATES: [DisputeStatus; 5] = [
+    DisputeStatus::Filed,
+    DisputeStatus::EvidencePhase,
+    DisputeStatus::Voting,
+    DisputeStatus::Resolved,
+    DisputeStatus::AppealPending,
+];
+const OFFSETS: [i64; 3] = [-1, 0, 1];
+
+#[test]
+fn resolve_state_time_matrix() {
+    for status in STATES.iter() {
+        for offset in OFFSETS.iter() {
+            let fixture = setup();
+            file(&fixture);
+            force_state(&fixture, status.clone(), *offset);
+            let expected: Result<(), Error> = match status {
+                DisputeStatus::Resolved => Err(Error::DisputeAlreadyResolved),
+                DisputeStatus::AppealPending => Err(Error::InvalidPhase),
+                _ if *offset < 0 => Err(Error::VotingStillOpen),
+                _ => Ok(()),
+            };
+            let actual = match fixture.client.try_resolve(&fixture.task_id) {
+                Ok(_) => Ok(()),
+                Err(Ok(e)) => Err(e),
+                Err(Err(_)) => panic!("unexpected host error"),
+            };
+            assert_eq!(actual, expected, "status={:?} offset={}", status, offset);
+        }
+    }
+}
+
+#[test]
+fn appeal_state_time_matrix() {
+    for status in STATES.iter() {
+        for offset in OFFSETS.iter() {
+            let fixture = setup();
+            file(&fixture);
+            force_state(&fixture, status.clone(), *offset);
+            let expected: Result<(), Error> = match status {
+                DisputeStatus::Filed | DisputeStatus::EvidencePhase | DisputeStatus::Voting => {
+                    Err(Error::NotResolved)
+                }
+                DisputeStatus::Resolved => Err(Error::DisputeAlreadyResolved),
+                DisputeStatus::AppealPending => Ok(()),
+            };
+            let actual = match fixture
+                .client
+                .try_appeal_dispute(&fixture.task_id, &fixture.agent)
+            {
+                Ok(_) => Ok(()),
+                Err(Ok(e)) => Err(e),
+                Err(Err(_)) => panic!("unexpected host error"),
+            };
+            assert_eq!(actual, expected, "status={:?} offset={}", status, offset);
+        }
+    }
+}

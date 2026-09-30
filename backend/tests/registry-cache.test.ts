@@ -432,21 +432,21 @@ describe('GET /api/agents — cache headers', () => {
   afterEach(() => resetCache());
 
   it('first request returns X-Cache: MISS', async () => {
-    const res = await request(app).get('/api/agents');
+    const res = await request(app).get('/api/agents?limit=100');
     expect(res.status).toBe(200);
     expect(res.headers['x-cache']).toBe('MISS');
   });
 
   it('second request returns X-Cache: HIT', async () => {
-    await request(app).get('/api/agents'); // prime
-    const res = await request(app).get('/api/agents');
+    await request(app).get('/api/agents?limit=100'); // prime
+    const res = await request(app).get('/api/agents?limit=100');
     expect(res.headers['x-cache']).toBe('HIT');
   });
 
   it('bypass header forces MISS on a warm cache', async () => {
-    await request(app).get('/api/agents'); // prime
+    await request(app).get('/api/agents?limit=100'); // prime
     const res = await request(app)
-      .get('/api/agents')
+      .get('/api/agents?limit=100')
       .set(CACHE_BYPASS_HEADER, '1');
     expect(res.headers['x-cache']).toBe('BYPASS');
   });
@@ -503,15 +503,15 @@ describe('POST /api/agents/:id/heartbeat — invalidates cache', () => {
 
   it('heartbeat causes subsequent GET to MISS (cache was invalidated)', async () => {
     // Prime
-    await request(app).get('/api/agents');
-    expect((await request(app).get('/api/agents')).headers['x-cache']).toBe('HIT');
+    await request(app).get('/api/agents?limit=100');
+    expect((await request(app).get('/api/agents?limit=100')).headers['x-cache']).toBe('HIT');
 
     // Heartbeat should bust the cache
     await request(app).post('/api/agents/agent-1/heartbeat');
     // Flush promise queue so the async invalidation completes
     await new Promise((r) => setImmediate(r));
 
-    const res = await request(app).get('/api/agents');
+    const res = await request(app).get('/api/agents?limit=100');
     expect(res.headers['x-cache']).toBe('MISS');
   });
 });
