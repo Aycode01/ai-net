@@ -140,6 +140,81 @@ API versioning lifecycle manifest detailing current, deprecated, and sunset API 
 
 ### 3.2 Agent Management (`/api/v1/agents`)
 
+#### Agent ownership proof
+
+Every route that mutates an agent — `POST /api/agents/register`,
+`POST /api/agents/:id/heartbeat` and `DELETE /api/agents/:id` — requires proof that the caller
+controls the agent's Stellar key. Without it, anyone could register an agent under someone
+else's public key and receive its escrow settlements, or keep a decommissioned agent pinned
+into the dispatch pool by forging heartbeats.
+
+**Step 1 — request a challenge.** `POST /api/agents/challenge`:
+
+```json
+{
+  "purpose": "register",
+  "publicKey": "GAGENTPUBLICKEY...",
+  "agentId": "agent_001",
+  "payload": { "agentId": "agent_001" }
+}
+```
+
+* `purpose` — `register`, `heartbeat` or `delete`.
+* `publicKey` — the Stellar public key you intend to claim.
+* `agentId` — required for `heartbeat` and `delete`.
+* `payload` — the **exact** object you will send to the protected route.
+
+```json
+{
+  "challenge": "0m1v2Q8x…",
+  "message": "ai-net:agent-auth:v1\nheartbeat\nGAGENTPUBLICKEY...\n0m1v2Q8x…\n9f2c…",
+  "expiresAt": "2026-09-27T15:20:28.042Z"
+}
+```
+
+**Step 2 — sign `message`** with the agent's Stellar secret key (Ed25519).
+
+**Step 3 — call the protected route** with two extra headers:
+
+| Header | Value |
+|---|---|
+| `x-challenge` | The `challenge` string from step 1 |
+| `x-signature` | Base64 (or hex) signature of `message` |
+
+```bash
+curl -s -X POST http://localhost:3001/api/agents/agent_001/heartbeat \
+  -H "x-challenge: 0m1v2Q8x…" \
+  -H "x-signature: MEUCIQ…" \
+  -d ''
+```
+
+**What the signature covers.** The message is
+`ai-net:agent-auth:v1` + `purpose` + `publicKey` + `challenge` + `sha256(payload)`, so a
+signature authorises exactly one request: it cannot be replayed against another route, another
+payload, or another agent. Challenges are single-use and expire after
+`AGENT_CHALLENGE_TTL_MS` (default 5 minutes).
+
+**Errors.** Both failures return `401` with a dedicated code:
+
+| `error.code` | Meaning | Client action |
+|---|---|---|
+| `AGENT_CHALLENGE_INVALID` | Missing, unknown, expired, already-used, or issued for a different request | Request a new challenge and retry |
+| `AGENT_SIGNATURE_INVALID` | Missing, malformed, or does not match the claimed public key | Check the signing key |
+
+Failed *unsigned* attempts are throttled separately from the success path
+(`AGENT_AUTH_FAILURE_LIMIT_MAX` per IP per `AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS`) so agent ids
+cannot be enumerated cheaply. Requests that do present a signature are never blocked by this
+budget.
+
+**Migrating existing agents.** While the `agent_ownership_proof` feature flag is disabled,
+unsigned `register` and `heartbeat` calls are still accepted and answered with `Deprecation`,
+`Sunset` and `Warning` headers carrying `AGENT_AUTH_SUNSET_DATE`. Set
+`FEATURE_AGENT_OWNERSHIP_PROOF=true` (or `PUT /api/admin/flags/agent_ownership_proof`) to
+enforce. `DELETE` always requires a signature — it is destructive, and an unsigned delete would
+let anyone de-register another agent.
+
+---
+
 #### `GET /api/v1/agents`
 List registered AI agents with cursor-based pagination and filtering.
 

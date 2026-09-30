@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { config } from "../../config";
 
 export interface AccessTokenPayload {
   sub: string; // walletPublicKey
@@ -37,11 +38,10 @@ export class TokenService {
     refreshTtlSeconds?: number;
     sessionMaxTtlSeconds?: number;
   }) {
-    const cfg = getConfig();
-    this.jwtSecret = options?.jwtSecret ?? cfg.AUTH_JWT_SECRET;
-    this.accessTtlSeconds = options?.accessTtlSeconds ?? cfg.AUTH_ACCESS_TOKEN_TTL_SECONDS;
-    this.refreshTtlSeconds = options?.refreshTtlSeconds ?? cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS;
-    this.sessionMaxTtlSeconds = options?.sessionMaxTtlSeconds ?? cfg.AUTH_SESSION_MAX_TTL_SECONDS;
+    this.jwtSecret = options?.jwtSecret ?? config.AUTH_JWT_SECRET;
+    this.accessTtlSeconds = options?.accessTtlSeconds ?? config.AUTH_ACCESS_TOKEN_TTL_SECONDS;
+    this.refreshTtlSeconds = options?.refreshTtlSeconds ?? config.AUTH_REFRESH_TOKEN_TTL_SECONDS;
+    this.sessionMaxTtlSeconds = options?.sessionMaxTtlSeconds ?? config.AUTH_SESSION_MAX_TTL_SECONDS;
   }
 
   /**

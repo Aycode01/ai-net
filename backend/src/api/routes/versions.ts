@@ -10,7 +10,7 @@
  * information available as structured JSON.
  */
 import { Router, Request, Response } from "express";
-import { getConfig } from "../../config";
+import { config } from "../../config";
 
 export interface VersionEntry {
   version: string;
@@ -25,38 +25,35 @@ export interface VersionEntry {
   migratesTo?: string;
 }
 
-function getVersionManifest(): VersionEntry[] {
-  const sunsetAt = getConfig().API_V1_SUNSET_DATE ?? "2027-01-01";
-  return [
-    {
-      version: "1.0",
-      status: "deprecated",
-      deprecatedAt: "2026-01-01",
-      sunsetAt,
-      breakingChanges: [],
-      migratesTo: "2.0",
-    },
-    {
-      version: "1.1",
-      status: "deprecated",
-      deprecatedAt: "2026-06-01",
-      sunsetAt,
-      breakingChanges: [
-        "Task response envelope changed: `result` moved to `data.result`.",
-      ],
-      migratesTo: "2.0",
-    },
-    {
-      version: "2.0",
-      status: "current",
-      breakingChanges: [
-        "Error responses now include a machine-readable `code` field.",
-        "Paginated list endpoints return `{ data, pagination }` instead of a bare array.",
-        "Agent registration requires `capabilities` array (was optional in v1).",
-      ],
-    },
-  ];
-}
+const VERSION_MANIFEST: VersionEntry[] = [
+  {
+    version: "1.0",
+    status: "deprecated",
+    deprecatedAt: "2026-01-01",
+    sunsetAt: config.API_V1_SUNSET_DATE ?? "2027-01-01",
+    breakingChanges: [],
+    migratesTo: "2.0",
+  },
+  {
+    version: "1.1",
+    status: "deprecated",
+    deprecatedAt: "2026-06-01",
+    sunsetAt: config.API_V1_SUNSET_DATE ?? "2027-01-01",
+    breakingChanges: [
+      "Task response envelope changed: `result` moved to `data.result`.",
+    ],
+    migratesTo: "2.0",
+  },
+  {
+    version: "2.0",
+    status: "current",
+    breakingChanges: [
+      "Error responses now include a machine-readable `code` field.",
+      "Paginated list endpoints return `{ data, pagination }` instead of a bare array.",
+      "Agent registration requires `capabilities` array (was optional in v1).",
+    ],
+  },
+];
 
 export function createVersionsRouter(): Router {
   const router = Router();
@@ -66,7 +63,7 @@ export function createVersionsRouter(): Router {
     const current = manifest.find((v) => v.status === "current");
     res.json({
       latestVersion: current?.version ?? "2.0",
-      defaultVersion: getConfig().API_DEFAULT_VERSION,
+      defaultVersion: config.API_DEFAULT_VERSION,
       policy: {
         deprecationNoticeMonths: 6,
         sunsetGracePeriodMonths: 12,

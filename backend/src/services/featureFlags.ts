@@ -19,6 +19,7 @@ export const KNOWN_FLAGS = [
   "experimental_agents",
   "quality_scorer",
   "reconciliation",
+  "agent_ownership_proof",
 ] as const;
 
 export type FeatureFlag = (typeof KNOWN_FLAGS)[number];
@@ -30,6 +31,10 @@ const DEFAULTS: Record<FeatureFlag, boolean> = {
   experimental_agents: false,
   quality_scorer: true,
   reconciliation: true,
+  // Enforced by default. Setting this to `false` re-opens the *unsigned*
+  // register/heartbeat path so existing agent clients keep working during a
+  // migration window — see AGENT_AUTH_SUNSET_DATE for the cutover date.
+  agent_ownership_proof: true,
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────

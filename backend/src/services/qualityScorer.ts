@@ -33,6 +33,7 @@ import { CodingOutputSchema } from '../agents/coding/coding';
 import { createTaskDb, getTaskDb } from '../db/tasks';
 import { createAgentDb, getAgentDb } from '../db/agents';
 import { createLogger } from '../utils/logger';
+import { config } from '../config';
 
 const log = createLogger({ component: 'QualityScorer' });
 
@@ -50,23 +51,17 @@ import { getConfig } from '../config';
 
 /**
  * Load quality scorer configuration from config.
+ * Called lazily so config changes (env vars) take effect without redeploy.
+ * Falls back to defaults when env vars are not set.
  */
 export function loadScorerConfig(): QualityScorerConfig {
-  const cfg = getConfig();
-  const weightComp = cfg.QUALITY_WEIGHT_COMPLETENESS;
-  const weightRel = cfg.QUALITY_WEIGHT_RELEVANCE;
-  const weightFmt = cfg.QUALITY_WEIGHT_FORMAT;
-  const reviewThreshold = cfg.QUALITY_REVIEW_THRESHOLD;
-  const percentileEnabled = cfg.QUALITY_PERCENTILE_ENABLED;
-  const percentileMinSamples = cfg.QUALITY_PERCENTILE_MIN_SAMPLES;
-
   return {
-    weightCompleteness: clamp(weightComp, 0, 1),
-    weightRelevance: clamp(weightRel, 0, 1),
-    weightFormat: clamp(weightFmt, 0, 1),
-    reviewThreshold: clamp(reviewThreshold, 0, 100),
-    percentileEnabled,
-    percentileMinSamples,
+    weightCompleteness: config.QUALITY_WEIGHT_COMPLETENESS,
+    weightRelevance: config.QUALITY_WEIGHT_RELEVANCE,
+    weightFormat: config.QUALITY_WEIGHT_FORMAT,
+    reviewThreshold: config.QUALITY_REVIEW_THRESHOLD,
+    percentileEnabled: config.QUALITY_PERCENTILE_ENABLED,
+    percentileMinSamples: config.QUALITY_PERCENTILE_MIN_SAMPLES,
   };
 }
 

@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 8,
+    "address": 9,
     "nonce": 0
   },
   "auth": [
@@ -95,6 +95,7 @@
         }
       ]
     ],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
@@ -579,7 +580,7 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "OracleManager"
+                              "symbol": "Paused"
                             }
                           ]
                         },

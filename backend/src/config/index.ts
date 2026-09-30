@@ -3,6 +3,31 @@ import { z } from "zod";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require("../../package.json");
 
+/**
+ * Reject known placeholder values for secret-bearing configuration keys.
+ * This prevents accidental deployment with placeholder values from .env.example.
+ */
+function rejectPlaceholder(value: string, ctx: z.RefinementCtx): void {
+  const lowerValue = value.toLowerCase();
+  const placeholderPatterns = [
+    /^your_.*_here$/,
+    /^test-.*$/,
+    /^change-in-production$/,
+    /^dev-.*$/,
+    /^default-.*$/,
+  ];
+
+  for (const pattern of placeholderPatterns) {
+    if (pattern.test(lowerValue)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Value "${value}" appears to be a placeholder. Please provide a real secret value.`,
+      });
+      return;
+    }
+  }
+}
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3001),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -34,8 +59,8 @@ const envSchema = z.object({
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required").default("./data/ai-net.db"),
   DB_MIGRATIONS_DIR: z.string().optional(),
-  STELLAR_COORDINATOR_SECRET: z.string().optional(),
-  STELLAR_TEST_SECRET: z.string().optional(),
+  STELLAR_COORDINATOR_SECRET: z.string().optional().superRefine(rejectPlaceholder),
+  STELLAR_TEST_SECRET: z.string().optional().superRefine(rejectPlaceholder),
   ALLOWED_ORIGINS: z.string().default("http://localhost:3000"),
   NPM_PACKAGE_VERSION: z.string().default(pkg.version ?? "0.1.0"),
   GRACEFUL_SHUTDOWN_TIMEOUT: z.coerce.number().int().positive().default(30),
@@ -115,8 +140,37 @@ const envSchema = z.object({
     .transform((v) => v === "true")
     .default("true"),
 
+  // ── Idempotency store (Issue #657) ───────────────────────────────────────────
+  /** How long completed idempotency keys are retained for replay. Default: 24 h. */
   IDEMPOTENCY_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  /**
+   * How long an in-flight idempotency reservation is honoured before it is
+   * treated as abandoned and the key becomes reusable. Kept short so a handler
+   * that dies without releasing its slot does not block the key for a full day.
+   */
+  IDEMPOTENCY_PENDING_TTL_MS: z.coerce.number().int().positive().default(300_000),
+  /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
   IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
+
+  /** Express trusted proxy policy: none, a hop count, or trusted IP/CIDR ranges. */
+  TRUST_PROXY: z
+    .string()
+    .trim()
+    .default("none")
+    .transform((value): boolean | number | string => {
+      if (
+        !value ||
+        value.toLowerCase() === "none" ||
+        value.toLowerCase() === "false"
+      ) {
+        return false;
+      }
+      if (/^\d+$/.test(value)) {
+        const hopCount = Number(value);
+        return Number.isSafeInteger(hopCount) ? hopCount : value;
+      }
+      return value;
+    }),
 
   WS_MAX_CONNECTIONS_PER_CLIENT: z.coerce.number().int().positive().default(5),
   WS_MAX_MESSAGES_PER_MINUTE: z.coerce.number().int().positive().default(100),
@@ -128,49 +182,70 @@ const envSchema = z.object({
   METRICS_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   METRICS_MAX_SAMPLES: z.coerce.number().int().positive().default(1_000),
 
-  AUTH_JWT_SECRET: z.string().default("ai-net-default-auth-secret-change-in-production"),
+  // ── Authentication & Session Security ───────────────────────────────────────
+  /** JWT secret key used to sign and verify access tokens. */
+  AUTH_JWT_SECRET: z
+    .string()
+    .min(32, "AUTH_JWT_SECRET must be at least 32 characters")
+    .superRefine(rejectPlaceholder),
+  /** Access token validity in seconds. Default: 900 (15 min). */
   AUTH_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   AUTH_REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(604_800),
   AUTH_SESSION_MAX_TTL_SECONDS: z.coerce.number().int().positive().default(2_592_000),
 
-  AI_NET_READ_ONLY: z
-    .enum(["true", "false"])
-    .transform((v) => v === "true")
-    .default("false"),
-  AI_NET_READ_ONLY_REASON: z.string().optional(),
-  ADMIN_AUDIT_DB_PATH: z.string().optional(),
-  ADMIN_BACKUP_DIR: z.string().optional(),
-
+  // ── Quality Scorer Configuration ─────────────────────────────────────────────
+  /** Weight for completeness score in quality calculation. Default: 0.4 */
   QUALITY_WEIGHT_COMPLETENESS: z.coerce.number().min(0).max(1).default(0.4),
+  /** Weight for relevance score in quality calculation. Default: 0.3 */
   QUALITY_WEIGHT_RELEVANCE: z.coerce.number().min(0).max(1).default(0.3),
+  /** Weight for format score in quality calculation. Default: 0.3 */
   QUALITY_WEIGHT_FORMAT: z.coerce.number().min(0).max(1).default(0.3),
-  QUALITY_REVIEW_THRESHOLD: z.coerce.number().min(0).max(100).default(60),
-  QUALITY_PERCENTILE_ENABLED: z
-    .enum(["true", "false"])
-    .transform((v) => v === "true")
-    .default("false"),
+  /** Threshold for requiring manual review. Default: 60 */
+  QUALITY_REVIEW_THRESHOLD: z.coerce.number().int().min(0).max(100).default(60),
+  /** Enable percentile-based quality scoring. Default: false */
+  QUALITY_PERCENTILE_ENABLED: z.enum(["true", "false"]).transform((v) => v === "true").default("false"),
+  /** Minimum samples required for percentile calculation. Default: 10 */
   QUALITY_PERCENTILE_MIN_SAMPLES: z.coerce.number().int().positive().default(10),
 
-  FEATURE_STREAMING_RESPONSES: z
-    .enum(["true", "false", "1", "0"])
-    .transform((v) => v === "true" || v === "1")
-    .optional(),
-  FEATURE_DAG_PREVIEW: z
-    .enum(["true", "false", "1", "0"])
-    .transform((v) => v === "true" || v === "1")
-    .optional(),
-  FEATURE_EXPERIMENTAL_AGENTS: z
-    .enum(["true", "false", "1", "0"])
-    .transform((v) => v === "true" || v === "1")
-    .optional(),
-  FEATURE_QUALITY_SCORER: z
-    .enum(["true", "false", "1", "0"])
-    .transform((v) => v === "true" || v === "1")
-    .optional(),
-  FEATURE_RECONCILIATION: z
-    .enum(["true", "false", "1", "0"])
-    .transform((v) => v === "true" || v === "1")
-    .optional(),
+  // ── Admin Control Configuration ─────────────────────────────────────────────
+  /** Enable read-only mode for the API. Default: false */
+  AI_NET_READ_ONLY: z.enum(["true", "false"]).transform((v) => v === "true").default("false"),
+  /** Reason for read-only mode. Optional. */
+  AI_NET_READ_ONLY_REASON: z.string().optional(),
+  /** Path to admin audit database. Default: ./data/admin-audit.db */
+  ADMIN_AUDIT_DB_PATH: z.string().default("./data/admin-audit.db"),
+  /** Directory for admin backups. Default: ./data/backups/admin */
+  ADMIN_BACKUP_DIR: z.string().default("./data/backups/admin"),
+
+  // ── Agent Watchdog Configuration ──────────────────────────────────────────────
+  /** Agent heartbeat watchdog: grace period before eviction (Issue #379). */
+  AGENT_WATCHDOG_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  AGENT_WATCHDOG_GRACE_MINUTES: z.coerce.number().int().positive().default(10),
+
+  // ── Idempotency Store Configuration (Issue #657) ────────────────────────────
+  /** How long idempotency keys are retained before they can be replayed. Default: 24 h. */
+  IDEMPOTENCY_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
+  IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
+
+  // ── Rate Limit Configuration ─────────────────────────────────────────────────
+  /** Per-route-group limits (token-bucket, per IP, rolling window) */
+  RATE_LIMIT_PUBLIC_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_PUBLIC_MAX_REQUESTS: z.coerce.number().int().positive().default(120),
+  RATE_LIMIT_AUTHED_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_AUTHED_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
+  RATE_LIMIT_ADMIN_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_ADMIN_MAX_REQUESTS: z.coerce.number().int().positive().default(20),
+
+  // ── Venice Cache Configuration ───────────────────────────────────────────────
+  /** Logical model version used in Venice response cache keys. */
+  VENICE_MODEL_VERSION: z.string().default("v1"),
+  /** Default Venice response cache TTL in milliseconds. */
+  VENICE_CACHE_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  /** Shorter Venice cache TTL for coding-agent responses in milliseconds. */
+  VENICE_CACHE_CODING_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
+  /** Similarity threshold for semantic Venice cache reuse. */
+  VENICE_CACHE_SIMILARITY_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
 });
 
 export type RawConfig = z.infer<typeof envSchema>;
@@ -197,15 +272,27 @@ function withRuntimeDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const testDefaults =
     nodeEnv === "test"
       ? {
-          DATABASE_URL: dbUrl ?? ":memory:",
-          EVENT_STORE_PATH: env.EVENT_STORE_PATH ?? ":memory:",
-          VENICE_API_KEY: env.VENICE_API_KEY ?? "test-venice-key",
-          LOG_LEVEL: env.LOG_LEVEL ?? "silent",
+          DATABASE_URL: ":memory:",
+          // Keep the event store off the filesystem under test, mirroring
+          // DATABASE_URL. Tests that need real persistence pass an explicit
+          // path to createEventStore() instead.
+          EVENT_STORE_PATH: ":memory:",
+          VENICE_API_KEY: "test-venice-key",
+          LOG_LEVEL: "silent",
+          AUTH_JWT_SECRET: "test-jwt-secret-for-development-only",
+        }
+      : {};
+
+  const devDefaults =
+    nodeEnv === "development"
+      ? {
+          AUTH_JWT_SECRET: env.AUTH_JWT_SECRET ?? "dev-jwt-secret-change-in-production",
         }
       : {};
 
   return {
     ...testDefaults,
+    ...devDefaults,
     ...env,
     DATABASE_URL: dbUrl ?? testDefaults.DATABASE_URL ?? "./data/ai-net.db",
     STELLAR_HORIZON_URL: env.STELLAR_HORIZON_URL ?? env.STELLAR_HORIZON ?? "https://horizon-testnet.stellar.org",
@@ -231,6 +318,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   if (!result.success) {
     throw new ConfigValidationError(result.error.issues);
+  }
+
+  const nodeEnv = result.data.NODE_ENV;
+
+  // Fail closed in production: AUTH_JWT_SECRET must be explicitly set
+  if (nodeEnv === "production") {
+    const providedSecret = env.AUTH_JWT_SECRET;
+    if (!providedSecret) {
+      throw new ConfigValidationError([
+        {
+          code: z.ZodIssueCode.custom,
+          path: ["AUTH_JWT_SECRET"],
+          message: "AUTH_JWT_SECRET is required in production",
+        },
+      ]);
+    }
+  }
+
+  // Warn in development if using default secret
+  if (nodeEnv === "development") {
+    const secret = result.data.AUTH_JWT_SECRET;
+    if (secret === "dev-jwt-secret-change-in-production") {
+      console.warn(
+        "[config] WARNING: Using default AUTH_JWT_SECRET in development. " +
+          "Set AUTH_JWT_SECRET to a secure random value in production."
+      );
+    }
   }
 
   cachedConfig = {

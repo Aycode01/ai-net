@@ -41,12 +41,13 @@ pub fn execute_post_upgrade_migration(
 
     // Execute data transformations
     for transformation in migration_plan.data_transformations.iter() {
-        let gas_before = env.ledger().protocol_version() as u64; // Placeholder for gas tracking
-
         let items_in_batch = execute_data_transformation(env, &transformation)?;
         processed_items += items_in_batch;
 
-        let gas_used = env.ledger().protocol_version() as u64 - gas_before; // Placeholder
+        // Soroban exposes no in-contract gas meter, so charge each batch with
+        // the same cost model `estimate_migration_gas` uses for proposals.
+        let gas_used = crate::GAS_MIGRATION_STEP_OVERHEAD
+            + crate::GAS_MIGRATION_PER_ITEM * items_in_batch as u64;
         total_gas_used += gas_used;
 
         // Emit progress event
@@ -76,14 +77,12 @@ pub fn execute_post_upgrade_migration(
             soroban_sdk::symbol_short!("complete"),
         ),
         MigrationCompleteEvent {
-            version: String::from_str(env, "migrated"), // Would be actual version
-            items_migrated: processed_items,
-            total_gas_used,
-            success: true,
+            version: version.clone(),
+            delegated_transformations: migration_plan.data_transformations.clone(),
+            delegated_validations: migration_plan.post_migration_validations.clone(),
+            estimated_items: migration_plan.estimated_items,
         },
     );
-
-    Ok(())
 }
 
 /// Execute a single validation check
@@ -99,77 +98,6 @@ fn execute_validation_check(env: &Env, check_name: &String) -> Result<String, Up
     } else {
         Ok(String::from_str(env, "Unknown check"))
     }
-}
-
-/// Execute a data transformation step
-fn execute_data_transformation(env: &Env, transformation: &String) -> Result<u32, UpgradeError> {
-    if str_eq(transformation, "migrate_agent_records") {
-        migrate_agent_records(env)
-    } else if str_eq(transformation, "update_storage_keys") {
-        update_storage_keys(env)
-    } else if str_eq(transformation, "convert_metadata_format") {
-        convert_metadata_format(env)
-    } else if str_eq(transformation, "rebuild_indexes") {
-        rebuild_indexes(env)
-    } else {
-        Ok(0)
-    }
-}
-
-/// Execute post-migration validation
-fn execute_post_migration_validation(_env: &Env, _validation: &String) -> Result<(), UpgradeError> {
-    // Validations ("verify_data_integrity", "test_contract_functionality",
-    // "validate_storage_consistency", "check_index_completeness", etc.) pass by default.
-    Ok(())
-}
-
-// ─── Specific Migration Functions ────────────────────────────────────────────
-
-fn migrate_agent_records(_env: &Env) -> Result<u32, UpgradeError> {
-    // Simulate migrating agent records
-    // In a real implementation, this would:
-    // 1. Read existing agent records
-    // 2. Transform them to new format
-    // 3. Write them back to storage
-    // 4. Clean up old format data if needed
-
-    // For simulation, assume we processed 10 agent records
-    Ok(10)
-}
-
-fn update_storage_keys(_env: &Env) -> Result<u32, UpgradeError> {
-    // Simulate updating storage key formats
-    // This might involve:
-    // 1. Reading data from old key format
-    // 2. Writing data to new key format
-    // 3. Removing old keys
-
-    // For simulation, assume we updated 25 storage keys
-    Ok(25)
-}
-
-fn convert_metadata_format(_env: &Env) -> Result<u32, UpgradeError> {
-    // Simulate converting metadata formats
-    // This could involve:
-    // 1. Reading existing metadata
-    // 2. Converting to new schema
-    // 3. Validating converted data
-    // 4. Storing in new format
-
-    // For simulation, assume we converted 15 metadata entries
-    Ok(15)
-}
-
-fn rebuild_indexes(_env: &Env) -> Result<u32, UpgradeError> {
-    // Simulate rebuilding capability indexes
-    // This might involve:
-    // 1. Clearing existing indexes
-    // 2. Reading all agent records
-    // 3. Rebuilding indexes from current data
-    // 4. Verifying index completeness
-
-    // For simulation, assume we rebuilt 5 indexes
-    Ok(5)
 }
 
 /// Helper function to check if a migration is reversible

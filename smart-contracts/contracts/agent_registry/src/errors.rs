@@ -73,6 +73,8 @@ pub enum Error {
     MultisigAlreadyConfigured = 36,
     /// Bond cannot be withdrawn or modified while a dispute is unresolved.
     DisputePending = 37,
+    /// The Wasm swap is unavailable in this build; the upgrade was not applied.
+    SwapUnavailable = 38,
 }
 
 impl Error {
@@ -116,6 +118,7 @@ impl Error {
             35 => Some(Error::InvalidPrice),
             36 => Some(Error::MultisigAlreadyConfigured),
             37 => Some(Error::DisputePending),
+            38 => Some(Error::SwapUnavailable),
             _ => None,
         }
     }

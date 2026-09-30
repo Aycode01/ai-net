@@ -8,13 +8,19 @@
 
 import { z } from "zod";
 import { idParamSchema, sortSchema, withPagination } from "./common";
-import { getConfig } from "../config";
+import { config } from "../config";
 
 /**
  * Prompt ceiling, in characters.
+ *
+ * Bounded because Venice AI is billed per token: an unbounded prompt is an
+ * unbounded invoice (issue #181).
+ *
+ * Read from the config at module load, matching the behaviour of the
+ * route modules this schema replaces. Tests that need a different ceiling must
+ * set the variable before importing, or use `jest.resetModules()`.
  */
-export const getMaxPromptLength = (): number => getConfig().MAX_PROMPT_LENGTH;
-export const MAX_PROMPT_LENGTH = 10_000;
+export const MAX_PROMPT_LENGTH = config.MAX_PROMPT_LENGTH;
 
 /** Task lifecycle states a caller may filter on. */
 export const taskStatusSchema = z.enum([

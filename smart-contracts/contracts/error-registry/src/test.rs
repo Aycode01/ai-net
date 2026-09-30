@@ -421,3 +421,22 @@ fn cleanup_still_works_when_paused() {
     let stats = client.cleanup_expired_errors(&0);
     assert_eq!(stats.removed, 1);
 }
+
+#[test]
+fn uninitialized_contract_returns_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ErrorRegistryContract, ());
+    let client = ErrorRegistryContractClient::new(&env, &id);
+
+    let res = client.try_pause();
+    assert_eq!(res, Err(Ok(Error::NotInitialized)));
+}
+
+#[test]
+fn double_initialize_returns_already_initialized() {
+    let (_, client) = setup(1_000);
+    let admin = Address::generate(&client.env);
+    let res = client.try_initialize(&admin);
+    assert_eq!(res, Err(Ok(Error::AlreadyInitialized)));
+}
