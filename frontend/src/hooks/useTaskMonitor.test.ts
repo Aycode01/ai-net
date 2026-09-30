@@ -4,17 +4,18 @@ import type { DAGNode, TaskResponse } from '../types/api';
 import { apiClient } from '../services/api';
 import { useTaskMonitor } from './useTaskMonitor';
 
-const webSocketOptions = vi.hoisted(() => vi.fn());
+const reconnectStream = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/api', () => ({
   apiClient: { get: vi.fn() },
 }));
 
 vi.mock('./useTaskWebSocket', () => ({
-  useTaskWebSocket: (options: unknown) => {
-    webSocketOptions(options);
-    return { isConnected: false, status: 'disconnected' };
-  },
+  useTaskWebSocket: () => ({
+    isConnected: false,
+    status: 'disconnected',
+    reconnect: reconnectStream,
+  }),
 }));
 
 vi.mock('./useWallet', () => ({ useWallet: () => ({ publicKey: 'GCONNECTEDWALLET' }) }));
@@ -43,22 +44,16 @@ const task = (dag: DAGNode[]): TaskResponse => ({
 describe('useTaskMonitor initial payments', () => {
   beforeEach(() => {
     getTask.mockReset();
-    webSocketOptions.mockClear();
+    reconnectStream.mockReset();
   });
 
-  it('passes the connected wallet key to the authenticated task stream', async () => {
+  it('exposes the WebSocket manual-reconnect action to the task page', async () => {
     getTask.mockResolvedValue(task([]));
-    renderHook(() => useTaskMonitor('task-1'));
+    const { result } = renderHook(() => useTaskMonitor('task-1'));
 
-    await waitFor(() => expect(getTask).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.loading).toBe(false));
 
-    expect(webSocketOptions).toHaveBeenCalledWith(
-      expect.objectContaining({
-        taskId: 'task-1',
-        walletPublicKey: 'GCONNECTEDWALLET',
-        requireAuthentication: true,
-      })
-    );
+    expect(result.current.reconnectStream).toBe(reconnectStream);
   });
 
   it('builds a timeline entry from a completed node carrying a payment result', async () => {

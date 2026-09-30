@@ -132,7 +132,7 @@ const DesignRenderer: React.FC<Props> = ({ result, searchQuery }) => {
   return (
     <div className="design-renderer" id="design-output">
       {/* Design Outputs & Wireframes Gallery */}
-      {details.images.length > 0 && (
+      {filteredImages.length > 0 && (
         <div style={{ marginBottom: '32px' }} data-testid="design-images-gallery">
           <h4 style={{ marginBottom: '14px', color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 600 }}>
             {t('agent.design.outputsTitle', { total: filteredImages.length })}

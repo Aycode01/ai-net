@@ -61,7 +61,11 @@ export const useTaskMonitor = (taskId: string | undefined) => {
   );
 
   // WebSocket connection
-  const { isConnected, status: wsStatus } = useTaskWebSocket({
+  const {
+    isConnected,
+    status: wsStatus,
+    reconnect: reconnectStream,
+  } = useTaskWebSocket({
     taskId: taskId || '',
     onMessage: handleWebSocketMessage,
     walletPublicKey: publicKey ?? undefined,
@@ -117,6 +121,7 @@ export const useTaskMonitor = (taskId: string | undefined) => {
     loading,
     error,
     wsStatus,
+    reconnectStream,
     nodes: nodeState.nodes,
     payments: paymentState.payments,
     outputs: outputState.outputs,

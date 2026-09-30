@@ -85,7 +85,8 @@ export const TaskDetailSkeleton: React.FC = () => {
 const TaskDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
-  const { task, loading, error, wsStatus, nodes, payments, outputs, refetch } = useTaskMonitor(id);
+  const { task, loading, error, wsStatus, reconnectStream, nodes, payments, outputs, refetch } =
+    useTaskMonitor(id);
 
   // Token cost (Issue #390). Fetched separately from the task monitor because
   // the backend owns the ledger: while the task runs, cost only exists in the
@@ -304,6 +305,17 @@ const TaskDetailPage: React.FC = () => {
             >
               {t('page.task.wsStatus', { status: wsBadge.label })}
             </span>
+            {(wsStatus === 'disconnected' || wsStatus === 'error') && (
+              <button
+                type="button"
+                onClick={reconnectStream}
+                className="inline-flex items-center gap-1 rounded-md border border-[var(--border-strong)] px-2 py-1 text-xs hover:bg-[var(--surface-muted)]"
+                aria-label={t('page.task.ws.reconnect')}
+              >
+                <RefreshCw size={12} />
+                {t('page.task.ws.reconnect')}
+              </button>
+            )}
           </div>
           <p className="text-xs text-[var(--text-secondary)] font-mono mt-1">
             {t('page.task.taskId', { id })}

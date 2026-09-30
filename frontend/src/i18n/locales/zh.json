@@ -1,4 +1,8 @@
 {
+  "page.agents.pagination": "智能体分页",
+  "page.agents.pageFilters": "筛选和排序适用于当前页。",
+  "page.agents.firstPage": "第一页",
+  "page.agents.nextPage": "下一页",
   "nav.dashboard": "仪表板",
   "nav.agents": "智能体",
   "nav.agentRegistry": "智能体注册表",
@@ -225,7 +229,7 @@
   "page.task.ws.connected": "已连接",
   "page.task.ws.connecting": "连接中",
   "page.task.ws.disconnected": "已断开",
-  "page.task.ws.authenticationRequired": "请连接钱包以验证身份",
+  "page.task.ws.reconnect": "重新连接实时更新",
   "page.task.taskId": "任务 ID：{{id}}",
   "page.task.sync": "同步",
   "page.task.dagTitle": "执行 DAG 状态",

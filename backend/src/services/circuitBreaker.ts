@@ -15,6 +15,7 @@
  */
 
 export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+export { withFallback, ResponseCache, type FallbackOptions } from './gracefulDegradation.js';
 
 export interface CircuitBreakerOptions {
   /** Service name — used in event payloads and error messages. */

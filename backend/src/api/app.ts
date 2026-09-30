@@ -38,7 +38,7 @@ import { metricsRouter } from "./routes/metrics";
 import { createStatsRouter } from "./routes/stats";
 import { createReconciliationRouter, type ReconciliationRouterOptions } from "./routes/reconciliation";
 import { rateLimitMiddleware, registerRateLimitMiddleware, publicLimiter, authedLimiter, adminLimiter } from "./middleware/rateLimit";
-import { authMiddleware, adminAuthMiddleware } from "./middleware/auth";
+import { adminAuthMiddleware } from "./middleware/auth";
 import { createCorsMiddleware } from "./middleware/cors";
 import { compressionMiddleware } from "./middleware/compression";
 import { errorHandler } from "./middleware/errorHandler";
@@ -132,7 +132,7 @@ export function createApp(opts: AppOptions = {}): {
   const logger = createLogger({ module: "api-app" });
   const app = express();
   const httpServer = createServer(app);
-  const eventStore = opts.eventStore ?? eventBus.store;
+  const eventStore = opts.eventStore ?? getEventStore();
 
   app.use(express.json());
   app.use((_req, res, next) => {

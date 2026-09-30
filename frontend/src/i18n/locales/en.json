@@ -1,4 +1,8 @@
 {
+  "page.agents.pagination": "Agent pages",
+  "page.agents.pageFilters": "Filters and sorting apply to this page.",
+  "page.agents.firstPage": "First page",
+  "page.agents.nextPage": "Next page",
   "nav.dashboard": "Dashboard",
   "nav.agents": "Agents",
   "nav.agentRegistry": "Agent Registry",
@@ -225,7 +229,7 @@
   "page.task.ws.connected": "connected",
   "page.task.ws.connecting": "connecting",
   "page.task.ws.disconnected": "disconnected",
-  "page.task.ws.authenticationRequired": "connect your wallet to authenticate",
+  "page.task.ws.reconnect": "Reconnect live updates",
   "page.task.taskId": "Task ID: {{id}}",
   "page.task.sync": "Sync",
   "page.task.dagTitle": "Execution DAG Status",
