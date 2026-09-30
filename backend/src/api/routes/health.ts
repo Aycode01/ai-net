@@ -1,23 +1,19 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, type RequestHandler } from "express";
 import { getConfig } from "../../config";
 import { adminAuthMiddleware } from "../middleware/auth";
 import { metricsService } from "../../services/metrics";
 import { tracingService } from "../../services/tracing";
+import { getAllCircuitBreakerStatuses } from "../../services/circuitBreaker.js";
 
 const router = Router();
 const startTime = Date.now();
 
-function cachedRoute(group: "health"): RequestHandler {
-  let middleware: RequestHandler | null = null;
-  return (req, res, next) => {
-    if (!middleware) {
-      middleware = cacheMiddleware({ ttl: ttlForRoute(group) });
-    }
-    return middleware(req, res, next);
-  };
+/** Pass-through cache wrapper (placeholder for production cache layer). */
+function cachedRoute(_group: string): RequestHandler {
+  return (_req, _res, next) => next();
 }
 
-router.get("/", cachedRoute("health"), (_req: Request, res: Response) => {
+const livenessHandler: RequestHandler = (_req: Request, res: Response) => {
   const config = getConfig();
   res.json({
     status: "ok",
@@ -25,8 +21,25 @@ router.get("/", cachedRoute("health"), (_req: Request, res: Response) => {
     version: config.NPM_PACKAGE_VERSION,
     stellarNetwork: config.STELLAR_NETWORK,
   });
-}
+};
 
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: Liveness and process metadata
+ *     operationId: getHealth
+ *     description: Process-only liveness probe reporting uptime, build version and the configured Stellar network. Performs no dependency checks.
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Service is up
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/HealthStatus'
+ */
 router.get("/", livenessHandler);
 
 /**
@@ -44,11 +57,35 @@ router.get("/", livenessHandler);
  */
 router.get("/live", livenessHandler);
 
+/**
+ * @openapi
+ * /health/deep:
+ *   get:
+ *     summary: Dependency health check
+ *     operationId: getDeepHealth
+ *     description: Probes the Venice AI API and the configured Stellar Horizon endpoint, reporting 503 when either is unreachable.
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: All dependencies reachable
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DeepHealthStatus'
+ *       503:
+ *         description: At least one dependency is unreachable
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DeepHealthStatus'
+ */
 router.get("/deep", cachedRoute("health"), async (_req: Request, res: Response) => {
   const config = getConfig();
+  const timeoutMs = config.HEALTH_PROBE_TIMEOUT_MS;
   const [veniceStatus, horizonStatus] = await Promise.all([
-    checkVenice(config.VENICE_API_KEY),
-    checkHorizon(config.STELLAR_HORIZON_URL),
+    checkVenice(config.VENICE_API_KEY, timeoutMs),
+    checkHorizon(config.STELLAR_HORIZON_URL, timeoutMs),
   ]);
 
   const allOk = veniceStatus === "ok" && horizonStatus === "ok";
@@ -63,6 +100,33 @@ router.get("/deep", cachedRoute("health"), async (_req: Request, res: Response) 
   });
 });
 
+/**
+ * @openapi
+ * /health/ready:
+ *   get:
+ *     summary: Readiness check
+ *     operationId: getReadiness
+ *     description: >
+ *       Verifies the task, payment and job-queue databases, the Venice AI and
+ *       Horizon dependencies, and the WebSocket listener. Returns 500 when any
+ *       check reports `error`. A WebSocket probe of `unknown` does not fail
+ *       readiness, because the stream layer is optional.
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: All checks passed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ReadinessStatus'
+ *       500:
+ *         description: One or more checks failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ReadinessStatus'
+ */
 router.get("/ready", async (_req: Request, res: Response) => {
   const checks: Record<string, "ok" | "error" | "unknown"> = {
     tasks: "ok",
@@ -83,8 +147,6 @@ router.get("/ready", async (_req: Request, res: Response) => {
       taskDb.prepare("SELECT 1").get();
     } catch {
       checks.tasks = "error";
-    } finally {
-      (tasksModule.closeTaskDb as Function)();
     }
 
     try {
@@ -92,17 +154,13 @@ router.get("/ready", async (_req: Request, res: Response) => {
       paymentDb.prepare("SELECT 1").get();
     } catch {
       checks.payments = "error";
-    } finally {
-      (paymentsModule.closeDb as Function)();
     }
 
     try {
       const jobDb = (queueModule.getJobDb as Function)();
       jobDb.prepare("SELECT 1").get();
-    } catch (error) {
-      (checks as any).queue = "error";
-    } finally {
-      (queueModule.closeJobDb as Function)();
+    } catch {
+      checks.queue = "error";
     }
   } catch (error) {
     res.status(500).json({ status: "error", checks, error: String(error) });
@@ -135,6 +193,29 @@ router.get("/ready", async (_req: Request, res: Response) => {
   res.status(ready ? 200 : 500).json({ status: ready ? "ok" : "error", checks });
 });
 
+/**
+ * @openapi
+ * /health/dashboard:
+ *   get:
+ *     summary: Operational metrics dashboard
+ *     operationId: getHealthDashboard
+ *     description: Aggregated operational snapshot (queue depth, latency, WebSocket connections). Pass `?refresh=true` to bypass the cache.
+ *     tags: [Health, Admin]
+ *     security:
+ *       - adminApiKey: []
+ *     parameters:
+ *       - in: query
+ *         name: refresh
+ *         schema: { type: string, enum: ["true", "false"] }
+ *         description: Set to `true` to bypass the cached snapshot
+ *     responses:
+ *       200:
+ *         description: Dashboard snapshot
+ *       401:
+ *         description: Missing or invalid admin API key
+ *       503:
+ *         description: ADMIN_API_KEY is not configured
+ */
 router.get("/dashboard", adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const dashboard = await metricsService.getDashboard(req.query.refresh === "true");
@@ -148,7 +229,33 @@ router.get("/dashboard", adminAuthMiddleware, async (req: Request, res: Response
   }
 });
 
-router.get("/traces/:traceId", (req: Request, res: Response) => {
+/**
+ * @openapi
+ * /health/traces/{traceId}:
+ *   get:
+ *     summary: Retrieve a distributed trace
+ *     operationId: getHealthTrace
+ *     description: Returns the correlated spans recorded for the given traceId.
+ *     tags: [Health, Admin]
+ *     security:
+ *       - adminApiKey: []
+ *     parameters:
+ *       - in: path
+ *         name: traceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Trace identifier (correlationId)
+ *     responses:
+ *       200:
+ *         description: Trace found
+ *       404:
+ *         description: Trace not found
+ *       401:
+ *         description: Missing or invalid admin API key
+ *       503:
+ *         description: ADMIN_API_KEY is not configured
+ */
+router.get("/traces/:traceId", adminAuthMiddleware, (req: Request, res: Response) => {
   const trace = tracingService.getTrace(req.params.traceId);
   if (!trace) {
     res.status(404).json({
@@ -164,7 +271,7 @@ router.get("/traces/:traceId", (req: Request, res: Response) => {
 async function checkVenice(apiKey: string, timeoutMs = 5000): Promise<"ok" | "unreachable"> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch("https://api.venice.ai/api/v1/models", {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: controller.signal,
@@ -179,7 +286,7 @@ async function checkVenice(apiKey: string, timeoutMs = 5000): Promise<"ok" | "un
 async function checkHorizon(url: string, timeoutMs = 5000): Promise<"ok" | "unreachable"> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
     return response.ok ? "ok" : "unreachable";
@@ -187,6 +294,28 @@ async function checkHorizon(url: string, timeoutMs = 5000): Promise<"ok" | "unre
     return "unreachable";
   }
 }
+
+/**
+ * @openapi
+ * /health/circuit-breakers:
+ *   get:
+ *     summary: Circuit breaker status for all external services
+ *     operationId: getCircuitBreakers
+ *     description: Returns the current state of every registered circuit breaker (Venice AI, Stellar Horizon).
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Circuit breaker statuses
+ */
+router.get("/circuit-breakers", (_req: Request, res: Response) => {
+  const breakers = getAllCircuitBreakerStatuses();
+  const anyOpen = breakers.some((b) => b.state === 'OPEN');
+  res.status(anyOpen ? 503 : 200).json({
+    status: anyOpen ? 'degraded' : 'ok',
+    circuitBreakers: breakers,
+  });
+});
 
 export { router as healthRouter };
 export default router;

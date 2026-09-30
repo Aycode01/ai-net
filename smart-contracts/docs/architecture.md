@@ -107,3 +107,42 @@ SDK's own docs note tend to under-count relative to the real wasm32 runtime —
 treat them as directional, not a mainnet fee quote. They're re-measured on
 every `cargo test` run; the test asserts a generous (~10x observed) upper
 bound so a real regression fails CI without pinning brittle exact numbers.
+
+## Storage Layout & Bounds
+
+Below is the canonical storage layout table for each Soroban smart contract, detailing keys, storage tiers, TTL extension policies, and explicit bounds per AGENTS.md requirements.
+
+### `agent_registry`
+| Key | Tier | TTL Strategy | Bound / Limit |
+|---|---|---|---|
+| `DataKey::Admin` | Instance | Contract Lifecycle | 1 Address |
+| `DataKey::Paused` | Instance | Contract Lifecycle | `bool` |
+| `DataKey::MinBond` | Instance | Contract Lifecycle | `i128` |
+| `DataKey::GasConfig` | Instance | Contract Lifecycle | `GasConfig` struct |
+| `DataKey::Agent(Symbol)` | Persistent | Extended on write/read (`TTL_THRESHOLD`=100k, `TTL_EXTEND_TO`=535,680 ledgers) | Single `AgentRecord` |
+| `DataKey::CapabilityIndex(Symbol)` | Persistent | Extended on write/read | Max 500 agents per capability |
+| `DataKey::FrozenAgent(Symbol)` | Persistent | Extended on write | `bool` |
+| `DataKey::BondCooldown(Symbol)` | Persistent | Extended on deregister | 24-hour cooldown |
+
+### `agent_bidding`
+| Key | Tier | TTL Strategy | Bound / Limit |
+|---|---|---|---|
+| `DataKey::Auction(Symbol)` | Persistent | Extended on write | Single `Auction` |
+| `DataKey::Bidders(Symbol)` | Persistent | Extended on write | Max 100 bidders per auction |
+| `DataKey::Bid(Symbol, Address)` | Persistent | Extended on write | Single `SealedBid` |
+| `DataKey::Winner(Symbol)` | Persistent | Extended on write | Single `Address` |
+| `DataKey::Escrow(Symbol)` | Persistent | Extended on write | Single `Escrow` |
+
+### `error-registry`
+| Key | Tier | TTL Strategy | Bound / Limit |
+|---|---|---|---|
+| `DataKey::Record(BytesN<32>)` | Persistent | Application TTL (`expires_at`) + Extended on write/get | Single `ErrorRecord` (Max 90 days) |
+| `DataKey::CodeIndex(u32)` | Persistent | Extended on write | Max 500 error IDs per code |
+| `DataKey::AllErrorIds` | Persistent | Extended on write | Bounded cleanup batch (Max 100 per tx) |
+
+### `error-resolver`
+| Key | Tier | TTL Strategy | Bound / Limit |
+|---|---|---|---|
+| `DataKey::Admin` | Instance | Contract Lifecycle | 1 Address |
+| `DataKey::AuthorizedCallers` | Instance | Contract Lifecycle | Max 32 authorized contracts |
+| `DataKey::AgentErrorCount(Symbol)` | Persistent | Extended on `record_error` | `u32` counter |

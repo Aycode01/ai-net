@@ -5,7 +5,7 @@
 //! callers can branch on the numeric code without coupling to a specific SDK
 //! build.
 //!
-//! The code range used here (`1..=26`) is local to this contract. Codes are
+//! The code range used here (`1..=36`) is local to this contract. Codes are
 //! chosen to read naturally in logs while remaining stable across releases:
 //! **never renumber an existing variant** once the contract is deployed.
 
@@ -50,7 +50,6 @@ pub enum Error {
     WinnerNotDetermined = 16,
     /// The escrow for this auction has already been created.
     EscrowAlreadyCreated = 17,
-
     // ── Added by the front-running / commit-reveal hardening pass (#350) ────
     /// The reveal window has closed; this bid can no longer be revealed.
     RevealPeriodEnded = 18,
@@ -74,15 +73,24 @@ pub enum Error {
     AuctionNotAbortable = 25,
     /// An arithmetic operation overflowed while scoring bids.
     ArithmeticOverflow = 26,
-    AgentNotFound = 27,
-    AgentFrozen = 28,
-    InsufficientBond = 29,
-    AgentDeregistered = 30,
-    AgentNotEligible = 31,
-    AlreadyInitialized = 32,
-    ContractPaused = 33,
-    WinnerCannotClaimRefund = 34,
-    RefundAlreadyClaimed = 35,
-    ClaimWindowExpired = 36,
-    AlreadyRefunded = 37,
+    /// Contract instance has already been initialized.
+    AlreadyInitialized = 27,
+    /// Contract is currently paused.
+    ContractPaused = 28,
+    /// Winner cannot claim refund via bond refund path.
+    WinnerCannotClaimRefund = 29,
+    /// Refund has already been claimed for this bidder.
+    RefundAlreadyClaimed = 30,
+    /// Claim window has expired.
+    ClaimWindowExpired = 31,
+    /// Bond has already been refunded.
+    AlreadyRefunded = 32,
+    /// No payment asset (Stellar Asset Contract) has been configured.
+    AssetNotConfigured = 33,
+    /// The supplied asset or its decimals do not match the configured asset.
+    AssetMismatch = 34,
+    /// An amount is negative or not representable in the asset's decimals.
+    InvalidAmount = 35,
+    /// The escrow has already been released or refunded.
+    EscrowAlreadySettled = 36,
 }

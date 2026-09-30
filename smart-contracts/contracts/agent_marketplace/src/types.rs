@@ -36,7 +36,8 @@ pub struct Booking {
     pub agent_id: Symbol,
     /// Client who booked the service.
     pub client: Address,
-    /// Payment amount held in escrow (stroops).
+    /// Payment amount held in escrow, in units of the payment asset that
+    /// were actually transferred into the contract.
     pub escrow_amount: i128,
     /// Timestamp when booking was created.
     pub created_at: u64,
@@ -94,4 +95,21 @@ pub struct ServiceCompletedEvent {
 pub struct ServiceCancelledEvent {
     pub booking_id: Symbol,
     pub refund_amount: i128,
+}
+
+/// Event data for a booking rating.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServiceRatedEvent {
+    pub booking_id: Symbol,
+    pub agent_id: Symbol,
+    pub rating: u32,
+}
+
+/// Event emitted when admin is transferred.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminChangedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
 }

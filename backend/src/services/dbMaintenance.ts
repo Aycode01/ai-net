@@ -99,6 +99,7 @@ export class DbMaintenanceService {
   private readonly databases: MaintenanceDb[];
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private currentRun: Promise<void> | null = null;
   private metrics: DbMaintenanceMetrics = emptyMetrics();
 
   constructor(databases: MaintenanceDb[], options: DbMaintenanceOptions = {}) {
@@ -114,18 +115,23 @@ export class DbMaintenanceService {
     this.stopped = false;
     fs.mkdirSync(this.backupDir, { recursive: true });
     this.timer = setInterval(() => {
-      void this.run();
+      void this.run().catch((error) => {
+        logger.error({ err: error }, "database maintenance run failed");
+      });
     }, this.intervalMs);
     // Run once (not awaited) shortly after startup for an immediate baseline.
-    void this.run();
+    void this.run().catch((error) => {
+      logger.error({ err: error }, "database maintenance run failed");
+    });
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    await this.currentRun;
   }
 
   getMetrics(): DbMaintenanceMetrics {
@@ -133,8 +139,16 @@ export class DbMaintenanceService {
   }
 
   /** Run a full maintenance pass now. Safe to call more than once. */
-  async run(): Promise<void> {
-    if (this.stopped) return;
+  run(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.currentRun) return this.currentRun;
+    this.currentRun = this.runPass().finally(() => {
+      this.currentRun = null;
+    });
+    return this.currentRun;
+  }
+
+  private async runPass(): Promise<void> {
     const startedAt = Date.now();
     const snapshot = emptyMetrics();
     let backupsDeleted = 0;
@@ -252,7 +266,30 @@ function emptyMetrics(): DbMaintenanceMetrics {
  * databases the application actually persists to.
  */
 export function defaultMaintenanceDatabases(): MaintenanceDb[] {
+  // The event store is included so WAL checkpointing and vacuum cover the table
+  // that grows fastest (issue #383).  It is skipped when configured as
+  // `:memory:`, since there is no file to checkpoint and nothing to back up.
+  const eventStorePath = require("../events/eventStore").getEventStorePath() as string;
+  const eventStoreDb: MaintenanceDb[] =
+    eventStorePath === ":memory:"
+      ? []
+      : [
+          {
+            name: "events",
+            path: eventStorePath,
+            getConnection: () => {
+              const { getEventStoreConnection } = require("../events/eventStore") as typeof import("../events/eventStore");
+              const connection = getEventStoreConnection();
+              if (!connection) {
+                throw new Error("event store connection requested before the store was opened");
+              }
+              return connection;
+            },
+          },
+        ];
+
   return [
+    ...eventStoreDb,
     {
       name: "payments",
       path: path.join(process.cwd(), "payments.db"),

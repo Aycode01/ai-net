@@ -44,7 +44,8 @@ mod types;
 
 pub use errors::Error;
 pub use types::{
-    DataKey, FallbackPriceSetEvent, OracleSetEvent, PriceResolvedEvent, PriceSource, ResolvedPrice,
+    AdminChangedEvent, DataKey, FallbackPriceSetEvent, OracleFailureEvent, OracleSetEvent,
+    PriceResolvedEvent, PriceSource, ResolvedPrice,
 };
 
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, IntoVal, Symbol, Val};
@@ -67,28 +68,41 @@ fn require_admin(env: &Env) -> Result<(), Error> {
     Ok(())
 }
 
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::ContractPaused);
+    }
+    Ok(())
+}
+
 /// Attempt a cross-contract `get_price` call on the oracle.
 ///
 /// We use the low-level `env.try_invoke_contract` so the oracle's specific
 /// error type need not be a compile-time dependency of this crate.
 ///
-/// Returns `None` if the call fails for *any* reason (stale, not found, host
-/// panic), allowing the caller to fall back gracefully.
-fn try_oracle_get_price(env: &Env, oracle: &Address, pair: &Symbol) -> Option<(i128, u64)> {
+/// Returns `Ok(Some((price, ts)))` on success, `Ok(None)` ONLY if the oracle returns
+/// `FeedNotFound` (explicit price absent case), and `Err(Error)` for any other
+/// contract error (stale, paused, uninitialized, trap) while emitting an `OracleFailureEvent`.
+fn try_oracle_get_price(
+    env: &Env,
+    oracle: &Address,
+    pair: &Symbol,
+) -> Result<Option<(i128, u64)>, Error> {
     use soroban_sdk::{InvokeError, Map, TryIntoVal};
 
     let fn_name = Symbol::new(env, "get_price");
     let args = soroban_sdk::vec![env, pair.into_val(env)];
 
-    // try_invoke_contract<T, E> returns Result<Result<T, T::Error>, Result<E, InvokeError>>.
-    // We use Val as T and InvokeError as E so we can handle any contract error.
-    let result: Result<Result<Val, _>, Result<InvokeError, InvokeError>> =
+    let result: Result<Result<Val, InvokeError>, Result<InvokeError, InvokeError>> =
         env.try_invoke_contract(oracle, &fn_name, args);
 
     match result {
         Ok(Ok(val)) => {
-            // Contract returned successfully; decode the PriceResult struct.
-            // contracttype structs serialise as Maps keyed by field-name Symbols.
             let map: Result<Map<Symbol, Val>, _> = val.try_into_val(env);
             if let Ok(m) = map {
                 let price_key = Symbol::new(env, "price");
@@ -97,17 +111,53 @@ fn try_oracle_get_price(env: &Env, oracle: &Address, pair: &Symbol) -> Option<(i
                 let ts: Option<u64> = m.get(ts_key).and_then(|v| v.try_into_val(env).ok());
                 if let (Some(p), Some(t)) = (price, ts) {
                     if p > 0 {
-                        return Some((p, t));
+                        return Ok(Some((p, t)));
                     }
                 }
             }
-            None
+            env.events().publish(
+                (symbol_short!("mgr"), symbol_short!("ora_fail")),
+                OracleFailureEvent {
+                    pair: pair.clone(),
+                    error_code: 0,
+                },
+            );
+            Err(Error::OracleCallFailed)
         }
-        // Contract returned an error (stale, not found, etc.) or the host
-        // rejected the invocation — treat all of these as "no price".
-        _ => None,
+        Err(Ok(InvokeError::ContractError(code))) | Ok(Err(InvokeError::ContractError(code))) => {
+            if code == 4 {
+                // FeedNotFound = 4
+                Ok(None)
+            } else {
+                env.events().publish(
+                    (symbol_short!("mgr"), symbol_short!("ora_fail")),
+                    OracleFailureEvent {
+                        pair: pair.clone(),
+                        error_code: code,
+                    },
+                );
+                let err = match code {
+                    1 => Error::OracleNotInitialized,
+                    5 => Error::PriceStale,
+                    8 => Error::OraclePaused,
+                    _ => Error::OracleCallFailed,
+                };
+                Err(err)
+            }
+        }
+        _ => {
+            env.events().publish(
+                (symbol_short!("mgr"), symbol_short!("ora_fail")),
+                OracleFailureEvent {
+                    pair: pair.clone(),
+                    error_code: 0,
+                },
+            );
+            Err(Error::OracleCallFailed)
+        }
     }
 }
+
 
 /// Read the admin-set fallback price for `pair`, if any.
 fn read_fallback(env: &Env, pair: &Symbol) -> Option<i128> {
@@ -135,15 +185,66 @@ impl OracleManagerContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
     }
 
     // ── Admin operations ──────────────────────────────────────────────────────
 
+    /// Transfer admin rights to a new address. Requires authorization from both current and new admin.
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        let old_admin = read_admin(&env)?;
+        old_admin.require_auth();
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("mgr"), symbol_short!("adm_chng")),
+            AdminChangedEvent {
+                old_admin,
+                new_admin,
+            },
+        );
+        Ok(())
+    }
+
+    /// Return current admin address.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// Pause the contract. Only admin can call this.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("mgr"), symbol_short!("paused")), ());
+        Ok(())
+    }
+
+    /// Unpause the contract. Only admin can call this.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("mgr"), symbol_short!("unpaused")), ());
+        Ok(())
+    }
+
+    /// Return whether contract is paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     /// Select the on-chain oracle to use for live prices.
     ///
     /// Pass `None` to remove the oracle and rely entirely on fallback prices.
     pub fn set_oracle(env: Env, oracle: Option<Address>) -> Result<(), Error> {
+        require_not_paused(&env)?;
         require_admin(&env)?;
         match &oracle {
             Some(addr) => env.storage().instance().set(&DataKey::OracleAddress, addr),
@@ -171,6 +272,7 @@ impl OracleManagerContract {
     /// * `pair`  – Asset pair (must match what the oracle uses, e.g. `XLM_USD`).
     /// * `price` – Fallback price in stroops (must be > 0).
     pub fn set_fallback_price(env: Env, pair: Symbol, price: i128) -> Result<(), Error> {
+        require_not_paused(&env)?;
         require_admin(&env)?;
         if price <= 0 {
             return Err(Error::InvalidFallbackPrice);
@@ -206,13 +308,14 @@ impl OracleManagerContract {
     /// A stale oracle response is **never** returned; the fallback is used
     /// transparently instead.
     pub fn resolve_price(env: Env, pair: Symbol) -> Result<ResolvedPrice, Error> {
+        require_not_paused(&env)?;
         // Step 1: try the live oracle.
         if let Some(oracle) = env
             .storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::OracleAddress)
         {
-            if let Some((price, _ts)) = try_oracle_get_price(&env, &oracle, &pair) {
+            if let Some((price, _ts)) = try_oracle_get_price(&env, &oracle, &pair)? {
                 let resolved = ResolvedPrice {
                     pair: pair.clone(),
                     price,
@@ -228,7 +331,7 @@ impl OracleManagerContract {
                 );
                 return Ok(resolved);
             }
-            // Oracle failed (stale / not found / error) → fall through.
+            // Oracle returned Ok(None) (FeedNotFound / explicit price absent) → fall through to fallback.
         }
 
         // Step 2: admin fallback.
@@ -564,4 +667,197 @@ mod test {
         // Should succeed with mock_all_auths — basic smoke test.
         f.client.set_oracle(&Some(oracle_addr));
     }
+
+    #[test]
+    fn negative_auth_tests() {
+        let f = fixture();
+        init(&f);
+        let intruder = Address::generate(&f.env);
+        f.env.mock_auths(&[]);
+        assert!(f.client.try_set_admin(&intruder).is_err());
+        assert!(f.client.try_pause().is_err());
+        assert!(f.client.try_unpause().is_err());
+    }
+
+    // ── Comprehensive error handling tests (Issue #548) ──────────────────────
+
+    #[test]
+    fn resolve_price_when_paused_returns_error() {
+        let f = fixture();
+        init(&f);
+        f.client.set_fallback_price(&f.pair, &5_000_000i128);
+        f.client.pause();
+
+        assert_eq!(
+            f.client.try_resolve_price(&f.pair),
+            Err(Ok(Error::ContractPaused))
+        );
+    }
+
+    #[cfg(feature = "testutils")]
+    #[test]
+    fn oracle_not_initialized_emits_failure_event() {
+        let f = fixture();
+        init(&f);
+        
+        // Deploy oracle but DON'T initialize it
+        let oracle_id = f.env.register(price_oracle::PriceOracleContract, ());
+        f.client.set_oracle(&Some(oracle_id));
+        f.client.set_fallback_price(&f.pair, &5_000_000i128);
+
+        // Clear events from setup
+        let _ = f.env.events().all();
+        
+        // Should fall back to fallback price
+        let result = f.client.resolve_price(&f.pair);
+        assert_eq!(result.price, 5_000_000);
+        assert_eq!(result.source, PriceSource::Fallback);
+
+        // Verify failure event was emitted
+        let events = f.env.events().all();
+        let failure_event = events.iter().find(|(_, topics, _)| {
+            topics == &(symbol_short!("mgr"), symbol_short!("ora_fail")).into_val(&f.env)
+        });
+        assert!(failure_event.is_some());
+    }
+
+    #[cfg(feature = "testutils")]
+    #[test]
+    fn oracle_paused_falls_back_and_emits_event() {
+        let f = fixture();
+        init(&f);
+        let oracle_id = deploy_oracle(&f);
+        
+        let oracle_client = price_oracle::PriceOracleContractClient::new(&f.env, &oracle_id);
+        let now = f.env.ledger().timestamp();
+        oracle_client.submit_price(&f.pair, &10_000_000i128, &now);
+        
+        // Pause the oracle
+        oracle_client.pause();
+        
+        f.client.set_oracle(&Some(oracle_id));
+        f.client.set_fallback_price(&f.pair, &6_000_000i128);
+
+        // Clear events from setup
+        let _ = f.env.events().all();
+
+        // Should fall back to fallback price
+        let result = f.client.resolve_price(&f.pair);
+        assert_eq!(result.price, 6_000_000);
+        assert_eq!(result.source, PriceSource::Fallback);
+
+        // Verify failure event was emitted with correct error code
+        let events = f.env.events().all();
+        let failure_event = events.iter().find(|(_, topics, _)| {
+            topics == &(symbol_short!("mgr"), symbol_short!("ora_fail")).into_val(&f.env)
+        });
+        assert!(failure_event.is_some());
+    }
+
+    #[cfg(feature = "testutils")]
+    #[test]
+    fn oracle_failure_without_fallback_returns_error() {
+        let f = fixture();
+        init(&f);
+        let oracle_id = f.env.register(price_oracle::PriceOracleContract, ());
+        
+        // Uninitialized oracle, no fallback
+        f.client.set_oracle(&Some(oracle_id));
+
+        // Clear events
+        let _ = f.env.events().all();
+
+        // Should return error AND emit failure event
+        assert_eq!(
+            f.client.try_resolve_price(&f.pair),
+            Err(Ok(Error::NoPriceAvailable))
+        );
+
+        // Verify failure event was emitted
+        let events = f.env.events().all();
+        let failure_event = events.iter().find(|(_, topics, _)| {
+            topics == &(symbol_short!("mgr"), symbol_short!("ora_fail")).into_val(&f.env)
+        });
+        assert!(failure_event.is_some());
+    }
+
+    #[test]
+    fn oracle_failure_event_includes_pair_and_error_code() {
+        let f = fixture();
+        init(&f);
+        let bad_oracle = Address::generate(&f.env);
+        
+        f.client.set_oracle(&Some(bad_oracle));
+        f.client.set_fallback_price(&f.pair, &5_000_000i128);
+
+        // Clear events
+        let _ = f.env.events().all();
+
+        // Call will fall back
+        let _result = f.client.resolve_price(&f.pair);
+
+        // Check the failure event payload
+        let events = f.env.events().all();
+        let failure_event = events.iter().find(|(_, topics, _)| {
+            topics == &(symbol_short!("mgr"), symbol_short!("ora_fail")).into_val(&f.env)
+        });
+        
+        assert!(failure_event.is_some());
+        // The OracleFailureEvent struct contains pair and error_code fields
+    }
+
+    // ── Negative auth tests (Issue #549) ──────────────────────────────────────
+
+    #[test]
+    fn negative_auth_set_admin() {
+        let f = fixture();
+        init(&f);
+        let intruder = Address::generate(&f.env);
+        f.env.mock_auths(&[]);
+        assert_eq!(
+            f.client.try_set_admin(&intruder),
+            Err(Ok(Error::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn negative_auth_pause() {
+        let f = fixture();
+        init(&f);
+        f.env.mock_auths(&[]);
+        assert_eq!(f.client.try_pause(), Err(Ok(Error::Unauthorized)));
+    }
+
+    #[test]
+    fn negative_auth_unpause() {
+        let f = fixture();
+        init(&f);
+        f.client.pause();
+        f.env.mock_auths(&[]);
+        assert_eq!(f.client.try_unpause(), Err(Ok(Error::Unauthorized)));
+    }
+
+    #[test]
+    fn negative_auth_set_oracle() {
+        let f = fixture();
+        init(&f);
+        let oracle = Address::generate(&f.env);
+        f.env.mock_auths(&[]);
+        assert_eq!(
+            f.client.try_set_oracle(&Some(oracle)),
+            Err(Ok(Error::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn negative_auth_set_fallback_price() {
+        let f = fixture();
+        init(&f);
+        f.env.mock_auths(&[]);
+        assert_eq!(
+            f.client.try_set_fallback_price(&f.pair, &1_000_000i128),
+            Err(Ok(Error::Unauthorized))
+        );
+    }
 }
+
