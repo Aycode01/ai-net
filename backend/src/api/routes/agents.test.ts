@@ -50,16 +50,16 @@ const VALID_KEY = "GTESTAGENTSTELLARKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("GET /api/agents — db error returns 500", () => {
-  it("returns 500 when db.list() throws", async () => {
+  it("returns 500 when db.listCursor() throws", async () => {
     const raw = makeDb();
     const db = createAgentDb(raw);
     const failingDb: AgentDb = {
       ...db,
-      list: () => { throw new Error("DB exploded"); },
+      listCursor: () => { throw new Error("DB exploded"); },
     };
 
     const app = buildApp(failingDb);
-    const res = await request(app).get("/api/agents");
+    const res = await request(app).get("/api/agents?limit=20");
     expect(res.status).toBe(500);
     expect(res.body.error).toBeDefined();
   });
@@ -348,3 +348,34 @@ describe("POST /api/agents/register — Sybil Resistance (Issue #497)", () => {
   });
 });
 
+
+// Cursor validation is exercised independently of the SQLite stub.
+describe('GET /api/agents — bounded contract', () => {
+  it.each(['', '?limit=0', '?limit=-1', '?limit=101', '?limit=1.5', '?limit=NaN', '?limit=Infinity'])
+    ('rejects an unbounded or invalid request: %s', async (query) => {
+      const db = createAgentDb(makeDb());
+      const list = jest.spyOn(db, 'listCursor');
+      const response = await request(buildApp(db)).get(`/api/agents${query}`);
+      expect(response.status).toBe(400);
+      expect(list).not.toHaveBeenCalled();
+    });
+
+  it('returns pagination metadata and preserves filters in next links', async () => {
+    const db = createAgentDb(makeDb());
+    const list = jest.spyOn(db, 'listCursor').mockReturnValue({ items: [], nextCursor: 'next-token' });
+    const response = await request(buildApp(db)).get('/api/agents?limit=2&capability=research&status=online');
+    expect(response.status).toBe(200);
+    expect(list).toHaveBeenCalledWith({ limit: 2, capability: 'research', status: 'online' });
+    expect(response.body.data.pagination).toEqual({ limit: 2, nextCursor: 'next-token', hasNextPage: true });
+    const next = new URL(response.body._links.next, 'https://example.test');
+    expect(next.searchParams.get('capability')).toBe('research');
+    expect(next.searchParams.get('status')).toBe('online');
+    expect(next.searchParams.get('cursor')).toBe('next-token');
+  });
+
+  it('rejects malformed cursors instead of silently restarting', async () => {
+    const response = await request(buildApp(createAgentDb(makeDb())))
+      .get('/api/agents?limit=20&cursor=invalid');
+    expect(response.status).toBe(400);
+  });
+});

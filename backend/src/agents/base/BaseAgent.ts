@@ -1,7 +1,27 @@
 import { z } from 'zod';
-import { VeniceClient, type AgentType, type VeniceClientLike } from '../../services/venice/index.js';
+import {
+  VeniceClient,
+  CircuitOpenError,
+  TokenBudgetExceededError,
+  type AgentType,
+  type CompleteOptions,
+  type VeniceBudgetContext,
+  type VeniceClientLike,
+} from '../../services/venice/index.js';
+import { estimateTokens, trimToTokenBudget } from '../../services/budget';
 import { HeartbeatClient } from '../heartbeat.js';
 import { getConfig } from '../../config/index.js';
+import { createLogger } from '../../utils/logger';
+
+/**
+ * Fraction of a node's token allowance its prompt may consume. The remainder is
+ * left for the completion — a prompt that eats the whole allowance guarantees
+ * a truncated or empty answer.
+ */
+const PROMPT_SHARE_OF_ALLOWANCE = 0.75;
+
+/** Stand-in task used by callers that predate per-task budget context. */
+const FALLBACK_TASK: AgentTask = { taskId: 'unknown', nodeId: 'unknown', prompt: '' };
 
 export interface BaseAgentConfig {
   veniceClient?: VeniceClientLike;
@@ -15,17 +35,35 @@ export interface AgentTask {
   prompt: string;
   context?: string;
   upstreamResults?: unknown[];
+  /**
+   * Token allowance for this node, sent by the coordinator (Issue #390).
+   * Absent for older coordinators, in which case the agent falls back to the
+   * client defaults.
+   */
+  budget?: {
+    maxTokens?: number;
+  };
 }
 
 export interface AgentError {
   error: string;
 }
 
+/** Token counts the agent reports back so the coordinator can bill the task. */
+export interface AgentUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export abstract class BaseAgent {
   protected readonly venice: VeniceClientLike;
   protected readonly apiBaseUrl: string;
   protected readonly agentId: string;
+  protected readonly log = createLogger({ component: 'agent' });
   private readonly heartbeatClient: HeartbeatClient | null = null;
+  /** Token counters for the task currently executing, reset per execute(). */
+  private taskUsage: AgentUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   constructor(config: BaseAgentConfig = {}) {
     if (config.veniceClient) {
@@ -113,18 +151,102 @@ export abstract class BaseAgent {
     }
   }
 
+  /**
+   * Total tokens consumed by this agent's calls for the current task.
+   *
+   * Populated from provider-reported usage via `onUsage`, and returned in the
+   * execute envelope so the coordinator can bill the task (Issue #390).
+   */
+  protected usageForCurrentTask(): AgentUsage {
+    return { ...this.taskUsage };
+  }
+
+  /** Reset the per-task usage counters. Called at the start of each execute. */
+  protected resetUsage(): void {
+    this.taskUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  }
+
+  /**
+   * Build the `CompleteOptions` for a call, wiring in the node's token
+   * allowance and the usage callback.
+   *
+   * `trimmed` records whether the prompt was shortened, which is worth
+   * surfacing: a silently truncated context is the kind of thing that looks
+   * like a model quality problem when it is really a budget decision.
+   */
+  private callOptions(
+    task: AgentTask,
+    maxTokens?: number
+  ): { options: CompleteOptions; budgetContext: VeniceBudgetContext } {
+    const agentType = this.getAgentType();
+    const budgetContext: VeniceBudgetContext = {
+      taskId: task.taskId,
+      nodeId: task.nodeId,
+      agentId: this.agentId,
+      agentType,
+      maxTokens: task.budget?.maxTokens,
+    };
+
+    return {
+      budgetContext,
+      options: {
+        maxTokens,
+        budget: budgetContext,
+        onUsage: (usage) => {
+          this.taskUsage.promptTokens += usage.prompt_tokens;
+          this.taskUsage.completionTokens += usage.completion_tokens;
+          this.taskUsage.totalTokens += usage.total_tokens;
+        },
+      },
+    };
+  }
+
+  /**
+   * Fit a prompt into the node's allowance before it goes upstream.
+   *
+   * The completion needs room too, so the prompt is capped below the full
+   * allowance; otherwise a maximum-size prompt would leave nothing for the
+   * answer and come back empty.
+   */
+  private preparePrompt(task: AgentTask, prompt: string): string {
+    const allowance = task.budget?.maxTokens;
+    if (!allowance || allowance <= 0) return prompt;
+
+    const promptCeiling = Math.max(1, Math.floor(allowance * PROMPT_SHARE_OF_ALLOWANCE));
+    if (estimateTokens(prompt) <= promptCeiling) return prompt;
+
+    const trimmed = trimToTokenBudget(prompt, promptCeiling);
+    this.log.info(
+      {
+        taskId: task.taskId,
+        nodeId: task.nodeId,
+        agentId: this.agentId,
+        originalChars: prompt.length,
+        trimmedChars: trimmed.length,
+        promptCeiling,
+      },
+      'prompt trimmed to fit node token allowance',
+    );
+    return trimmed;
+  }
+
   protected async callVeniceWithRetry(
     systemPrompt: string,
     userContent: string,
-    jsonModeAddendum: string
+    jsonModeAddendum: string,
+    task?: AgentTask
   ): Promise<unknown | AgentError> {
-    const fullPrompt = `${systemPrompt}\n\n${userContent}`;
+    const { options, budgetContext } = this.callOptions(task ?? FALLBACK_TASK);
+    const fullPrompt = this.preparePrompt(
+      task ?? FALLBACK_TASK,
+      `${systemPrompt}\n\n${userContent}`
+    );
 
     let rawText: string;
     try {
-      rawText = await this.venice.complete(fullPrompt, this.getAgentType());
-    } catch {
-      return { error: 'VENICE_UNAVAILABLE' };
+      rawText = await this.venice.complete(fullPrompt, this.getAgentType(), options);
+    } catch (err) {
+      return { error: this.describeVeniceFailure(err) };
     }
 
     const parsed = this.parseJsonResponse(rawText);
@@ -135,9 +257,16 @@ export abstract class BaseAgent {
       }
     }
 
+    const retryPrompt = this.preparePrompt(
+      task ?? FALLBACK_TASK,
+      `${systemPrompt}\n\n${userContent}${jsonModeAddendum}`
+    );
+
     try {
-      const retryPrompt = `${systemPrompt}\n\n${userContent}${jsonModeAddendum}`;
-      const retryText = await this.venice.complete(retryPrompt, this.getAgentType());
+      const retryText = await this.venice.complete(retryPrompt, this.getAgentType(), {
+        ...options,
+        budget: { ...budgetContext },
+      });
 
       const retryParsed = this.parseJsonResponse(retryText);
       if (retryParsed !== null) {
@@ -146,10 +275,23 @@ export abstract class BaseAgent {
           return retryValidated;
         }
       }
-    } catch {
-      return { error: 'VENICE_UNAVAILABLE' };
+    } catch (err) {
+      return { error: this.describeVeniceFailure(err) };
     }
 
     return { error: 'VENICE_MALFORMED_RESPONSE' };
+  }
+
+  /**
+   * Map a Venice failure onto the agent's error vocabulary.
+   *
+   * A budget rejection is its own code because it is not transient: retrying
+   * would just fail again, and the coordinator needs to see the difference to
+   * halt the task rather than treating it as a provider blip.
+   */
+  private describeVeniceFailure(err: unknown): string {
+    if (err instanceof TokenBudgetExceededError) return 'BUDGET_EXHAUSTED';
+    if (err instanceof CircuitOpenError) return 'VENICE_UNAVAILABLE';
+    return 'VENICE_UNAVAILABLE';
   }
 }

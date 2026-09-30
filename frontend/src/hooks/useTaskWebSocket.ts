@@ -7,11 +7,19 @@ export interface UseTaskWebSocketOptions {
   onConnect?: () => void;
   onDisconnect?: () => void;
   /**
-   * Public key of the wallet that owns the task. When provided it is sent as
-   * the first frame after the socket opens (`{ walletPublicKey }`) so the
-   * server can authenticate the connection. See backend `AuthMessage`.
+   * Public key of the wallet that owns the task. When provided, the client
+   * waits for the server's `auth_challenge` nonce and answers with
+   * `{ walletPublicKey, nonce, signature }` so the server can authenticate
+   * the connection. See backend `AuthMessage` (#653).
    */
   walletPublicKey?: string;
+  /**
+   * Signs the server-issued auth nonce with the wallet's secret key and
+   * resolves the base64 Ed25519 signature. Required together with
+   * `walletPublicKey` to complete the stream handshake — without it the
+   * client cannot prove ownership and the server closes the socket.
+   */
+  signChallenge?: (nonce: string) => string | Promise<string>;
   /** Base host for the stream. Defaults to localhost:3001 (matching the server). */
   baseUrl?: string;
   /** Maximum automatic reconnect attempts before giving up. Default 5. */
@@ -72,6 +80,7 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
     onConnect,
     onDisconnect,
     walletPublicKey,
+    signChallenge,
     baseUrl = DEFAULT_BASE_URL,
     maxReconnectAttempts = 5,
     maxJitterMs = 0,
@@ -96,6 +105,11 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
   // Handlers must see the latest onMessage/etc. across reconnects.
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
+  // Latest signer, kept in a ref so reconnects use the current callback.
+  const signChallengeRef = useRef(signChallenge);
+  signChallengeRef.current = signChallenge;
+  const walletPublicKeyRef = useRef(walletPublicKey);
+  walletPublicKeyRef.current = walletPublicKey;
   const onConnectRef = useRef(onConnect);
   onConnectRef.current = onConnect;
   const onDisconnectRef = useRef(onDisconnect);
@@ -150,18 +164,39 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
       setIsConnected(true);
       reconnectAttemptRef.current = 0; // reset reconnect attempts on a live socket
       gapRetriedRef.current = false;
-      if (walletPublicKey) {
-        ws.send(JSON.stringify({ walletPublicKey }));
-      }
+      // Auth is challenge-response: the server sends `auth_challenge` first
+      // (see onmessage below). Nothing is sent here so a stale or replayed
+      // frame can never authenticate the socket.
       onConnectRef.current?.();
     };
 
     ws.onmessage = (event) => {
-      let data: DAGEvent;
+      let data: unknown;
       try {
         data = JSON.parse(event.data);
       } catch (err) {
         console.error('Failed to parse WebSocket event:', err);
+        return;
+      }
+
+      // Server-issued auth challenge: sign the single-use nonce and answer
+      // with the signed handshake frame. Never forwarded to onMessage.
+      if ((data as { type?: unknown }).type === 'auth_challenge') {
+        const nonce = (data as { nonce?: unknown }).nonce;
+        const publicKey = walletPublicKeyRef.current;
+        const signer = signChallengeRef.current;
+        if (typeof nonce === 'string' && nonce !== '' && publicKey && signer) {
+          Promise.resolve()
+            .then(() => signer(nonce))
+            .then((signature) => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ walletPublicKey: publicKey, nonce, signature }));
+              }
+            })
+            .catch((err) => {
+              console.error('Failed to sign WebSocket auth challenge:', err);
+            });
+        }
         return;
       }
 
@@ -172,7 +207,9 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
         return;
       }
 
-      const seq = seqCursor(data.seq);
+      const typedData = data as DAGEvent;
+
+      const seq = seqCursor(typedData.seq);
       if (seq !== undefined) {
         const expected = lastSeqRef.current + 1;
         // A forward jump in seq means we missed events. Trigger one reconnect
@@ -202,7 +239,7 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
         } catch { /* non-fatal */ }
       }
 
-      onMessageRef.current(data);
+      onMessageRef.current(typedData);
     };
 
     ws.onerror = () => {

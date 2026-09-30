@@ -41,12 +41,13 @@ pub fn execute_post_upgrade_migration(
 
     // Execute data transformations
     for transformation in migration_plan.data_transformations.iter() {
-        let gas_before = env.ledger().protocol_version() as u64; // Placeholder for gas tracking
-
         let items_in_batch = execute_data_transformation(env, &transformation)?;
         processed_items += items_in_batch;
 
-        let gas_used = env.ledger().protocol_version() as u64 - gas_before; // Placeholder
+        // Soroban exposes no in-contract gas meter, so charge each batch with
+        // the same cost model `estimate_migration_gas` uses for proposals.
+        let gas_used = crate::GAS_MIGRATION_STEP_OVERHEAD
+            + crate::GAS_MIGRATION_PER_ITEM * items_in_batch as u64;
         total_gas_used += gas_used;
 
         // Emit progress event

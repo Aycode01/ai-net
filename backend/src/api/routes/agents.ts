@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import { Horizon, Keypair } from "@stellar/stellar-sdk";
+import { Horizon } from "@stellar/stellar-sdk";
+import { verifyWalletSignature } from "../../services/auth/walletChallenge";
 import { getAgentDb, createAgentDb, AgentDb } from "../../db/agents";
 import { heartbeatRateLimitMiddleware } from "../middleware/rateLimit";
 import { NotFoundError, ValidationError, UnauthorizedError, AppError } from "../../errors";
@@ -10,10 +11,10 @@ import { ttlForRoute } from "../../config";
 
 const AgentCursorListSchema = z.object({
   cursor: z.string().optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
+  limit: z.coerce.number().int().min(1).max(100),
   capability: z.string().optional(),
-  minReputation: z.coerce.number().optional(),
-  maxPriceXLM: z.coerce.number().optional(),
+  minReputation: z.coerce.number().finite().optional(),
+  maxPriceXLM: z.coerce.number().finite().optional(),
   status: z.enum(["online", "offline"]).optional(),
 });
 
@@ -52,6 +53,14 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
    *     security: []
    *     parameters:
    *       - in: query
+   *         name: limit
+   *         required: true
+   *         schema: { type: integer, minimum: 1, maximum: 100 }
+   *       - in: query
+   *         name: cursor
+   *         schema: { type: string }
+   *         description: nextCursor from the previous response
+   *       - in: query
    *         name: capability
    *         schema: { type: string }
    *         description: Filter agents that support this capability
@@ -67,9 +76,23 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
    *         content:
    *           application/json:
    *             schema:
-   *               type: array
-   *               items:
-   *                 $ref: '#/components/schemas/Agent'
+   *               type: object
+   *               properties:
+   *                 data:
+   *                   type: object
+   *                   properties:
+   *                     items:
+   *                       type: array
+   *                       items:
+   *                         $ref: '#/components/schemas/Agent'
+   *                     pagination:
+   *                       type: object
+   *                       properties:
+   *                         limit: { type: integer }
+   *                         nextCursor: { type: string, nullable: true }
+   *                         hasNextPage: { type: boolean }
+   *       400:
+   *         description: Missing or invalid limit, filters, or cursor
    *       500:
    *         description: Internal server error
    *         content:
@@ -77,55 +100,38 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
    *             schema:
    *               $ref: '#/components/schemas/Error'
    */
-  // GET /api/agents — supports cursor pagination when ?cursor or ?limit present
-  router.get("/", cacheMiddleware({ ttl: ttlForRoute("agents") }), (req: Request, res: Response, next: NextFunction): void => {
-    const db = getDb();
-    const useCursor = "cursor" in req.query || "limit" in req.query;
-
-    if (useCursor) {
-      const parse = AgentCursorListSchema.safeParse(req.query);
-      if (!parse.success) {
-        throw new ValidationError(
-          "Invalid query parameters",
-          { issues: parse.error.flatten() },
-          res.locals.correlationId as string | undefined,
-        );
-      }
-      const { cursor, limit, capability, minReputation, maxPriceXLM, status } = parse.data;
-      try {
-        const page = db.listCursor({ cursor, limit, capability, minReputation, maxPriceXLM, status });
-        res.json({
-          data: {
-            items: page.items,
-            pagination: {
-              limit,
-              nextCursor: page.nextCursor ?? null,
-              hasNextPage: !!page.nextCursor,
-            },
-          },
-          _links: {
-            self: `/api/agents`,
-            ...(page.nextCursor
-              ? { next: `/api/agents?cursor=${encodeURIComponent(page.nextCursor)}&limit=${limit}` }
-              : {}),
-          },
-        });
-      } catch (err) {
-        next(new AppError("Internal Server Error", 500, "INTERNAL_ERROR", undefined, res.locals.correlationId as string | undefined));
-      }
+  // An explicit bounded limit is required; the old unbounded array API is rejected.
+  router.get("/", (req: Request, res: Response, next: NextFunction): void => {
+    // Validate before cache lookup so legacy unbounded cached responses cannot
+    // bypass the new contract after deployment.
+    const parse = AgentCursorListSchema.safeParse(req.query);
+    if (!parse.success) {
+      next(new ValidationError("Invalid query parameters; limit (1–100) is required",
+        { issues: parse.error.flatten() }, res.locals.correlationId as string | undefined));
       return;
     }
-
-    // Legacy flat-array response for backward compatibility
-    const capability = req.query.capability as string | undefined;
-    const minReputation = req.query.minReputation ? parseFloat(req.query.minReputation as string) : undefined;
-    const maxPriceXLM = req.query.maxPriceXLM ? parseFloat(req.query.maxPriceXLM as string) : undefined;
-
+    res.locals.agentListOptions = parse.data;
+    next();
+  }, cacheMiddleware({ ttl: ttlForRoute("agents") }), (_req: Request, res: Response, next: NextFunction): void => {
     try {
-      const agents = db.list({ capability, minReputation, maxPriceXLM });
-      res.json(agents);
+      const parsed = res.locals.agentListOptions as z.infer<typeof AgentCursorListSchema>;
+      const { limit, ...options } = parsed;
+      const page = getDb().listCursor({ ...options, limit });
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(parsed)) {
+        if (value !== undefined) query.set(key, String(value));
+      }
+      const self = `/api/agents?${query}`;
+      if (page.nextCursor) query.set("cursor", page.nextCursor);
+      res.json({
+        data: {
+          items: page.items,
+          pagination: { limit, nextCursor: page.nextCursor ?? null, hasNextPage: !!page.nextCursor },
+        },
+        _links: { self, ...(page.nextCursor ? { next: `/api/agents?${query}` } : {}) },
+      });
     } catch (err) {
-      next(new AppError("Internal Server Error", 500, "INTERNAL_ERROR"));
+      next(err instanceof ValidationError ? err : new AppError("Internal Server Error", 500, "INTERNAL_ERROR"));
     }
   });
 
@@ -443,8 +449,7 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
       }
 
       try {
-        const keypair = Keypair.fromPublicKey(agent.stellarPublicKey);
-        const isValid = keypair.verify(Buffer.from(challenge), Buffer.from(signature, "base64"));
+        const isValid = verifyWalletSignature(agent.stellarPublicKey, challenge, signature);
         if (!isValid) {
           throw new UnauthorizedError("Invalid signature", undefined, correlationId);
         }

@@ -3,7 +3,10 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _},
+    Address, Env, IntoVal, Symbol, TryFromVal, TryIntoVal, Val,
+};
 
 fn setup() -> (Env, AgentMarketplaceContractClient<'static>) {
     let env = Env::default();
@@ -21,6 +24,28 @@ fn setup_with_admin() -> (Env, AgentMarketplaceContractClient<'static>, Address)
     let admin = Address::generate(&env);
     client.initialize(&admin);
     (env, client, admin)
+}
+
+/// Configure a test Stellar Asset Contract as the payment asset (initialising
+/// the marketplace first if needed), fund `payer`, and return the asset.
+fn pay_asset(env: &Env, client: &AgentMarketplaceContractClient<'_>, payer: &Address) -> Address {
+    if client.get_admin().is_none() {
+        client.initialize(&Address::generate(env));
+    }
+    let asset = match client.get_payment_asset() {
+        Some(asset) => asset,
+        None => {
+            let sac = env.register_stellar_asset_contract_v2(Address::generate(env));
+            client.set_payment_asset(&sac.address(), &7);
+            sac.address()
+        }
+    };
+    soroban_sdk::token::StellarAssetClient::new(env, &asset).mint(payer, &10_000_000);
+    asset
+}
+
+fn balance(env: &Env, client: &AgentMarketplaceContractClient<'_>, who: &Address) -> i128 {
+    soroban_sdk::token::Client::new(env, &client.get_payment_asset().unwrap()).balance(who)
 }
 
 #[test]
@@ -48,7 +73,6 @@ fn initialize_cannot_be_called_twice() {
 fn list_service_success() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
-
     let result = client.try_list_service(
         &Symbol::new(&env, "svc1"),
         &Symbol::new(&env, "agent1"),
@@ -65,7 +89,6 @@ fn list_service_success() {
     let listing = listing.unwrap();
     assert_eq!(listing.price_stroops, 1_000_000);
     assert!(listing.active);
-    assert_eq!(listing.price_pair, None);
 }
 
 #[test]
@@ -154,23 +177,21 @@ fn book_agent_success() {
     let owner = Address::generate(&env);
     let client_addr = Address::generate(&env);
 
-#[test]
-fn set_oracle_manager_emits_event() {
-    let f = fixture();
-    let mgr = Address::generate(&f.env);
-    f.client.set_oracle_manager(&Some(mgr));
-
-    let events = f.env.events().all();
-    let found = events
-        .iter()
-        .any(|(_, t, _)| t == (symbol_short!("market"), symbol_short!("ora_set")).into_val(&f.env));
-    assert!(found);
-}
+    client.list_service(
+        &Symbol::new(&env, "svc1"),
+        &Symbol::new(&env, "agent1"),
+        &owner,
+        &Symbol::new(&env, "research"),
+        &1_000_000_i128,
+        &200_u32,
+        &24_u32,
+    );
 
     let booking_id = Symbol::new(&env, "bk1");
     client.book_agent(
         &Symbol::new(&env, "svc1"),
         &client_addr,
+        &pay_asset(&env, &client, &client_addr),
         &1_000_000_i128,
         &booking_id,
     );
@@ -203,6 +224,7 @@ fn book_agent_insufficient_payment() {
         client.try_book_agent(
             &Symbol::new(&env, "svc1"),
             &client_addr,
+            &pay_asset(&env, &client, &client_addr),
             &500_000_i128,
             &Symbol::new(&env, "bk_bad"),
         ),
@@ -230,6 +252,7 @@ fn complete_booking_releases_escrow() {
     client.book_agent(
         &Symbol::new(&env, "svc1"),
         &client_addr,
+        &pay_asset(&env, &client, &client_addr),
         &1_000_000_i128,
         &booking_id,
     );
@@ -260,6 +283,7 @@ fn cancel_booking_refunds_client() {
     client.book_agent(
         &Symbol::new(&env, "svc1"),
         &client_addr,
+        &pay_asset(&env, &client, &client_addr),
         &1_000_000_i128,
         &booking_id,
     );
@@ -290,6 +314,7 @@ fn rate_booking_updates_agent_rating() {
     client.book_agent(
         &Symbol::new(&env, "svc1"),
         &client_addr,
+        &pay_asset(&env, &client, &client_addr),
         &1_000_000_i128,
         &booking_id,
     );
@@ -321,6 +346,7 @@ fn rate_invalid_score() {
     client.book_agent(
         &Symbol::new(&env, "svc1"),
         &client_addr,
+        &pay_asset(&env, &client, &client_addr),
         &1_000_000_i128,
         &booking_id,
     );
@@ -339,7 +365,7 @@ fn rate_invalid_score() {
 #[test]
 fn pause_blocks_listing() {
     let (env, client, _admin) = setup_with_admin();
-    client.pause(&true);
+    client.pause();
 
     let owner = Address::generate(&env);
     assert_eq!(
@@ -405,6 +431,7 @@ fn pause_blocks_complete_booking() {
     client.book_agent(
         &Symbol::new(&env, "svc1"),
         &client_addr,
+        &pay_asset(&env, &client, &client_addr),
         &1_000_000_i128,
         &booking_id,
     );
@@ -439,10 +466,154 @@ fn search_services_still_works_when_paused() {
     assert_eq!(results.len(), 1);
 }
 
+// ========================================================================
+// Negative Authorization Tests (Issue #549)
+// ========================================================================
+
+#[test]
+fn negative_auth_initialize() {
+    let env = Env::default();
+    env.mock_auths(&[]);
+    let id = env.register(AgentMarketplaceContract, ());
+    let client = AgentMarketplaceContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    assert!(client.try_initialize(&admin).is_err());
+}
+
 #[test]
 fn negative_auth_set_admin() {
     let (env, client, _admin) = setup_with_admin();
     let intruder = Address::generate(&env);
     env.mock_auths(&[]);
-    assert!(client.try_set_admin(&intruder).is_err());
+    assert_eq!(
+        client.try_set_admin(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_pause() {
+    let (env, client, _admin) = setup_with_admin();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_pause(), Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn negative_auth_unpause() {
+    let (env, client, _admin) = setup_with_admin();
+    client.pause();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_unpause(), Err(Ok(Error::Unauthorized)));
+}
+
+// ── Token escrow ─────────────────────────────────────────────────────────────
+
+fn list(env: &Env, client: &AgentMarketplaceContractClient<'_>, owner: &Address) -> Symbol {
+    let listing_id = Symbol::new(env, "svc_tok");
+    client.list_service(
+        &listing_id,
+        &Symbol::new(env, "agent_tok"),
+        owner,
+        &Symbol::new(env, "research"),
+        &1_000_000_i128,
+        &200_u32,
+        &24_u32,
+    );
+    listing_id
+}
+
+#[test]
+fn escrow_then_release_pays_owner() {
+    let (env, client, _) = setup_with_admin();
+    let owner = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let listing_id = list(&env, &client, &owner);
+    let booking_id = Symbol::new(&env, "bk_rel");
+    let asset = pay_asset(&env, &client, &payer);
+    client.book_agent(&listing_id, &payer, &asset, &1_000_000_i128, &booking_id);
+
+    assert_eq!(balance(&env, &client, &payer), 9_000_000);
+    assert_eq!(balance(&env, &client, &client.address), 1_000_000);
+    assert_eq!(client.get_booking(&booking_id).unwrap().escrow_amount, 1_000_000);
+
+    client.complete_booking(&booking_id);
+    assert_eq!(balance(&env, &client, &owner), 1_000_000);
+    assert_eq!(balance(&env, &client, &client.address), 0);
+}
+
+#[test]
+fn escrow_then_cancel_refunds_client() {
+    let (env, client, _) = setup_with_admin();
+    let owner = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let listing_id = list(&env, &client, &owner);
+    let booking_id = Symbol::new(&env, "bk_ref");
+    let asset = pay_asset(&env, &client, &payer);
+    client.book_agent(&listing_id, &payer, &asset, &1_000_000_i128, &booking_id);
+    client.cancel_booking(&booking_id);
+    assert_eq!(balance(&env, &client, &payer), 10_000_000);
+    assert_eq!(balance(&env, &client, &client.address), 0);
+}
+
+#[test]
+fn booking_fails_without_balance() {
+    let (env, client, _) = setup_with_admin();
+    let owner = Address::generate(&env);
+    let listing_id = list(&env, &client, &owner);
+    let asset = pay_asset(&env, &client, &Address::generate(&env));
+    let broke = Address::generate(&env);
+    let booking_id = Symbol::new(&env, "bk_poor");
+    assert!(client
+        .try_book_agent(&listing_id, &broke, &asset, &1_000_000_i128, &booking_id)
+        .is_err());
+    assert!(client.get_booking(&booking_id).is_none());
+}
+
+#[test]
+fn booking_with_wrong_asset_is_rejected() {
+    let (env, client, _) = setup_with_admin();
+    let owner = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let listing_id = list(&env, &client, &owner);
+    pay_asset(&env, &client, &payer);
+    let other = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    assert_eq!(
+        client.try_book_agent(
+            &listing_id,
+            &payer,
+            &other.address(),
+            &1_000_000_i128,
+            &Symbol::new(&env, "bk_wrong"),
+        ),
+        Err(Ok(Error::AssetMismatch))
+    );
+    assert_eq!(
+        client.try_set_payment_asset(&other.address(), &6),
+        Err(Ok(Error::AssetMismatch))
+    );
+}
+
+#[test]
+fn double_complete_is_rejected_and_pays_once() {
+    let (env, client, _) = setup_with_admin();
+    let owner = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let listing_id = list(&env, &client, &owner);
+    let booking_id = Symbol::new(&env, "bk_dbl");
+    let asset = pay_asset(&env, &client, &payer);
+    client.book_agent(&listing_id, &payer, &asset, &1_000_000_i128, &booking_id);
+    client.complete_booking(&booking_id);
+    assert_eq!(
+        client.try_complete_booking(&booking_id),
+        Err(Ok(Error::BookingAlreadyCompleted))
+    );
+    assert_eq!(balance(&env, &client, &owner), 1_000_000);
+}
+
+#[test]
+fn stroop_conversion_respects_decimals() {
+    assert_eq!(stroops_to_units(1_000_000, 7), Ok(1_000_000));
+    assert_eq!(stroops_to_units(5, 9), Ok(500));
+    assert_eq!(stroops_to_units(1_000, 4), Ok(1));
+    assert_eq!(stroops_to_units(1_001, 4), Err(Error::InvalidAmount));
 }
