@@ -12,6 +12,7 @@
  * (avg/min/max/trend), and fed back into the agent reputation system.
  */
 
+import { isEnabled } from './featureFlags';
 import type {
   AgentQualityMetrics,
   DimensionScore,
@@ -32,6 +33,7 @@ import { CodingOutputSchema } from '../agents/coding/coding';
 import { createTaskDb, getTaskDb } from '../db/tasks';
 import { createAgentDb, getAgentDb } from '../db/agents';
 import { createLogger } from '../utils/logger';
+import { config } from '../config';
 
 const log = createLogger({ component: 'QualityScorer' });
 
@@ -46,25 +48,18 @@ export const DEFAULT_WEIGHTS: Record<QualityDimension, number> = {
 export const DEFAULT_REVIEW_THRESHOLD = 60;
 
 /**
- * Load quality scorer configuration from process.env.
+ * Load quality scorer configuration from config.
  * Called lazily so config changes (env vars) take effect without redeploy.
  * Falls back to defaults when env vars are not set.
  */
 export function loadScorerConfig(): QualityScorerConfig {
-  const weightComp = Number(process.env.QUALITY_WEIGHT_COMPLETENESS ?? 0.4);
-  const weightRel = Number(process.env.QUALITY_WEIGHT_RELEVANCE ?? 0.3);
-  const weightFmt = Number(process.env.QUALITY_WEIGHT_FORMAT ?? 0.3);
-  const reviewThreshold = Number(process.env.QUALITY_REVIEW_THRESHOLD ?? 60);
-  const percentileEnabled = process.env.QUALITY_PERCENTILE_ENABLED === 'true';
-  const percentileMinSamples = Number(process.env.QUALITY_PERCENTILE_MIN_SAMPLES ?? 10);
-
   return {
-    weightCompleteness: clamp(weightComp, 0, 1),
-    weightRelevance: clamp(weightRel, 0, 1),
-    weightFormat: clamp(weightFmt, 0, 1),
-    reviewThreshold: clamp(reviewThreshold, 0, 100),
-    percentileEnabled,
-    percentileMinSamples,
+    weightCompleteness: config.QUALITY_WEIGHT_COMPLETENESS,
+    weightRelevance: config.QUALITY_WEIGHT_RELEVANCE,
+    weightFormat: config.QUALITY_WEIGHT_FORMAT,
+    reviewThreshold: config.QUALITY_REVIEW_THRESHOLD,
+    percentileEnabled: config.QUALITY_PERCENTILE_ENABLED,
+    percentileMinSamples: config.QUALITY_PERCENTILE_MIN_SAMPLES,
   };
 }
 

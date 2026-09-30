@@ -65,3 +65,67 @@ Emitted when an agent is deregistered and removed from the contract index.
       pub agent_id: Symbol,       // Unique ID of the removed agent
   }
   ```
+
+---
+
+## Admin Changed Events
+
+Emitted when contract administration rights are transferred via `set_admin`.
+
+### Event Topics & Payloads
+
+- **Data (Structure)**: `AdminChangedEvent`
+  ```rust
+  pub struct AdminChangedEvent {
+      pub old_admin: Address,     // Address of outgoing admin
+      pub new_admin: Address,     // Address of incoming admin
+  }
+  ```
+
+| Contract | Topic 1 | Topic 2 | Payload |
+|---|---|---|---|
+| `oracle_manager` | `Symbol::new(env, "mgr")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `price_oracle` | `Symbol::new(env, "oracle")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `agent_marketplace` | `Symbol::new(env, "market")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `dispute_resolution` | `Symbol::new(env, "dispute")` | `Symbol::new(env, "adm_chng")` | `AdminChangedEvent` |
+| `agent_registry` | `Symbol::new(env, "registry")` | `Symbol::new(env, "adm_chngd")` | `AdminChangedEvent` |
+
+
+## Token-Backed Escrow Events (agent_marketplace, agent_bidding)
+
+Both contracts now move real tokens through a configured Stellar Asset
+Contract (`set_payment_asset(asset, decimals)`). Every amount below is the
+number of **asset units actually transferred** by `token::Client::transfer`
+in the same invocation; nothing is recorded or emitted without the matching
+transfer. Listing/bid prices remain stroop-denominated (7 decimals) and are
+converted with `stroops_to_units` — for a 7-decimal asset (native XLM SAC,
+USDC on Stellar) units and stroops are identical.
+
+### agent_marketplace
+
+| Topics | Payload | Transfer |
+|---|---|---|
+| `("market", "asset_set")` | `(asset: Address, decimals: u32)` | none |
+| `("market", "svc_book")` | `ServiceBookedEvent { booking_id, listing_id, client, escrow_amount }` | `client → contract` of `escrow_amount` |
+| `("market", "svc_comp")` | `ServiceCompletedEvent { booking_id, payment_released }` | `contract → listing owner` of `payment_released` |
+| `("market", "svc_canc")` | `ServiceCancelledEvent { booking_id, refund_amount }` | `contract → client` of `refund_amount` |
+
+`book_agent` now takes an `asset: Address` argument; it must equal the
+configured asset or the call fails with `AssetMismatch` (14).
+
+### agent_bidding
+
+| Topics | Payload | Transfer |
+|---|---|---|
+| `("bidding", "asset_set")` | `(asset: Address, decimals: u32)` | none |
+| `("bidding", "created")` | `AuctionCreatedEvent { .., max_price, .. }` | `creator → contract` of `max_price` (locked budget) |
+| `("bidding", "bond_dep")` | `BondDeposited { amount_stroops, .. }` | `bidder → contract` of the bond |
+| `("bidding", "bond_slsh")` | `BondSlashed { penalty_stroops, .. }` | `contract → creator` of the forfeited bond |
+| `("bidding", "cntrct_aw")` | `ContractAwardedEvent { escrow_amount, .. }` | revealed bonds `contract → bidder`; `max_price − escrow_amount` `contract → creator`; `escrow_amount` stays in custody |
+| `("bidding", "aborted")` | `AuctionAbortedEvent` | every bond `contract → bidder`; full budget `contract → creator` |
+| `("bidding", "ref_claim")` / `("bidding", "refnd_clm")` | `RefundClaimedEvent { bond, .. }` | `contract → bidder` of `bond` |
+| `("bidding", "esc_rel")` | `EscrowSettledEvent { task_id, recipient, amount }` | `contract → winning agent` (`release_escrow`, creator auth) |
+| `("bidding", "esc_ref")` | `EscrowSettledEvent { task_id, recipient, amount }` | `contract → creator` (`refund_escrow`, admin auth) |
+
+Each transfer additionally produces the standard SAC `transfer` event emitted
+by the token contract itself, which indexers can use to cross-check.

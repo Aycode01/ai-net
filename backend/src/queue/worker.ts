@@ -140,11 +140,13 @@ export class JobWorker {
 
     try {
       while (this.isRunning && this.activeJobsCount < this.concurrency) {
-        const job = this.store.getNextPendingJob();
+        // Atomic claim: a single conditional UPDATE inside a BEGIN IMMEDIATE
+        // transaction, so two workers — or two processes over the same SQLite
+        // file — can never be handed the same row and run the handler twice.
+        // `undefined` means nothing is runnable right now.
+        const job = this.store.claimNextPendingJob();
         if (!job) break;
 
-        // Atomically mark job as active
-        this.store.updateStatus(job.id, "active");
         this.activeJobsCount++;
 
         // Execute job in background
@@ -182,6 +184,7 @@ export class JobWorker {
       this.store.updateStatus(job.id, "completed", {
         progress: 100,
         completedAt: now,
+        expectedStatus: "active",
       });
 
       logger.info({ jobId: job.id, taskId: job.taskId }, "job completed successfully");
@@ -201,6 +204,7 @@ export class JobWorker {
           attempts,
           lastError: errorMessage,
           nextRunAt,
+          expectedStatus: "active",
         });
 
         logger.warn(
@@ -222,6 +226,7 @@ export class JobWorker {
           attempts,
           lastError: errorMessage,
           failedAt: now,
+          expectedStatus: "active",
         });
 
         logger.error(

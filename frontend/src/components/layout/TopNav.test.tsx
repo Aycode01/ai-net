@@ -2,6 +2,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, test, expect, beforeEach, vi } from 'vitest'
 import TopNav from './TopNav'
+import { NotificationProvider } from '../../context/NotificationContext'
 import { WalletProvider } from '../../context/WalletContext'
 import { ThemeProvider } from '../../context/ThemeContext'
 
@@ -25,11 +26,11 @@ describe('TopNav Theme Toggle', () => {
   test('cycles theme and persists selection to localStorage', async () => {
     render(
       <MemoryRouter>
-        <WalletProvider>
+        <NotificationProvider><WalletProvider>
           <ThemeProvider>
             <TopNav onMenuClick={vi.fn()} onToggleSidebar={vi.fn()} sidebarCollapsed={false} isMobile={false} />
           </ThemeProvider>
-        </WalletProvider>
+        </WalletProvider></NotificationProvider>
       </MemoryRouter>
     )
 
