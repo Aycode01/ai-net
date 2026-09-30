@@ -45,9 +45,8 @@ pub enum Error {
 #[contract]
 pub struct ErrorRegistryContract;
 
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin: Address = env
-        .storage()
+fn read_admin(env: &Env) -> Result<Address, Error> {
+    env.storage()
         .instance()
         .get(&DataKey::Admin)
         .ok_or(Error::NotInitialized)?;

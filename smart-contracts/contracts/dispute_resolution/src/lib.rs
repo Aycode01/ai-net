@@ -210,12 +210,16 @@ fn apply_final_ruling(
 impl DisputeResolutionContract {
     /// Initialize the contract once.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyExists);
         }
-        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -497,7 +501,7 @@ impl DisputeResolutionContract {
             dispute_id: dispute_id.clone(),
             evidence_id,
             submitter: submitter.clone(),
-            evidence_hash,
+            evidence_hash: evidence_hash.clone(),
             submitted_at: now,
         };
         env.storage()
@@ -518,6 +522,9 @@ impl DisputeResolutionContract {
                 dispute_id,
                 evidence_id,
                 submitter,
+                evidence_hash,
+                submitted_at: now,
+                evidence_index: evidence_count,
             },
         );
         Ok(evidence_id)

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '../../utils/logger.js';
 import { CircuitBreaker } from './circuitBreaker.js';
-import { CircuitOpenError, TokenBudgetExceededError } from './errors.js';
+import { CircuitOpenError, TokenBudgetExceededError, VeniceStatusError } from './errors.js';
 import { VeniceResponseCache, buildCacheKey } from './cache.js';
 import { RequestDeduplicator } from './dedup.js';
 import { getConfig } from '../../config/index.js';
@@ -50,6 +50,23 @@ const RETRY_DELAYS_MS = [200, 400, 800, 1600];
 const RETRYABLE_STATUS_CODES = new Set([429, 503, 500, 502, 504]);
 const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 422]);
 const DEFAULT_CHAT_MODEL = 'llama-3.3-70b';
+
+/**
+ * Whether a failure is worth retrying against a *different* provider.
+ *
+ * A 401 may succeed on a fallback provider that holds a different key, so it
+ * fails over. Any other 4xx means the provider rejected the request itself — a
+ * malformed body or an unprocessable prompt — and every other provider will
+ * reject it identically, so trying again only amplifies load during exactly the
+ * conditions where we are already being refused. 429 and 5xx, transport errors
+ * and timeouts stay failover-worthy because they are per-provider conditions.
+ */
+function shouldFailoverToNextProvider(err: Error): boolean {
+  if (!(err instanceof VeniceStatusError)) return true;
+  if (err.status === 401) return true;
+  if (err.status === 429) return true;
+  return err.status >= 500;
+}
 
 /** A completed upstream call: the text plus what it cost in tokens. */
 interface FetchOutcome {
@@ -427,10 +444,11 @@ export class VeniceClient implements VeniceClientLike {
           throw err;
         }
         lastError = err instanceof Error ? err : new Error(String(err));
-        // Non-retryable 400/422 on last provider should not failover further — but we still try next if available
-        const isNonRetryable = lastError.message.includes('non-retryable');
-        // For 401, trying next provider with different key may succeed, so we do failover
-        if (pIndex < this.providers.length - 1) {
+        // A 401 may still succeed on a fallback holding a different key, so it
+        // fails over; other 4xx statuses will be rejected by every provider and
+        // only serve to amplify load, so they fail fast.
+        const mayFailover = shouldFailoverToNextProvider(lastError);
+        if (mayFailover && pIndex < this.providers.length - 1) {
           const nextProvider = this.providers[pIndex + 1]!.name ?? `fallback-${pIndex + 1}`;
           log.warn(
             { agentType, model, failedProvider: provider.name, nextProvider, error: lastError.message, retries },
@@ -486,11 +504,20 @@ export class VeniceClient implements VeniceClientLike {
       stream: true,
     });
 
-    let accumulated = '';
+    // Deltas are buffered per provider attempt and only handed to the caller
+    // once an attempt completes. Emitting eagerly meant that a mid-stream
+    // failure left the caller's first provider's partial output already
+    // delivered, and the failover then appended a second provider's output on
+    // top of it — the caller received two responses concatenated with nothing
+    // marking the boundary (issue #661).
+    let delivered = 0;
     let lastError: Error | undefined;
 
     for (let pIndex = 0; pIndex < this.providers.length; pIndex++) {
       const provider = this.providers[pIndex]!;
+      // Per-attempt buffer. Reset up front so no state leaks between providers.
+      let accumulated = '';
+      const deltas: string[] = [];
       try {
         const response = await this.fetchWithRetryForProvider(body, provider, () => { retries++; });
 
@@ -541,9 +568,23 @@ export class VeniceClient implements VeniceClientLike {
           const result = await reader.read();
           done = result.done;
           if (result.value) {
-            // `stream: true` keeps a multi-byte UTF-8 sequence that straddles
-            // a chunk boundary intact; the final read flushes the decoder.
-            buffer += decoder.decode(result.value, { stream: !done });
+            const text = decoder.decode(result.value, { stream: !done });
+            const lines = text.split('\n');
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const payload = line.slice(6).trim();
+              if (payload === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(payload);
+                const delta = parsed?.choices?.[0]?.delta?.content;
+                if (typeof delta === 'string' && delta.length > 0) {
+                  accumulated += delta;
+                  deltas.push(delta);
+                }
+              } catch {
+                // skip malformed SSE chunks
+              }
+            }
           }
 
           // Everything up to the last newline is a complete line; the remainder
@@ -568,6 +609,11 @@ export class VeniceClient implements VeniceClientLike {
           );
         }
 
+        // The attempt completed, so this output is authoritative. Only now is
+        // it safe to hand to the caller.
+        for (const delta of deltas) onChunk(delta);
+        delivered = accumulated.length;
+
         this.breaker.recordSuccess();
         // SSE frames only carry deltas, so there is no provider usage block to
         // read. Estimate from the prompt and everything we actually received;
@@ -580,16 +626,21 @@ export class VeniceClient implements VeniceClientLike {
         if (err instanceof CircuitOpenError || err instanceof TokenBudgetExceededError) {
           throw err;
         }
+        // Discard the failed provider's partial output: it was never delivered,
+        // so counting it would misreport both usage and progress.
+        const droppedChars = accumulated.length;
+        accumulated = '';
         lastError = err instanceof Error ? err : new Error(String(err));
-        if (pIndex < this.providers.length - 1) {
-          log.warn({ agentType, model, failedProvider: provider.name, error: lastError.message }, 'venice stream provider failed — failover');
+        const mayFailover = shouldFailoverToNextProvider(lastError);
+        if (mayFailover && pIndex < this.providers.length - 1) {
+          log.warn({ agentType, model, failedProvider: provider.name, error: lastError.message, droppedChars }, 'venice stream provider failed — failover');
           await this.sleep(100);
           continue;
         }
         this.breaker.recordFailure();
         this.logRequest(requestId, agentType, model, prompt, Date.now() - start, 'error', retries, provider.name);
         throw new Error(
-          `Venice stream error after ${accumulated.length} characters accumulated: ${lastError.message}`
+          `Venice stream error after ${delivered} characters delivered: ${lastError.message}`
         );
       }
     }
@@ -634,12 +685,12 @@ export class VeniceClient implements VeniceClientLike {
 
         if (NON_RETRYABLE_STATUS_CODES.has(response.status) && response.status !== 401) {
           // 401 may succeed on fallback with different key, so we treat it as retriable for failover
-          throw new Error(`Venice returned non-retryable status: ${response.status}`);
+          throw new VeniceStatusError(response.status, `Venice returned non-retryable status: ${response.status}`);
         }
 
         // 401 is special: allow failover to next provider, not retry same provider
         if (response.status === 401) {
-          throw new Error(`Venice returned non-retryable status: ${response.status}`);
+          throw new VeniceStatusError(response.status, `Venice returned non-retryable status: ${response.status}`);
         }
 
         if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < maxAttempts - 1) {
@@ -648,7 +699,7 @@ export class VeniceClient implements VeniceClientLike {
           continue;
         }
 
-        throw new Error(`Venice returned status: ${response.status}`);
+        throw new VeniceStatusError(response.status, `Venice returned status: ${response.status}`);
       } catch (err) {
         if (timeoutId) clearTimeout(timeoutId);
         // AbortError from timeout
@@ -661,8 +712,10 @@ export class VeniceClient implements VeniceClientLike {
           }
           throw lastError;
         }
-        if (err instanceof Error && err.message.startsWith('Venice returned')) {
-          // For non-retryable, don't retry same provider — throw to allow failover to next provider
+        if (err instanceof VeniceStatusError) {
+          // A status response is final for this provider: do not retry it here.
+          // Whether the *next* provider is worth trying is decided by
+          // shouldFailoverToNextProvider in the caller.
           throw err;
         }
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -682,16 +735,6 @@ export class VeniceClient implements VeniceClientLike {
     // Add jitter ±20% to avoid thundering herd
     const jitter = base * 0.2 * (Math.random() * 2 - 1);
     return Math.max(50, Math.round(base + jitter));
-  }
-
-  // Legacy fetchWithRetry kept for backward compat (delegates to primary provider)
-  private async fetchWithRetry(
-    body: string,
-    onRetry: () => void
-  ): Promise<Response> {
-    const primary = this.providers[0];
-    if (!primary) throw new Error('No Venice providers configured');
-    return this.fetchWithRetryForProvider(body, primary, onRetry);
   }
 
   private sleep(ms: number): Promise<void> {

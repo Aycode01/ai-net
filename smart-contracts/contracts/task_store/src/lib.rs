@@ -883,7 +883,7 @@ mod test {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events, Ledger},
-        Address, Bytes, Env, IntoVal,
+        Address, Bytes, Env, IntoVal, TryFromVal, TryIntoVal, Val,
     };
 
     struct Fixture {
@@ -1215,6 +1215,26 @@ mod test {
             events.get(0).unwrap().1,
             (symbol_short!("task_meta"), symbol_short!("ora_set")).into_val(&fixture.env)
         );
+    }
+
+    #[test]
+    fn pause_blocks_store_task_metadata() {
+        let fixture = fixture();
+        let agents = Vec::from_array(&fixture.env, [fixture.agent.clone()]);
+        let dag = Bytes::from_slice(&fixture.env, &[0x78, 0x9c, 0x03, 0x00]);
+
+        fixture.client.pause();
+
+        let result = fixture.client.try_store_task_metadata(
+            &fixture.submitter,
+            &fixture.task_id,
+            &fixture.prompt_hash,
+            &agents,
+            &dag,
+            &1u32,
+            &None,
+        );
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
     }
 
     // ── Oracle pricing integration (cross-contract) ────────────────────────────

@@ -13,6 +13,7 @@ coverage/
 # Rust build artifacts
 **/target/
 playwright-report/
+playwright-report-visual/
 test-results/
 
 # Testnet contract farm output (deploy + gas + report artifacts)
