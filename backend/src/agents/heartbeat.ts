@@ -1,9 +1,22 @@
+import { signAgentRequest } from "./agentAuthClient";
+
 export interface HeartbeatClientOptions {
   apiBaseUrl: string;
   agentId: string;
   intervalMs?: number;
   failureThreshold?: number;
   onFailureThresholdReached?: (consecutiveFailures: number) => void;
+  /**
+   * Stellar public key of the agent. Sent as the claimed key; the coordinator
+   * checks it against the registered key (#558).
+   */
+  publicKey?: string;
+  /**
+   * Stellar secret used to sign the heartbeat challenge (#558). Without it the
+   * client posts unsigned, which the coordinator refuses once the
+   * `agent_ownership_proof` flag is on.
+   */
+  secret?: string;
 }
 
 export class HeartbeatClient {
@@ -11,6 +24,8 @@ export class HeartbeatClient {
   private readonly agentId: string;
   private readonly intervalMs: number;
   private readonly failureThreshold: number;
+  private readonly publicKey?: string;
+  private readonly secret?: string;
   private readonly onFailureThresholdReached?: (consecutiveFailures: number) => void;
   private interval: NodeJS.Timeout | null = null;
   private stopped = false;
@@ -21,6 +36,8 @@ export class HeartbeatClient {
     this.agentId = options.agentId;
     this.intervalMs = options.intervalMs ?? 30_000;
     this.failureThreshold = options.failureThreshold ?? 3;
+    this.publicKey = options.publicKey;
+    this.secret = options.secret;
     this.onFailureThresholdReached = options.onFailureThresholdReached;
   }
 
@@ -49,9 +66,22 @@ export class HeartbeatClient {
     if (this.stopped) return;
 
     try {
-      const response = await fetch(`${this.apiBaseUrl}/api/agents/${encodeURIComponent(this.agentId)}/heartbeat`, {
-        method: 'POST',
-      });
+      const url = `${this.apiBaseUrl}/api/agents/${encodeURIComponent(this.agentId)}/heartbeat`;
+      const payload = { agentId: this.agentId };
+      const signed = this.publicKey
+        ? await signAgentRequest({
+            apiBaseUrl: this.apiBaseUrl,
+            purpose: "heartbeat",
+            publicKey: this.publicKey,
+            secret: this.secret,
+            agentId: this.agentId,
+            payload,
+          })
+        : null;
+
+      const init: RequestInit = { method: 'POST' };
+      if (signed) init.headers = { ...signed };
+      const response = await fetch(url, init);
       if (!response.ok) {
         this.consecutiveFailures += 1;
         console.warn(`[Heartbeat] Heartbeat failed for ${this.agentId}: ${response.status} (failure #${this.consecutiveFailures})`);

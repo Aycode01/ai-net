@@ -7,6 +7,9 @@ import { getDb as getPaymentDb } from "../db";
 import { getTaskDb } from "../db/tasks";
 import { getJobDb } from "../queue";
 import { createLogger } from "../utils/logger";
+import { config } from "../config";
+
+import { getConfig } from "../config";
 
 const logger = createLogger({ component: "admin-control" });
 
@@ -32,8 +35,8 @@ export interface AdminAuditEntry {
 }
 
 let readOnlyState: ReadOnlyState = {
-  enabled: process.env.AI_NET_READ_ONLY === "true",
-  reason: process.env.AI_NET_READ_ONLY_REASON,
+  enabled: config.AI_NET_READ_ONLY,
+  reason: config.AI_NET_READ_ONLY_REASON,
   changedAt: new Date().toISOString(),
   changedBy: "boot",
 };
@@ -42,7 +45,7 @@ let auditDb: Database.Database | null = null;
 
 function getAuditDb(): Database.Database {
   if (!auditDb) {
-    const dbPath = process.env.ADMIN_AUDIT_DB_PATH ?? DEFAULT_AUDIT_DB;
+    const dbPath = config.ADMIN_AUDIT_DB_PATH;
     auditDb = new Database(dbPath);
     auditDb.pragma("busy_timeout = 5000");
     auditDb.pragma("journal_mode = WAL");
@@ -64,14 +67,6 @@ function getAuditDb(): Database.Database {
     `);
   }
   return auditDb;
-}
-
-export function getReadOnlyState(): ReadOnlyState {
-  return { ...readOnlyState };
-}
-
-export function isReadOnly(): boolean {
-  return readOnlyState.enabled;
 }
 
 export function setReadOnlyState(enabled: boolean, actor: string, reason?: string): ReadOnlyState {
@@ -225,7 +220,7 @@ export function vacuumDatabases(): MaintenanceResult[] {
 }
 
 export async function backupDatabases(directory?: string): Promise<MaintenanceResult[]> {
-  const targetDir = directory ?? process.env.ADMIN_BACKUP_DIR ?? DEFAULT_BACKUP_DIR;
+  const targetDir = directory ?? config.ADMIN_BACKUP_DIR;
   fs.mkdirSync(targetDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 

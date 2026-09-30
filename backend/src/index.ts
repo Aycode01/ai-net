@@ -12,6 +12,7 @@ import { AgentCleanupService } from "./services/agentCleanup";
 import { createAgentDb, getAgentDb, closeAgentDb } from "./db/agents";
 import { closeDb } from "./db/index";
 import { closeAuthDb } from "./db/auth";
+import { closeErrorDb } from "./db/errorRegistry";
 import { closeTaskDb, getTaskDb, createTaskDb } from "./db/tasks";
 import { closeJobDb } from "./queue";
 import { closeEventStore, getEventStore } from "./events/eventStore";
@@ -111,11 +112,11 @@ async function main() {
 }
 
 export interface GracefulShutdownExtras {
-  cleanupService?: { stop(): void };
-  reconciliationService?: { stop(): void };
-  maintenanceService?: { stop(): void };
-  errorRegistryMaintenance?: { stop(): void };
-  eventRetention?: { stop(): void };
+  cleanupService?: { stop(): void | Promise<void> };
+  reconciliationService?: { stop(): void | Promise<void> };
+  maintenanceService?: { stop(): void | Promise<void> };
+  errorRegistryMaintenance?: { stop(): void | Promise<void> };
+  eventRetention?: { stop(): void | Promise<void> };
   globalAgentRegistry?: { shutdown(): void };
   idempotencyStore?: { stopCleanup(): void; close(): void };
 }
@@ -123,16 +124,12 @@ export interface GracefulShutdownExtras {
 /**
  * SIGTERM/SIGINT handler: stop accepting new work, drain in-flight jobs and
  * the WebSocket stream, flush the event store, close every database
- * connection, then exit 0 — or force-exit 1 if any of that takes longer
- * than `config.GRACEFUL_SHUTDOWN_TIMEOUT` seconds.
+ * connection, then exit. Exceeding `config.GRACEFUL_SHUTDOWN_TIMEOUT` marks
+ * the shutdown as timed out, but does not bypass active writes or DB closure.
  *
  * In-flight tasks are drained (via `closeApp`, which awaits the job
- * worker's stop()) rather than force-failed: anything still running when
- * the drain window elapses stays "active" in the job store with its lease
- * released, and is resumed by the next `JobWorker.start()`
- * (`recoverIncompleteJobs()` reclaims active rows whose lease has expired) —
- * see `docs/e2e-testing.md` and `tests/shutdown.test.ts` for the
- * restart-mid-stream scenario.
+ * worker's stop()) rather than force-failed, keeping the pool available for
+ * final task/event writes before shutdown closes it.
  */
 export function setupGracefulShutdown(
   httpServer: any,
@@ -150,9 +147,11 @@ export function setupGracefulShutdown(
     logger.info({ signal }, "starting graceful shutdown sequence");
 
     const timeoutDuration = (config.GRACEFUL_SHUTDOWN_TIMEOUT ?? 30) * 1000;
+    let timedOut = false;
+    let shutdownFailed = false;
     const forcedTimeout = setTimeout(() => {
-      logger.error({ signal, timeoutSeconds: timeoutDuration / 1000 }, "force-killing timed out shutdown");
-      process.exit(1);
+      timedOut = true;
+      logger.error({ signal, timeoutSeconds: timeoutDuration / 1000 }, "shutdown exceeded its timeout; waiting for active work to settle");
     }, timeoutDuration);
 
     try {
@@ -163,48 +162,66 @@ export function setupGracefulShutdown(
           resolve();
         });
       });
-
-      logger.info("stopping background services");
-      stopAgentSync();
-      extras.cleanupService?.stop();
-      extras.reconciliationService?.stop();
-      extras.maintenanceService?.stop();
-      extras.errorRegistryMaintenance?.stop();
-      extras.globalAgentRegistry?.shutdown();
-      extras.idempotencyStore?.stopCleanup();
-
-      logger.info("failing running tasks");
-      try {
-        const taskDb = createTaskDb(getTaskDb());
-        taskDb.failRunningTasks();
-      } catch (err) {
-        logger.error({ err }, "failed to mark tasks as failed during shutdown");
-      }
-
-      logger.info("marking online agents offline");
-      try {
-        const agentDb = createAgentDb(getAgentDb());
-        agentDb.markAllOffline();
-      } catch (err) {
-        logger.error({ err }, "failed to mark agents offline during shutdown");
-      }
-
-      logger.info("closing database connections");
-      closeDb();
-      closeAgentDb();
-      closeTaskDb();
-      closeJobDb();
-      closeAuthDb();
-      closeEventStore();
-      resetDefaultIdempotencyStore();
-
-      logger.info({ signal }, "graceful shutdown complete");
-      clearTimeout(forcedTimeout);
-      process.exit(0);
     } catch (error) {
-      logger.error({ err: error }, "error during graceful shutdown");
-      process.exit(1);
+      shutdownFailed = true;
+      logger.error({ err: error }, "error while draining http/ws server");
     }
+
+    logger.info("stopping background services");
+    const stopResults = await Promise.allSettled([
+      Promise.resolve().then(() => stopAgentSync()),
+      Promise.resolve().then(() => extras.cleanupService?.stop()),
+      Promise.resolve().then(() => extras.reconciliationService?.stop()),
+      Promise.resolve().then(() => extras.maintenanceService?.stop()),
+      Promise.resolve().then(() => extras.errorRegistryMaintenance?.stop()),
+      Promise.resolve().then(() => extras.eventRetention?.stop()),
+      Promise.resolve().then(() => extras.globalAgentRegistry?.shutdown()),
+      Promise.resolve().then(() => extras.idempotencyStore?.stopCleanup()),
+    ]);
+    for (const result of stopResults) {
+      if (result.status === "rejected") {
+        shutdownFailed = true;
+        logger.error({ err: result.reason }, "background service failed to stop");
+      }
+    }
+
+    logger.info("failing running tasks");
+    try {
+      const taskDb = createTaskDb(getTaskDb());
+      taskDb.failRunningTasks();
+    } catch (err) {
+      logger.error({ err }, "failed to mark tasks as failed during shutdown");
+    }
+
+    logger.info("marking online agents offline");
+    try {
+      const agentDb = createAgentDb(getAgentDb());
+      agentDb.markAllOffline();
+    } catch (err) {
+      logger.error({ err }, "failed to mark agents offline during shutdown");
+    }
+
+    logger.info("closing database connections");
+    const closeResults = await Promise.allSettled([
+      closeDb(),
+      closeAgentDb(),
+      closeTaskDb(),
+      closeJobDb(),
+      closeAuthDb(),
+      closeErrorDb(),
+      closeEventStore(),
+    ]);
+    for (const result of closeResults) {
+      if (result.status === "rejected") {
+        shutdownFailed = true;
+        logger.error({ err: result.reason }, "database failed to close cleanly");
+      }
+    }
+    resetDefaultIdempotencyStore();
+
+    logger.info({ signal }, "graceful shutdown complete");
+    clearTimeout(forcedTimeout);
+    process.exit(shutdownFailed || timedOut ? 1 : 0);
   };
 
   process.on("SIGTERM", () => shutdown("SIGTERM"));

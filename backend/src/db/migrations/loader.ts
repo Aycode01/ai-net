@@ -22,6 +22,7 @@
 import { createHash } from "crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { join } from "path";
+import { getConfig } from "../../config";
 
 /** A single migration, parsed from one `.sql` file. */
 export interface Migration {
@@ -161,7 +162,7 @@ export function loadMigrations(dir: string): Migration[] {
 export function resolveMigrationsDir(explicit?: string): string {
   const candidates = [
     explicit,
-    process.env.DB_MIGRATIONS_DIR,
+    getConfig().DB_MIGRATIONS_DIR,
     __dirname, // ts-node / jest / dist (when assets were copied)
     join(__dirname, "..", "..", "..", "..", "src", "db", "migrations"), // dist → source tree
   ].filter((candidate): candidate is string => typeof candidate === "string" && candidate !== "");

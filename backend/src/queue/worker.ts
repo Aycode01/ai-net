@@ -322,6 +322,7 @@ export class JobWorker {
       this.store.updateStatus(job.id, "completed", {
         progress: 100,
         completedAt: now,
+        expectedStatus: "active",
       });
 
       logger.info({ jobId: job.id, taskId: job.taskId }, "job completed successfully");
@@ -341,6 +342,7 @@ export class JobWorker {
           attempts,
           lastError: errorMessage,
           nextRunAt,
+          expectedStatus: "active",
         });
 
         logger.warn(
@@ -362,6 +364,7 @@ export class JobWorker {
           attempts,
           lastError: errorMessage,
           failedAt: now,
+          expectedStatus: "active",
         });
 
         logger.error(

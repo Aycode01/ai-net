@@ -29,12 +29,7 @@ module.exports = {
     '!src/**/*.d.ts',
     '!src/**/*.test.ts',
     '!src/**/*.spec.ts',
-    '!src/**/index.ts',
     '!src/**/.gitkeep',
-    '!src/registry/sync.ts',
-    '!src/api/routes/stream.ts',
-    '!src/index.ts',
-    '!src/checkSpec.ts',
   ],
   coverageThreshold: {
     global: {
