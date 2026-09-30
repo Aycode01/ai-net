@@ -7,12 +7,15 @@
 //! booking with escrow, and rating.
 
 mod errors;
+pub mod gas;
 mod types;
 
 pub use errors::Error;
 pub use types::*;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Symbol, Vec,
+};
 
 #[contracttype]
 #[derive(Clone)]
@@ -23,6 +26,10 @@ pub enum DataKey {
     Booking(Symbol),
     AgentRating(Symbol),
     ListingsByCapability(Symbol),
+    /// Stellar Asset Contract used for booking payments.
+    PaymentAsset,
+    /// Decimals of the configured payment asset.
+    AssetDecimals,
 }
 
 #[contract]
@@ -50,15 +57,64 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
     Ok(())
 }
 
+/// Decimals in which listing prices (`price_stroops`) are denominated.
+pub const STROOP_DECIMALS: u32 = 7;
+
+/// Convert a stroop-denominated amount into units of an asset with
+/// `decimals` decimals. Fails with [`Error::InvalidAmount`] for negative
+/// amounts or when the amount is not exactly representable in the asset.
+pub fn stroops_to_units(amount: i128, decimals: u32) -> Result<i128, Error> {
+    if amount < 0 {
+        return Err(Error::InvalidAmount);
+    }
+    if decimals >= STROOP_DECIMALS {
+        10i128
+            .checked_pow(decimals - STROOP_DECIMALS)
+            .and_then(|f| amount.checked_mul(f))
+            .ok_or(Error::InvalidAmount)
+    } else {
+        let f = 10i128.pow(STROOP_DECIMALS - decimals);
+        if amount % f != 0 {
+            return Err(Error::InvalidAmount);
+        }
+        Ok(amount / f)
+    }
+}
+
+/// The configured payment token and its decimals, re-checked against the
+/// token so a misconfigured asset can never silently mis-scale amounts.
+fn payment_token(env: &Env) -> Result<(token::Client<'_>, u32), Error> {
+    let asset: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaymentAsset)
+        .ok_or(Error::AssetNotConfigured)?;
+    let decimals: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::AssetDecimals)
+        .ok_or(Error::AssetNotConfigured)?;
+    let client = token::Client::new(env, &asset);
+    if client.decimals() != decimals {
+        return Err(Error::AssetMismatch);
+    }
+    Ok((client, decimals))
+}
+
 #[contractimpl]
 impl AgentMarketplaceContract {
     /// Initialize the marketplace with an admin.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyExists);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (symbol_short!("market"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -102,12 +158,55 @@ impl AgentMarketplaceContract {
         Ok(())
     }
 
+    /// Admin: configure the Stellar Asset Contract bookings are paid in.
+    /// `decimals` must match the token's own decimals, otherwise
+    /// [`Error::AssetMismatch`].
+    pub fn set_payment_asset(env: Env, asset: Address, decimals: u32) -> Result<(), Error> {
+        require_admin(&env)?;
+        if token::Client::new(&env, &asset).decimals() != decimals {
+            return Err(Error::AssetMismatch);
+        }
+        env.storage().instance().set(&DataKey::PaymentAsset, &asset);
+        env.storage().instance().set(&DataKey::AssetDecimals, &decimals);
+        env.events().publish(
+            (symbol_short!("market"), symbol_short!("asset_set")),
+            (asset, decimals),
+        );
+        Ok(())
+    }
+
+    /// Returns the configured payment asset, if any.
+    pub fn get_payment_asset(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PaymentAsset)
+    }
+
+    /// Returns the configured payment asset's decimals, if any.
+    pub fn get_asset_decimals(env: Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::AssetDecimals)
+    }
+
     /// Returns whether the contract is currently paused.
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
+    }
+
+    /// Estimate CPU instructions for listing, searching, or purchasing.
+    /// `count` is the number of listings scanned for search or operations.
+    pub fn estimate_gas(env: Env, operation: Symbol, count: u32) -> u64 {
+        let _ = env;
+        gas::estimate(operation, count)
+    }
+
+    pub fn estimate(
+        env: Env,
+        operation: Symbol,
+        params: soroban_sdk::Map<Symbol, soroban_sdk::Val>,
+    ) -> u64 {
+        let _ = env;
+        <AgentMarketplaceContract as gas_interface::GasEstimator>::estimate(operation, params)
     }
 
     /// List a service on the marketplace.
@@ -203,15 +302,26 @@ impl AgentMarketplaceContract {
     }
 
     /// Book an agent's service with escrow payment.
+    ///
+    /// `payment_amount` is in stroops (like `price_stroops`) and is converted
+    /// to units of the configured asset, then transferred from `client` into
+    /// contract custody. `asset` must equal the configured payment asset,
+    /// otherwise [`Error::AssetMismatch`].
     pub fn book_agent(
         env: Env,
         listing_id: Symbol,
         client: Address,
+        asset: Address,
         payment_amount: i128,
         booking_id: Symbol,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         client.require_auth();
+
+        let (token, decimals) = payment_token(&env)?;
+        if token.address != asset {
+            return Err(Error::AssetMismatch);
+        }
 
         let key = DataKey::ServiceListing(listing_id.clone());
         let listing: ServiceListing = env
@@ -233,12 +343,16 @@ impl AgentMarketplaceContract {
             return Err(Error::AlreadyExists);
         }
 
+        // Pull the payment into escrow before recording it.
+        let escrow_amount = stroops_to_units(payment_amount, decimals)?;
+        token.transfer(&client, &env.current_contract_address(), &escrow_amount);
+
         let booking = Booking {
             booking_id: booking_id.clone(),
             listing_id: listing_id.clone(),
             agent_id: listing.agent_id.clone(),
             client: client.clone(),
-            escrow_amount: payment_amount,
+            escrow_amount,
             created_at: env.ledger().timestamp(),
             completed: false,
             cancelled: false,
@@ -254,7 +368,7 @@ impl AgentMarketplaceContract {
                 booking_id: booking_id.clone(),
                 listing_id,
                 client,
-                escrow_amount: payment_amount,
+                escrow_amount,
             },
         );
 
@@ -292,6 +406,13 @@ impl AgentMarketplaceContract {
         booking.completed = true;
         env.storage().persistent().set(&booking_key, &booking);
 
+        let (token, _) = payment_token(&env)?;
+        token.transfer(
+            &env.current_contract_address(),
+            &listing.owner,
+            &booking.escrow_amount,
+        );
+
         env.events().publish(
             (symbol_short!("market"), symbol_short!("svc_comp")),
             ServiceCompletedEvent {
@@ -326,6 +447,13 @@ impl AgentMarketplaceContract {
         booking.cancelled = true;
         env.storage().persistent().set(&booking_key, &booking);
 
+        let (token, _) = payment_token(&env)?;
+        token.transfer(
+            &env.current_contract_address(),
+            &booking.client,
+            &booking.escrow_amount,
+        );
+
         env.events().publish(
             (symbol_short!("market"), symbol_short!("svc_canc")),
             ServiceCancelledEvent {
@@ -341,7 +469,7 @@ impl AgentMarketplaceContract {
     pub fn rate_booking(env: Env, booking_id: Symbol, rating: u32) -> Result<(), Error> {
         require_not_paused(&env)?;
 
-        if rating < 1 || rating > 5 {
+        if !(1..=5).contains(&rating) {
             return Err(Error::InvalidPrice);
         }
 
@@ -380,6 +508,15 @@ impl AgentMarketplaceContract {
         agent_rating.rating_sum += rating as u64;
         env.storage().persistent().set(&rating_key, &agent_rating);
 
+        env.events().publish(
+            (symbol_short!("market"), symbol_short!("svc_rate")),
+            ServiceRatedEvent {
+                booking_id,
+                agent_id: booking.agent_id,
+                rating,
+            },
+        );
+
         Ok(())
     }
 
@@ -407,6 +544,12 @@ impl AgentMarketplaceContract {
                 total_ratings: 0,
                 rating_sum: 0,
             })
+    }
+}
+
+impl gas_interface::GasEstimator for AgentMarketplaceContract {
+    fn estimate(operation: Symbol, params: soroban_sdk::Map<Symbol, soroban_sdk::Val>) -> u64 {
+        gas::estimate(operation, params.len())
     }
 }
 

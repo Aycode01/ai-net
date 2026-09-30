@@ -71,3 +71,11 @@ pub struct PriceResolvedEvent {
     pub price: i128,
     pub source: PriceSource,
 }
+
+/// Event emitted when an underlying oracle call fails.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OracleFailureEvent {
+    pub pair: Symbol,
+    pub error_code: u32,
+}

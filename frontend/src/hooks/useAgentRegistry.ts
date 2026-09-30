@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getAgents } from '../services/api'
+import { getAgentsPage } from '../services/api'
 import type { AgentRecord } from '../types/api'
 import { normalizeAgent } from '@utils/agentRegistry'
 
@@ -14,6 +14,11 @@ export interface AgentRegistryResult {
   loading: boolean
   error: string | null
   refetch: () => void
+  nextPage: () => void
+  firstPage: () => void
+  hasNextPage: boolean
+  isFirstPage: boolean
+  fetching: boolean
 }
 
 /**
@@ -28,20 +33,29 @@ export function useAgentRegistry(options: AgentRegistryOptions = {}): AgentRegis
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
 
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [isFirstPage, setIsFirstPage] = useState(true)
+  const [fetching, setFetching] = useState(false)
+  const currentCursor = useRef<string | undefined>(undefined)
   const isFirstLoad = useRef(true)
   const fetchingRef = useRef(false)
   const mountedRef = useRef(true)
 
-  const fetchAgents = useCallback(async () => {
+  const fetchAgents = useCallback(async (requestedCursor: string | null | undefined = currentCursor.current) => {
+    const cursor = requestedCursor ?? undefined
     if (fetchingRef.current) return
     fetchingRef.current = true
+    setFetching(true)
 
     if (isFirstLoad.current) setLoading(true)
 
     try {
-      const data = await getAgents()
+      const data = await getAgentsPage(cursor)
       if (!mountedRef.current) return
-      setAgents(Array.isArray(data) ? data.map(normalizeAgent) : [])
+      currentCursor.current = cursor
+      setIsFirstPage(cursor === undefined)
+      setNextCursor(data.pagination.nextCursor)
+      setAgents(data.items.map(normalizeAgent))
       setError(null)
     } catch (err) {
       if (!mountedRef.current) return
@@ -49,6 +63,7 @@ export function useAgentRegistry(options: AgentRegistryOptions = {}): AgentRegis
     } finally {
       if (mountedRef.current) {
         setLoading(false)
+        setFetching(false)
       }
       isFirstLoad.current = false
       fetchingRef.current = false
@@ -79,5 +94,10 @@ export function useAgentRegistry(options: AgentRegistryOptions = {}): AgentRegis
     fetchAgents()
   }, [fetchAgents])
 
-  return { agents, loading, error, refetch }
+  return {
+    agents, loading, error, refetch, fetching, isFirstPage,
+    hasNextPage: nextCursor !== null,
+    nextPage: () => { if (nextCursor) void fetchAgents(nextCursor) },
+    firstPage: () => { void fetchAgents(null) },
+  }
 }

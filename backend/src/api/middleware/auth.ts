@@ -48,6 +48,54 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     next();
     return;
   }
+
+  res.status(401).json({ error: "Unauthorized", message: "API key required" });
+}
+
+/**
+ * Session auth middleware: requires a valid JWT access token.
+ * Rejects unauthenticated requests with 401.
+ */
+export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const auth = req.headers["authorization"] ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (!token) {
+    res.status(401).json({ error: "Unauthorized", message: "Bearer token required" });
+    return;
+  }
+
+  try {
+    const payload = getAuthService().verifyAccessToken(token);
+    req.user = payload;
+    next();
+  } catch {
+    res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
+  }
+}
+
+/**
+/**
+ * Strict session auth middleware for protected user endpoints.
+ * Requires a valid unrevoked access token in Authorization: Bearer <token>.
+ */
+export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const auth = req.headers["authorization"] ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (!token) {
+    res.status(401).json({ error: "Unauthorized", message: "Missing authorization token" });
+    return;
+  }
+
+  try {
+    const payload = getAuthService().verifyAccessToken(token);
+    req.user = payload;
+    return next();
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Invalid or expired token";
+    res.status(401).json({ error: "Unauthorized", message });
+  }
 }
 
 /**

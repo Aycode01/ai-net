@@ -7,13 +7,16 @@
 //! task's escrow by off-chain payment coordinators.
 
 mod errors;
+pub mod gas;
 mod types;
 
 pub use errors::Error;
 pub use types::*;
 
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contractclient, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    String, Symbol, Vec,
 };
 
 /// Evidence phase duration: 48 hours.
@@ -28,6 +31,23 @@ pub const MAX_EVIDENCE_PER_DISPUTE: u32 = 20;
 pub const MINIMUM_VOTES: u32 = 3;
 /// Maximum length of a dispute reason, in bytes.
 pub const MAX_REASON_BYTES: u32 = 512;
+/// Window after the first ruling in which the losing party may appeal.
+pub const APPEAL_PHASE: u64 = 24 * 60 * 60;
+const TTL_THRESHOLD: u32 = 50_000;
+const TTL_EXTEND_TO: u32 = 241_920;
+
+#[contractclient(name = "AgentRegistryClient")]
+pub trait AgentRegistryInterface {
+    fn lock_bond_for_dispute(env: Env, caller: Address, agent_id: Symbol);
+    fn release_bond_after_dispute(env: Env, caller: Address, agent_id: Symbol);
+    fn slash_bond_from_dispute(
+        env: Env,
+        caller: Address,
+        agent_id: Symbol,
+        percentage: u32,
+        reason: String,
+    ) -> i128;
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -40,10 +60,14 @@ pub enum DataKey {
     Vote(Symbol, Address),
     VoterReputation(Address),
     AgentBond(Address),
+    AgentRegistryId(Address),
     AgentReputation(Address),
     FilerReputation(Address),
     TaskEscrow(Symbol),
     ActiveVoters,
+    AgentRegistry,
+    AppealVote(Symbol, Address),
+    VoteRound(Symbol),
 }
 
 #[contract]
@@ -79,9 +103,17 @@ fn load_dispute(env: &Env, dispute_id: &Symbol) -> Result<Dispute, Error> {
 }
 
 fn save_dispute(env: &Env, dispute: &Dispute) {
+    let key = DataKey::Dispute(dispute.task_id.clone());
+    env.storage().persistent().set(&key, dispute);
     env.storage()
         .persistent()
-        .set(&DataKey::Dispute(dispute.task_id.clone()), dispute);
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+}
+
+fn extend_ttl(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 fn start_voting(env: &Env, dispute: &mut Dispute) {
@@ -95,16 +127,99 @@ fn start_voting(env: &Env, dispute: &mut Dispute) {
     }
 }
 
+fn current_vote_key(env: &Env, dispute_id: &Symbol, voter: &Address) -> DataKey {
+    if env
+        .storage()
+        .persistent()
+        .get::<_, u32>(&DataKey::VoteRound(dispute_id.clone()))
+        .unwrap_or(0)
+        == 0
+    {
+        DataKey::Vote(dispute_id.clone(), voter.clone())
+    } else {
+        DataKey::AppealVote(dispute_id.clone(), voter.clone())
+    }
+}
+
+fn apply_final_ruling(
+    env: &Env,
+    dispute: &mut Dispute,
+    outcome: &DisputeOutcome,
+) -> Result<(), Error> {
+    let registry = AgentRegistryClient::new(env, &dispute.registry_address);
+    if *outcome == DisputeOutcome::SupportFiler {
+        let bond_key = DataKey::AgentBond(dispute.agent_id.clone());
+        let cached_bond: i128 = env.storage().persistent().get(&bond_key).unwrap_or(0);
+        let reason = String::from_str(&env, "verified dispute upheld");
+        dispute.bond_slashed = registry.slash_bond_from_dispute(
+            &env.current_contract_address(),
+            &dispute.registry_agent_id,
+            &50,
+            &reason,
+        );
+        env.storage().persistent().set(
+            &bond_key,
+            &cached_bond.saturating_sub(dispute.bond_slashed),
+        );
+        let reputation_key = DataKey::AgentReputation(dispute.agent_id.clone());
+        let reputation: u32 = env.storage().persistent().get(&reputation_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&reputation_key, &reputation.saturating_sub(1));
+        env.storage().persistent().set(
+            &DataKey::VoterReputation(dispute.agent_id.clone()),
+            &reputation.saturating_sub(1),
+        );
+    } else {
+        registry.release_bond_after_dispute(
+            &env.current_contract_address(),
+            &dispute.registry_agent_id,
+        );
+    }
+
+    if *outcome == DisputeOutcome::SupportAgent {
+        let reputation_key = DataKey::FilerReputation(dispute.filer.clone());
+        let reputation: u32 = env.storage().persistent().get(&reputation_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&reputation_key, &reputation.saturating_sub(1));
+        env.storage().persistent().set(
+            &DataKey::VoterReputation(dispute.filer.clone()),
+            &reputation.saturating_sub(1),
+        );
+    }
+
+    dispute.status = DisputeStatus::Resolved;
+    save_dispute(env, dispute);
+    env.events().publish(
+        (symbol_short!("dispute"), symbol_short!("resolved")),
+        DisputeResolvedEvent {
+            dispute_id: dispute.task_id.clone(),
+            outcome: outcome.clone(),
+            filer_votes: dispute.filer_votes,
+            agent_votes: dispute.agent_votes,
+            filer_refund: dispute.filer_refund,
+            agent_payment: dispute.agent_payment,
+            bond_slashed: dispute.bond_slashed,
+        },
+    );
+    Ok(())
+}
+
 #[contractimpl]
 impl DisputeResolutionContract {
     /// Initialize the contract once.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyExists);
         }
-        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("init")),
+            (admin, env.ledger().sequence()),
+        );
         Ok(())
     }
 
@@ -199,8 +314,8 @@ impl DisputeResolutionContract {
         Ok(())
     }
 
-    /// Record the agent's current bond before a task is disputed. The value is
-    /// kept locally so the 50% slash is deterministic and auditable.
+    /// Record a bond snapshot for provisional ruling details. Final slashes
+    /// are computed from the registry's live bond balance.
     pub fn set_agent_bond(
         env: Env,
         agent_id: Address,
@@ -213,12 +328,36 @@ impl DisputeResolutionContract {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::AgentBond(agent_id), &bond_amount);
+            .set(&DataKey::AgentBond(agent_id.clone()), &bond_amount);
+        extend_ttl(&env, &DataKey::AgentBond(agent_id));
         Ok(())
     }
 
-    /// Record escrow associated with a task. The resolution event supplies the
-    /// exact destination amounts to the configured payment coordinator.
+    /// Admin: configure the registry contract that owns agent bond records.
+    pub fn set_agent_registry(env: Env, registry: Address) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::AgentRegistry, &registry);
+        Ok(())
+    }
+
+    /// Admin: map the dispute-party address to its registry agent identifier.
+    pub fn set_agent_registry_id(
+        env: Env,
+        agent: Address,
+        registry_agent_id: Symbol,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        require_admin(&env)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::AgentRegistryId(agent.clone()), &registry_agent_id);
+        extend_ttl(&env, &DataKey::AgentRegistryId(agent));
+        Ok(())
+    }
+
+    /// Record escrow associated with a task. The final `resolved` event supplies
+    /// destination amounts to the configured payment coordinator.
     pub fn set_task_escrow(
         env: Env,
         task_id: Symbol,
@@ -238,7 +377,8 @@ impl DisputeResolutionContract {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::TaskEscrow(task_id), &amount);
+            .set(&DataKey::TaskEscrow(task_id.clone()), &amount);
+        extend_ttl(&env, &DataKey::TaskEscrow(task_id));
         Ok(())
     }
 
@@ -268,12 +408,37 @@ impl DisputeResolutionContract {
         if voters.len() < MINIMUM_VOTES {
             return Err(Error::NoVotersAvailable);
         }
+        let registry_address: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AgentRegistry)
+            .ok_or(Error::Unauthorized)?;
+        let registry_agent_id: Symbol = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AgentRegistryId(agent_id.clone()))
+            .ok_or(Error::Unauthorized)?;
+        extend_ttl(&env, &DataKey::AgentRegistryId(agent_id.clone()));
+        let escrow_key = DataKey::TaskEscrow(task_id.clone());
+        if env.storage().persistent().has(&escrow_key) {
+            extend_ttl(&env, &escrow_key);
+        }
+        let bond_key = DataKey::AgentBond(agent_id.clone());
+        if env.storage().persistent().has(&bond_key) {
+            extend_ttl(&env, &bond_key);
+        }
+        AgentRegistryClient::new(&env, &registry_address).lock_bond_for_dispute(
+            &env.current_contract_address(),
+            &registry_agent_id,
+        );
         let now = env.ledger().timestamp();
         let evidence_deadline = now.saturating_add(EVIDENCE_PHASE);
         let dispute = Dispute {
             task_id: task_id.clone(),
             filer: filer.clone(),
             agent_id: agent_id.clone(),
+            registry_address: registry_address.clone(),
+            registry_agent_id: registry_agent_id.clone(),
             reason,
             status: DisputeStatus::EvidencePhase,
             filed_at: now,
@@ -281,16 +446,19 @@ impl DisputeResolutionContract {
             voting_deadline: evidence_deadline.saturating_add(VOTING_PHASE),
             voters,
             resolution: None,
+            appeal_deadline: None,
+            appealed: false,
             filer_votes: 0,
             agent_votes: 0,
             bond_slashed: 0,
             filer_refund: 0,
             agent_payment: 0,
         };
-        env.storage().persistent().set(&key, &dispute);
+        save_dispute(&env, &dispute);
         env.storage()
             .persistent()
             .set(&DataKey::EvidenceCount(task_id.clone()), &0u32);
+        extend_ttl(&env, &DataKey::EvidenceCount(task_id.clone()));
         env.events().publish(
             (symbol_short!("dispute"), symbol_short!("filed")),
             DisputeFiledEvent {
@@ -333,7 +501,7 @@ impl DisputeResolutionContract {
             dispute_id: dispute_id.clone(),
             evidence_id,
             submitter: submitter.clone(),
-            evidence_hash,
+            evidence_hash: evidence_hash.clone(),
             submitted_at: now,
         };
         env.storage()
@@ -342,6 +510,8 @@ impl DisputeResolutionContract {
         env.storage()
             .persistent()
             .set(&count_key, &evidence_id.saturating_add(1));
+        extend_ttl(&env, &DataKey::Evidence(dispute_id.clone(), evidence_id));
+        extend_ttl(&env, &count_key);
         if dispute.status == DisputeStatus::Filed {
             dispute.status = DisputeStatus::EvidencePhase;
             save_dispute(&env, &dispute);
@@ -352,6 +522,9 @@ impl DisputeResolutionContract {
                 dispute_id,
                 evidence_id,
                 submitter,
+                evidence_hash,
+                submitted_at: now,
+                evidence_index: evidence_count,
             },
         );
         Ok(evidence_id)
@@ -388,7 +561,7 @@ impl DisputeResolutionContract {
         {
             return Err(Error::NotEligibleVoter);
         }
-        let vote_key = DataKey::Vote(dispute_id.clone(), voter.clone());
+        let vote_key = current_vote_key(&env, &dispute_id, &voter);
         if env.storage().persistent().has(&vote_key) {
             return Err(Error::AlreadyVoted);
         }
@@ -402,6 +575,7 @@ impl DisputeResolutionContract {
             voted_at: now,
         };
         env.storage().persistent().set(&vote_key, &vote);
+        extend_ttl(&env, &vote_key);
         env.events().publish(
             (symbol_short!("dispute"), symbol_short!("vote")),
             VoteCastEvent {
@@ -413,16 +587,24 @@ impl DisputeResolutionContract {
         Ok(())
     }
 
-    /// Resolve once the voting deadline has passed. Anyone may call this, so a
-    /// keeper/coordinator can automatically settle expired disputes.
+    /// Record the outcome after a voting round. The first outcome is provisional;
+    /// an unappealed ruling must be finalized after its appeal window.
+    ///
+    /// Resolution is only permitted once the voting window has closed, i.e.
+    /// `now >= voting_deadline`. Calling earlier returns
+    /// [`Error::VotingStillOpen`]; calling on a finalized dispute returns
+    /// [`Error::DisputeAlreadyResolved`].
     pub fn resolve(env: Env, dispute_id: Symbol) -> Result<DisputeOutcome, Error> {
         let mut dispute = load_dispute(&env, &dispute_id)?;
         if dispute.status == DisputeStatus::Resolved {
             return Err(Error::DisputeAlreadyResolved);
         }
+        if dispute.status == DisputeStatus::AppealPending {
+            return Err(Error::InvalidPhase);
+        }
         let now = env.ledger().timestamp();
         if now < dispute.voting_deadline {
-            return Err(Error::InvalidPhase);
+            return Err(Error::VotingStillOpen);
         }
         if dispute.status != DisputeStatus::Voting {
             start_voting(&env, &mut dispute);
@@ -434,7 +616,7 @@ impl DisputeResolutionContract {
             if let Some(vote) = env
                 .storage()
                 .persistent()
-                .get::<_, Vote>(&DataKey::Vote(dispute_id.clone(), voter))
+                .get::<_, Vote>(&current_vote_key(&env, &dispute_id, &voter))
             {
                 match vote.ruling {
                     VoteSide::SupportFiler => filer_votes += 1,
@@ -457,59 +639,122 @@ impl DisputeResolutionContract {
             let bond_key = DataKey::AgentBond(dispute.agent_id.clone());
             let bond: i128 = env.storage().persistent().get(&bond_key).unwrap_or(0);
             dispute.bond_slashed = bond / 2;
-            env.storage()
-                .persistent()
-                .set(&bond_key, &(bond - dispute.bond_slashed));
-            let reputation_key = DataKey::AgentReputation(dispute.agent_id.clone());
-            let reputation: u32 = env
-                .storage()
-                .persistent()
-                .get(&reputation_key)
-                .unwrap_or(0);
-            env.storage()
-                .persistent()
-                .set(&reputation_key, &reputation.saturating_sub(1));
-            env.storage().persistent().set(
-                &DataKey::VoterReputation(dispute.agent_id.clone()),
-                &reputation.saturating_sub(1),
-            );
             DisputeOutcome::SupportFiler
         } else {
             dispute.agent_payment = escrow;
-            let reputation_key = DataKey::FilerReputation(dispute.filer.clone());
-            let reputation: u32 = env
-                .storage()
-                .persistent()
-                .get(&reputation_key)
-                .unwrap_or(0);
-            env.storage()
-                .persistent()
-                .set(&reputation_key, &reputation.saturating_sub(1));
-            env.storage().persistent().set(
-                &DataKey::VoterReputation(dispute.filer.clone()),
-                &reputation.saturating_sub(1),
-            );
             DisputeOutcome::SupportAgent
         };
 
-        dispute.status = DisputeStatus::Resolved;
-        dispute.filer_votes = filer_votes;
-        dispute.agent_votes = agent_votes;
-        dispute.resolution = Some(outcome.code());
+        let round = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::VoteRound(dispute_id.clone()))
+            .unwrap_or(0);
+        if round == 0 {
+            let deadline = now.saturating_add(APPEAL_PHASE);
+            dispute.status = DisputeStatus::AppealPending;
+            dispute.appeal_deadline = Some(deadline);
+            save_dispute(&env, &dispute);
+            env.events().publish(
+                (symbol_short!("dispute"), symbol_short!("proposed")),
+                DisputeResolvedEvent {
+                    dispute_id: dispute_id.clone(),
+                    outcome: outcome.clone(),
+                    filer_votes,
+                    agent_votes,
+                    filer_refund: dispute.filer_refund,
+                    agent_payment: dispute.agent_payment,
+                    bond_slashed: dispute.bond_slashed,
+                },
+            );
+        } else {
+            apply_final_ruling(&env, &mut dispute, &outcome)?;
+        }
+        Ok(outcome)
+    }
+
+    /// The losing party may request one appeal during the first ruling's
+    /// appeal window. The appeal receives a fresh bounded voting round.
+    ///
+    /// Only a dispute carrying a provisional ruling (`AppealPending`) can be
+    /// appealed. A dispute with no ruling yet (`Filed`, `EvidencePhase`,
+    /// `Voting`) returns [`Error::NotResolved`]; a finalized dispute
+    /// (`Resolved`) returns [`Error::DisputeAlreadyResolved`].
+    pub fn appeal_dispute(
+        env: Env,
+        dispute_id: Symbol,
+        appellant: Address,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        appellant.require_auth();
+        let mut dispute = load_dispute(&env, &dispute_id)?;
+        match dispute.status {
+            DisputeStatus::AppealPending => {}
+            DisputeStatus::Resolved => return Err(Error::DisputeAlreadyResolved),
+            DisputeStatus::Filed | DisputeStatus::EvidencePhase | DisputeStatus::Voting => {
+                return Err(Error::NotResolved)
+            }
+        }
+        if dispute.appealed {
+            return Err(Error::AppealAlreadyFiled);
+        }
+        let deadline = dispute.appeal_deadline.ok_or(Error::AppealExpired)?;
+        let now = env.ledger().timestamp();
+        if now >= deadline {
+            return Err(Error::AppealExpired);
+        }
+        let losing_party = match dispute.resolution {
+            Some(0) => dispute.agent_id.clone(),
+            Some(1) => dispute.filer.clone(),
+            _ => return Err(Error::Unauthorized),
+        };
+        if appellant != losing_party {
+            return Err(Error::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VoteRound(dispute_id.clone()), &1u32);
+        extend_ttl(&env, &DataKey::VoteRound(dispute_id.clone()));
+        dispute.status = DisputeStatus::Voting;
+        dispute.appealed = true;
+        dispute.evidence_deadline = now;
+        dispute.voting_deadline = now.saturating_add(VOTING_PHASE);
+        dispute.resolution = None;
+        dispute.filer_votes = 0;
+        dispute.agent_votes = 0;
+        dispute.bond_slashed = 0;
+        dispute.filer_refund = 0;
+        dispute.agent_payment = 0;
         save_dispute(&env, &dispute);
         env.events().publish(
-            (symbol_short!("dispute"), symbol_short!("resolved")),
-            DisputeResolvedEvent {
-                dispute_id: dispute_id.clone(),
-                outcome: outcome.clone(),
-                filer_votes,
-                agent_votes,
-                filer_refund: dispute.filer_refund,
-                agent_payment: dispute.agent_payment,
-                bond_slashed: dispute.bond_slashed,
-            },
+            (symbol_short!("dispute"), symbol_short!("appealed")),
+            (dispute_id, appellant),
         );
-        Ok(outcome)
+        Ok(())
+    }
+
+    /// Finalize an unappealed ruling after its appeal window expires. This is
+    /// the only path that emits settlement amounts for the escrow coordinator.
+    pub fn finalize_dispute(env: Env, dispute_id: Symbol) -> Result<(), Error> {
+        let mut dispute = load_dispute(&env, &dispute_id)?;
+        if dispute.status != DisputeStatus::AppealPending {
+            return Err(Error::InvalidPhase);
+        }
+        if dispute.appealed {
+            return Err(Error::InvalidPhase);
+        }
+        let deadline = dispute.appeal_deadline.ok_or(Error::AppealExpired)?;
+        if env.ledger().timestamp() < deadline {
+            return Err(Error::InvalidPhase);
+        }
+        let outcome = match dispute.resolution {
+            Some(0) => DisputeOutcome::SupportFiler,
+            Some(1) => DisputeOutcome::SupportAgent,
+            Some(2) => DisputeOutcome::Tie,
+            _ => return Err(Error::InvalidPhase),
+        };
+        apply_final_ruling(&env, &mut dispute, &outcome)
     }
 
     pub fn get_dispute(env: Env, dispute_id: Symbol) -> Option<Dispute> {
@@ -534,7 +779,7 @@ impl DisputeResolutionContract {
     pub fn get_vote(env: Env, dispute_id: Symbol, voter: Address) -> Option<Vote> {
         env.storage()
             .persistent()
-            .get(&DataKey::Vote(dispute_id, voter))
+            .get(&current_vote_key(&env, &dispute_id, &voter))
     }
 
     pub fn get_reputation(env: Env, account: Address) -> u32 {
@@ -549,6 +794,12 @@ impl DisputeResolutionContract {
             .persistent()
             .get(&DataKey::AgentBond(agent_id))
             .unwrap_or(0)
+    }
+}
+
+impl gas_interface::GasEstimator for DisputeResolutionContract {
+    fn estimate(operation: Symbol, params: Map<Symbol, Val>) -> u64 {
+        gas::estimate(operation, params.len())
     }
 }
 

@@ -292,6 +292,29 @@ mod upgrade_tests {
     }
 
     #[test]
+    fn test_upgrade_and_rollback_swap_full_path() {
+        let (env, client, _admin) = setup_upgrade_test();
+        let original_hash = test_wasm_hash(&env, 1);
+        let new_hash = test_wasm_hash(&env, 2);
+
+        client.upgrade_contract(
+            &new_hash,
+            &String::from_str(&env, "1.10.0"),
+            &String::from_str(&env, "swap path"),
+        );
+        let calls = env.as_contract(&client.address, || upgrade_manager::mock_swap_calls(&env));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.get(0).unwrap(), new_hash);
+        assert_eq!(client.get_wasm_hash(), new_hash);
+
+        client.emergency_rollback(&original_hash, &String::from_str(&env, "1.0.0"));
+        let calls = env.as_contract(&client.address, || upgrade_manager::mock_swap_calls(&env));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.get(1).unwrap(), original_hash);
+        assert_eq!(client.get_wasm_hash(), original_hash);
+    }
+
+    #[test]
     fn test_emergency_rollback_no_rollback_available() {
         let (env, client, _admin) = setup_upgrade_test();
 

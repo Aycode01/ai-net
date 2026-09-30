@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 
 export const handlers = [
   http.get('/api/agents', () => {
-    return HttpResponse.json([
+    return HttpResponse.json({ data: { items: [
       {
         id: 'agent-1',
         name: 'Research Specialist',
@@ -27,7 +27,7 @@ export const handlers = [
         reputation: 4.2,
         status: 'inactive',
       },
-    ])
+    ], pagination: { limit: 100, nextCursor: null, hasNextPage: false } } })
   }),
 
   http.post('/api/tasks', async () => {
