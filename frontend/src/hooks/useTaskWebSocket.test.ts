@@ -163,7 +163,7 @@ describe('useTaskWebSocket', () => {
 
     // Check if reconnection is scheduled
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
-    
+
     setTimeoutSpy.mockRestore();
   });
 
@@ -224,7 +224,7 @@ describe('useTaskWebSocket', () => {
       MockWebSocket.instance!.simulateClose();
     });
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
-    
+
     setTimeoutSpy.mockRestore();
   });
 
@@ -248,13 +248,40 @@ describe('useTaskWebSocket', () => {
 
     // 6th disconnection should not schedule another reconnection
     const timeoutCallsBefore = setTimeoutSpy.mock.calls.length;
-    
+
     act(() => {
       MockWebSocket.instance!.simulateClose();
     });
 
     expect(setTimeoutSpy.mock.calls.length).toBe(timeoutCallsBefore);
-    
+
     setTimeoutSpy.mockRestore();
+  });
+
+  it('recovers after exhausting automatic retries when manually reconnected', () => {
+    const { result } = renderHook(() =>
+      useTaskWebSocket({
+        taskId: 'test-task',
+        onMessage: vi.fn(),
+        maxReconnectAttempts: 2,
+      })
+    );
+
+    act(() => MockWebSocket.instance!.simulateClose());
+    act(() => vi.advanceTimersByTime(1000));
+    act(() => MockWebSocket.instance!.simulateClose());
+    act(() => vi.advanceTimersByTime(2000));
+    act(() => MockWebSocket.instance!.simulateClose());
+
+    expect(result.current.status).toBe('disconnected');
+    const exhaustedSocket = MockWebSocket.instance;
+
+    act(() => result.current.reconnect());
+    expect(MockWebSocket.instance).not.toBe(exhaustedSocket);
+    expect(result.current.status).toBe('connecting');
+
+    act(() => MockWebSocket.instance!.simulateOpen());
+    expect(result.current.status).toBe('connected');
+    expect(result.current.isConnected).toBe(true);
   });
 });

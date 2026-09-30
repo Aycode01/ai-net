@@ -229,6 +229,7 @@
   "page.task.ws.connected": "connected",
   "page.task.ws.connecting": "connecting",
   "page.task.ws.disconnected": "disconnected",
+  "page.task.ws.reconnect": "Reconnect live updates",
   "page.task.taskId": "Task ID: {{id}}",
   "page.task.sync": "Sync",
   "page.task.dagTitle": "Execution DAG Status",
