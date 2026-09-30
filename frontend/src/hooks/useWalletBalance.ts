@@ -23,6 +23,10 @@ interface BalanceInfo {
  * Fetches the full balance set for a Stellar account from Horizon. The native
  * XLM balance is always present for a funded account; additional trustlines
  * surface as `credit_alphanum4`/`credit_alphanum12` issued-asset entries.
+ *
+ * Wallet-switch behaviour: changing `publicKey` immediately clears stale data,
+ * sets loading to true, and triggers a fresh fetch without waiting for the next
+ * poll interval. No ref is mutated during the render phase.
  */
 export function useWalletBalance(publicKey: string | null): BalanceInfo {
   const [balance, setBalance] = useState<string>('0')
@@ -30,17 +34,25 @@ export function useWalletBalance(publicKey: string | null): BalanceInfo {
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
   const isFirstLoad = useRef(true)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const keyRef = useRef<string | null>(publicKey)
 
-  keyRef.current = publicKey
+  // Clear stale data immediately when the wallet changes so the UI never
+  // shows the previous wallet's numbers while the new fetch is in-flight.
+  useEffect(() => {
+    setBalance('0')
+    setBalances([])
+    setError(null)
+    setLoading(true)
+    isFirstLoad.current = true
+  }, [publicKey])
 
+  // `publicKey` is captured directly in the callback so a wallet switch
+  // produces a new function reference and re-triggers the fetch effect below.
   const fetchBalance = useCallback(async () => {
-    const key = keyRef.current
-    if (!key) {
+    if (!publicKey) {
       setBalance('0')
       setBalances([])
       setError(null)
+      setLoading(false)
       return
     }
 
@@ -49,7 +61,7 @@ export function useWalletBalance(publicKey: string | null): BalanceInfo {
       setLoading(true)
     }
     try {
-      const res = await fetch(`${HORIZON_URL}/accounts/${key}`)
+      const res = await fetch(`${HORIZON_URL}/accounts/${publicKey}`)
       if (!res.ok) {
         if (res.status === 404) {
           setBalance('0')
@@ -72,18 +84,15 @@ export function useWalletBalance(publicKey: string | null): BalanceInfo {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [publicKey])
 
   useEffect(() => {
     fetchBalance()
 
-    intervalRef.current = setInterval(fetchBalance, POLL_INTERVAL)
+    const intervalId = setInterval(fetchBalance, POLL_INTERVAL)
 
     return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
-      }
+      clearInterval(intervalId)
     }
   }, [fetchBalance])
 

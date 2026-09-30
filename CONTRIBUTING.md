@@ -138,6 +138,13 @@ npm test               # Unit test suite
 npm run test:coverage  # Jest coverage with thresholds
 ```
 
+The backend serves an interactive, "try it out" reference for every route at
+**http://localhost:3000/api-docs** (raw spec at `/openapi.json` and
+`/openapi.yaml`). The spec is asserted to stay in lockstep with the routes the
+app actually registers, so if you add or remove a mount, add or update the
+matching `@openapi` JSDoc block in the route file — `tests/docs.test.ts` fails
+otherwise.
+
 ### 5.3 Frontend (React & Vite)
 ```bash
 cd frontend
@@ -182,3 +189,4 @@ Before marking a PR as ready for review:
 ## 7. Agent & Contributor Guidelines
 
 For AI coding agents and automated contributors, refer to [AGENTS.md](AGENTS.md) for strict architectural rules, toolchain conventions, and repository standards.
+..

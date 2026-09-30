@@ -220,7 +220,7 @@ impl PriceOracleContract {
         require_not_paused(&env)?;
         require_admin(&env)?;
         if new_max_age == 0 {
-            return Err(Error::InvalidTimestamp); // reuse; a zero age is nonsensical
+            return Err(Error::InvalidMaxPriceAge);
         }
         let old_max_age = read_max_age(&env);
         env.storage()
@@ -506,7 +506,7 @@ mod test {
         init(&f);
         assert_eq!(
             f.client.try_set_max_price_age(&0u64),
-            Err(Ok(Error::InvalidTimestamp))
+            Err(Ok(Error::InvalidMaxPriceAge))
         );
     }
 

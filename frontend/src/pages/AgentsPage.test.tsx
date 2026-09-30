@@ -4,10 +4,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import AgentsPage from './AgentsPage'
 import type { AgentRecord } from '../types/api'
 
-const { getAgents } = vi.hoisted(() => ({ getAgents: vi.fn() }))
+const { getAgents, getPagination } = vi.hoisted(() => ({ getAgents: vi.fn(), getPagination: vi.fn() }))
 
 vi.mock('../services/api', () => ({
-  getAgents,
+  getAgentsPage: async (cursor?: string) => ({
+    items: await getAgents(cursor),
+    pagination: getPagination(cursor),
+  }),
 }))
 
 const AGENTS: AgentRecord[] = [
@@ -54,6 +57,8 @@ function renderPage(initialEntries = ['/agents']) {
 }
 
 beforeEach(() => {
+  getPagination.mockReset()
+  getPagination.mockReturnValue({ limit: 100, nextCursor: null, hasNextPage: false })
   getAgents.mockReset()
   getAgents.mockResolvedValue(AGENTS)
 })
@@ -216,5 +221,26 @@ describe('AgentsPage - auto-refresh', () => {
     expect(screen.queryByTestId('agents-page-skeleton')).not.toBeInTheDocument()
     expect(screen.queryByTestId('agent-skeleton-row')).not.toBeInTheDocument()
     expect(getAgents).toHaveBeenCalledTimes(2)
+  })
+})
+
+
+describe('AgentsPage - cursor navigation', () => {
+  it('replaces the current page and allows returning to the first page', async () => {
+    getPagination.mockImplementation((cursor?: string) => ({
+      limit: 100, nextCursor: cursor ? null : 'second-page', hasNextPage: !cursor,
+    }))
+    getAgents.mockImplementation(async (cursor?: string) => cursor ? [AGENTS[2]] : [AGENTS[0]])
+    renderPage()
+    await screen.findByTestId('agent-row-agent-research-001')
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await screen.findByTestId('agent-row-agent-audit-003')
+    expect(screen.queryByTestId('agent-row-agent-research-001')).not.toBeInTheDocument()
+    expect(getAgents).toHaveBeenLastCalledWith('second-page')
+    expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'First page' }))
+    await screen.findByTestId('agent-row-agent-research-001')
+    expect(getAgents).toHaveBeenLastCalledWith(undefined)
+    expect(screen.getByRole('button', { name: 'First page' })).toBeDisabled()
   })
 })

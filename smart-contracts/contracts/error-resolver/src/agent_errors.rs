@@ -9,6 +9,10 @@ const CONTRACT_VERSION: &str = "1.0.0";
 /// `ErrorResolver` lookup table (see `lookup.rs`): this contract tracks how
 /// many errors have been reported for a given agent, so `agent-registry` can
 /// cascade cleanup on removal and surface error counts in health queries.
+pub const MAX_AUTHORIZED_CALLERS: u32 = 32;
+pub const TTL_THRESHOLD: u32 = 100_000;
+pub const TTL_EXTEND_TO: u32 = 535_680;
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -19,6 +23,8 @@ pub enum DataKey {
     Quorum,
     PendingOps,
     AuditLog,
+    /// Whether the contract is paused (instance storage).
+    Paused,
 }
 
 /// A pending allowlist operation awaiting quorum approvals.
@@ -67,6 +73,8 @@ pub enum ContractError {
     AlreadyApproved = 6,
     OpNotFound = 7,
     SignerNotFound = 8,
+    MaxCallersReached = 9,
+    InvalidAuditRange = 10,
 }
 
 #[contract]
@@ -408,6 +416,32 @@ impl ErrorResolverContract {
         Ok(())
     }
 
+    /// Pause the contract. Only admin can call this.
+    pub fn pause(env: Env) -> Result<(), ContractError> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((symbol_short!("errres"), symbol_short!("paused")), ());
+        Ok(())
+    }
+
+    /// Unpause the contract. Only admin can call this.
+    pub fn unpause(env: Env) -> Result<(), ContractError> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((symbol_short!("errres"), symbol_short!("unpaused")), ());
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     /// Allowlists a contract address (e.g. agent-registry) to call
     /// `record_error` and `clear_agent_errors`. Admin only.
     pub fn add_authorized_caller(env: Env, caller: Address) -> Result<(), ContractError> {
@@ -418,6 +452,9 @@ impl ErrorResolverContract {
             .get(&DataKey::AuthorizedCallers)
             .unwrap_or_else(|| Vec::new(&env));
         if !allowlist.contains(&caller) {
+            if allowlist.len() >= MAX_AUTHORIZED_CALLERS {
+                return Err(ContractError::MaxCallersReached);
+            }
             allowlist.push_back(caller.clone());
             env.storage()
                 .instance()
@@ -466,6 +503,9 @@ impl ErrorResolverContract {
         let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
         let new_count = count.saturating_add(1);
         env.storage().persistent().set(&key, &new_count);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
         env.events().publish(
             (symbol_short!("errres"), symbol_short!("recorded")),
             (agent_id, new_count),

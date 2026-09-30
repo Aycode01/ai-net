@@ -18,8 +18,9 @@ This runbook provides an operator guide for executing smart contract upgrades on
 
 ## 1. Overview & Safety Principles
 
-All on-chain contracts in **ai-net** (Agent Registry, Upgrade Manager, Error Registry, Agent Bidding) follow strict upgrade safety invariants:
+All on-chain contracts in **ai-net** (Agent Registry, Upgrade Manager, Error Registry, Agent Bidding, Task Store) follow a single standardized upgrade safety design:
 
+- **Canonical Upgrade Path**: All upgrades are executed via `UpgradeManager` using proposals, compatibility validation hooks, and 48-hour rollback records. Direct unvalidated WASM replacement is strictly prohibited and enforced by CI (`check_upgrade_paths.sh`).
 - **Zero State Loss**: Existing instance, persistent, and temporary storage keys must either remain bitwise identical or be transformed through deterministic post-upgrade migration hooks.
 - **Rollback Window**: Every executed upgrade records a snapshot of the prior WASM hash and version, permitting an emergency rollback within **34,560 ledgers (~48 hours)**.
 - **Authorization**: Only the registered admin keypair (`ADMIN_ADDRESS`) can propose, validate, execute, or roll back upgrades.
