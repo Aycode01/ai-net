@@ -159,8 +159,8 @@ router.get("/ready", async (_req: Request, res: Response) => {
     try {
       const jobDb = (queueModule.getJobDb as Function)();
       jobDb.prepare("SELECT 1").get();
-    } catch (error) {
-      (checks as any).queue = "error";
+    } catch {
+      checks.queue = "error";
     }
   } catch (error) {
     res.status(500).json({ status: "error", checks, error: String(error) });
