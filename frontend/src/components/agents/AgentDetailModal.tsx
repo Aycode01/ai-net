@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next'
 import { ExternalLink } from 'lucide-react'
 import type { AgentRecord } from '../../types/api'
 import { ReputationStars } from './ReputationStars'
+import { AgentReputationTrend } from './AgentReputationTrend'
+import { useAgentReputation } from '../../hooks/useAgentReputation'
 import styles from './AgentDetailModal.module.css'
 import { Modal } from './Modal'
 
@@ -15,6 +17,8 @@ interface AgentDetailModalProps {
 
 export function AgentDetailModal({ agent, onClose }: AgentDetailModalProps) {
   const { t } = useTranslation()
+  // Fetch reputation history for this agent (Issue #629)
+  const { data: reputation } = useAgentReputation(agent?.id ?? '')
 
   useEffect(() => {
     if (!agent) return
@@ -114,6 +118,12 @@ export function AgentDetailModal({ agent, onClose }: AgentDetailModalProps) {
           </div>
 
           </dl>
+
+          {reputation && reputation.history && reputation.history.length > 0 && (
+            <section aria-label={t('agent.modal.reputationTrend', { defaultValue: 'Reputation trend' })}>
+              <AgentReputationTrend history={reputation.history} />
+            </section>
+          )}
         </>
       )}
     </Modal>
