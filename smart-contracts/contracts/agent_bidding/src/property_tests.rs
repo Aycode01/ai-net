@@ -26,7 +26,17 @@ fn setup() -> (Env, AgentBiddingContractClient<'static>) {
     env.mock_all_auths();
     let id = env.register(AgentBiddingContract, ());
     let client = AgentBiddingContractClient::new(&env, &id);
+    client.initialize(&Address::generate(&env));
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    client.set_payment_asset(&sac.address(), &7);
     (env, client)
+}
+
+/// Mint enough test tokens to `who` to cover an uncapped budget plus bonds.
+fn fund(env: &Env, client: &AgentBiddingContractClient<'_>, who: &Address) {
+    let asset = client.get_payment_asset().unwrap();
+    soroban_sdk::token::StellarAssetClient::new(env, &asset)
+        .mint(who, &(10 * super::MAX_BID_PRICE));
 }
 
 /// Helper: create a test auction with default config.
@@ -37,6 +47,7 @@ fn create_test_auction(
     task_id: &Symbol,
     duration_secs: u64,
 ) {
+    fund(_env, client, creator);
     client.create_auction(
         creator,
         task_id,
@@ -144,6 +155,7 @@ fn setup_bid(
     let salt = BytesN::<32>::from_array(env, &[salt_byte; 32]);
     let terms = String::from_str(env, "");
     let comm = test_commitment(client, task_id, bidder, price, &terms, &salt);
+    fund(&env, &client, bidder);
     client.submit_bid(task_id, bidder, &comm, &500_000, &(reputation as u32));
     env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
     client.reveal_bid(task_id, bidder, &price, &terms, &salt);
@@ -175,6 +187,7 @@ fn prop_reputation_bounds_within_valid_range() {
         let terms = String::from_str(&env, "");
         let commitment = test_commitment(&client, &task_id, &bidder, price, &terms, &salt);
 
+        fund(&env, &client, &bidder);
         let result = client.try_submit_bid(&task_id, &bidder, &commitment, &500_000, &rep);
         assert!(
             result.is_ok(),
@@ -212,6 +225,7 @@ fn prop_reputation_above_max_always_rejected() {
         let terms = String::from_str(&env, "");
         let commitment = test_commitment(&client, &task_id, &bidder, price, &terms, &salt);
 
+        fund(&env, &client, &bidder);
         let result = client.try_submit_bid(&task_id, &bidder, &commitment, &500_000, &rep);
         assert!(result.is_err(), "reputation {} should be rejected", rep);
     }
@@ -308,6 +322,7 @@ fn submit_only(
     let salt = BytesN::<32>::from_array(env, &[salt_byte; 32]);
     let terms = String::from_str(env, "");
     let comm = test_commitment(client, task_id, bidder, price, &terms, &salt);
+    fund(&env, &client, bidder);
     client.submit_bid(task_id, bidder, &comm, &500_000, &(reputation as u32));
 }
 
@@ -440,6 +455,7 @@ fn prop_unique_auction_ids() {
         let task_id_str = alloc::format!("auc_{}", i);
         let task_id = Symbol::new(&env, &task_id_str);
 
+        fund(&env, &client, &creator);
         let result = client.try_create_auction(
             &creator,
             &task_id,
@@ -490,6 +506,7 @@ fn prop_unique_bidder_entries() {
         let terms = String::from_str(&env, "");
         let comm = test_commitment(&client, &task_id, &bidder, price, &terms, &salt);
 
+        fund(&env, &client, &bidder);
         let result = client.try_submit_bid(&task_id, &bidder, &comm, &500_000, &rep);
         assert!(result.is_ok(), "bidder {} should be accepted", i);
     }
@@ -513,6 +530,7 @@ fn prop_zero_bond_no_panic() {
     let creator = Address::generate(&env);
     let task_id = Symbol::new(&env, "mp1");
 
+    fund(&env, &client, &creator);
     let result = client.try_create_auction(
         &creator,
         &task_id,
@@ -534,6 +552,7 @@ fn prop_zero_reserve_price_no_panic() {
     let creator = Address::generate(&env);
     let task_id = Symbol::new(&env, "mp2");
 
+    fund(&env, &client, &creator);
     let result = client.try_create_auction(
         &creator,
         &task_id,
@@ -555,6 +574,7 @@ fn prop_negative_bond_no_panic() {
     let creator = Address::generate(&env);
     let task_id = Symbol::new(&env, "mp3");
 
+    fund(&env, &client, &creator);
     let result = client.try_create_auction(
         &creator,
         &task_id,
@@ -584,6 +604,7 @@ fn prop_invalid_reputation_fails_gracefully() {
     let comm = test_commitment(&client, &task_id, &bidder, 2_000_000, &terms, &salt);
 
     for bad_rep in [101u32, 200, 1000, u32::MAX] {
+        fund(&env, &client, &bidder);
         let result = client.try_submit_bid(&task_id, &bidder, &comm, &500_000, &bad_rep);
         assert!(
             result.is_err(),
@@ -604,6 +625,7 @@ fn prop_zero_commitment_no_panic() {
     create_test_auction(&env, &client, &creator, &task_id, 3600);
 
     let zero_comm = BytesN::<32>::from_array(&env, &[0u8; 32]);
+    fund(&env, &client, &bidder);
     let result = client.try_submit_bid(&task_id, &bidder, &zero_comm, &500_000, &50);
     assert!(result.is_err(), "zero commitment should fail, not panic");
 }
@@ -623,6 +645,7 @@ fn prop_wrong_bond_no_panic() {
     let comm = test_commitment(&client, &task_id, &bidder, 2_000_000, &terms, &salt);
 
     for wrong_bond in [0i128, 1, 499_999, 500_001, 1_000_000, i128::MAX] {
+        fund(&env, &client, &bidder);
         let result = client.try_submit_bid(&task_id, &bidder, &comm, &wrong_bond, &50);
         assert!(
             result.is_err(),
@@ -647,6 +670,7 @@ fn prop_invalid_reveal_price_no_panic() {
     let terms = String::from_str(&env, "");
     let real_price: i128 = 5_000_000;
     let comm = test_commitment(&client, &task_id, &bidder, real_price, &terms, &salt);
+    fund(&env, &client, &bidder);
     client.submit_bid(&task_id, &bidder, &comm, &500_000, &50);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
@@ -679,6 +703,7 @@ fn prop_wrong_commitment_reveal_no_panic() {
     let salt = BytesN::<32>::from_array(&env, &[0xDD; 32]);
     let terms = String::from_str(&env, "");
     let comm = test_commitment(&client, &task_id, &bidder, 5_000_000, &terms, &salt);
+    fund(&env, &client, &bidder);
     client.submit_bid(&task_id, &bidder, &comm, &500_000, &50);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
@@ -705,6 +730,7 @@ fn prop_submit_wrong_bond_no_panic() {
     let terms = String::from_str(&env, "");
     let comm = test_commitment(&client, &task_id, &bidder, 3_000_000, &terms, &salt);
 
+    fund(&env, &client, &bidder);
     let result = client.try_submit_bid(&task_id, &bidder, &comm, &1, &50);
     assert!(
         result.is_err(),

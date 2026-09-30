@@ -112,6 +112,30 @@ Kubernetes liveness probe.
   { "live": true }
   ```
 
+#### `GET /metrics`
+Prometheus text exposition endpoint for metrics scraping.
+
+* **Request**:
+  ```bash
+  curl -s http://localhost:3000/metrics
+  ```
+
+* **Response (`200 OK`)**:
+  ```text
+  # HELP ainet_up Whether the ai-net backend is running
+  # TYPE ainet_up gauge
+  ainet_up 1
+  ```
+
+#### `GET /api/admin/flags`
+List feature flags with current enabled status and resolution source (`runtime`, `env`, or `default`). Requires admin API key.
+
+#### `GET /api/ratelimit/status`
+Retrieve token bucket rate limit status for a given key and rule. Requires admin API key.
+
+#### `GET /api/versions`
+API versioning lifecycle manifest detailing current, deprecated, and sunset API versions.
+
 ---
 
 ### 3.2 Agent Management (`/api/v1/agents`)

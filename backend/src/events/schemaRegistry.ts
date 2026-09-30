@@ -187,11 +187,12 @@ export interface ValidationResult {
  */
 export function validateEvent(event: {
   type: string;
-  version: number;
+  version?: number;
   payload?: unknown;
   [key: string]: unknown;
 }): ValidationResult {
-  const { type, version } = event;
+  const version = event.version ?? 1;
+  const type = event.type;
 
   // Check that the version is known
   const versionSchemas = schemasByVersion[version];
@@ -202,13 +203,10 @@ export function validateEvent(event: {
     };
   }
 
-  // Check that the event type is known
+  // Check that the event type is known; un-modeled event types (e.g. system events) are allowed
   const payloadSchema = versionSchemas[type as EventType];
   if (!payloadSchema) {
-    return {
-      valid: false,
-      errors: [`Unknown event type: ${type}`],
-    };
+    return { valid: true, errors: [] };
   }
 
   // Validate the payload

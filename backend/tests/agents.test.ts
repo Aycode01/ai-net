@@ -108,17 +108,17 @@ function listen(app: express.Express) {
 
 describe("Agents API route", () => {
   it("returns 200 with an empty array when no agents are registered", async () => {
-    const response = await request(createTestApp()).get("/api/agents");
+    const response = await request(createTestApp()).get("/api/agents?limit=100");
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual([]);
+    expect(response.body.data.items).toEqual([]);
   });
 
-  it("returns all agents from the local registry cache", async () => {
-    const response = await request(createTestApp([codingAgent])).get("/api/agents");
+  it("returns a bounded page from the local registry cache", async () => {
+    const response = await request(createTestApp([codingAgent])).get("/api/agents?limit=100");
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual([expect.objectContaining(codingAgent)]);
+    expect(response.body.data.items).toEqual([expect.objectContaining(codingAgent)]);
   });
 
   it("returns a single agent by id", async () => {
