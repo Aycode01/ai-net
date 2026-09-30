@@ -18,6 +18,12 @@ pub enum Error {
     // Codes 10 (SlaViolation) and 11 (NotOwner) were never constructed and
     // have been removed. They are reserved and must not be reused.
     ServiceNotAvailable = 12,
+    /// No payment asset (Stellar Asset Contract) has been configured.
+    AssetNotConfigured = 13,
+    /// The supplied asset or its decimals do not match the configured asset.
+    AssetMismatch = 14,
+    /// An amount is negative or not representable in the asset's decimals.
+    InvalidAmount = 15,
 }
 
 impl Error {
@@ -33,6 +39,9 @@ impl Error {
             8 => Some(Error::BookingAlreadyCompleted),
             9 => Some(Error::BookingAlreadyCancelled),
             12 => Some(Error::ServiceNotAvailable),
+            13 => Some(Error::AssetNotConfigured),
+            14 => Some(Error::AssetMismatch),
+            15 => Some(Error::InvalidAmount),
             _ => None,
         }
     }

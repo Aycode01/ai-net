@@ -30,16 +30,47 @@ pub fn execute_pre_upgrade_validation(
     Ok(results)
 }
 
-/// Finish the upgrade-manager side of a migration.
-///
-/// The upgrade manager does not own the upgraded contract's storage, so it
-/// performs **no** data transformations or post-migration validations itself.
-/// Those steps are executed by the upgraded contract's own
-/// `Upgradeable::post_upgrade_hook` (see `agent_registry`), which has access
-/// to its records. This function only publishes a `MigrationCompleteEvent`
-/// that names the real target `version` and the steps delegated to the hook,
-/// so indexers never see fabricated item counts or gas figures.
-pub fn execute_post_upgrade_migration(env: &Env, version: &String, migration_plan: &MigrationPlan) {
+/// Execute post-upgrade migration with progress tracking
+pub fn execute_post_upgrade_migration(
+    env: &Env,
+    migration_plan: &MigrationPlan,
+) -> Result<(), UpgradeError> {
+    let total_items = migration_plan.estimated_items;
+    let mut processed_items = 0u32;
+    let mut total_gas_used = 0u64;
+
+    // Execute data transformations
+    for transformation in migration_plan.data_transformations.iter() {
+        let items_in_batch = execute_data_transformation(env, &transformation)?;
+        processed_items += items_in_batch;
+
+        // Soroban exposes no in-contract gas meter, so charge each batch with
+        // the same cost model `estimate_migration_gas` uses for proposals.
+        let gas_used = crate::GAS_MIGRATION_STEP_OVERHEAD
+            + crate::GAS_MIGRATION_PER_ITEM * items_in_batch as u64;
+        total_gas_used += gas_used;
+
+        // Emit progress event
+        env.events().publish(
+            (
+                soroban_sdk::symbol_short!("upgrade"),
+                soroban_sdk::symbol_short!("progress"),
+            ),
+            MigrationProgressEvent {
+                phase: transformation,
+                items_processed: processed_items,
+                total_items,
+                gas_used,
+            },
+        );
+    }
+
+    // Execute post-migration validations
+    for validation in migration_plan.post_migration_validations.iter() {
+        execute_post_migration_validation(env, &validation)?;
+    }
+
+    // Emit completion event
     env.events().publish(
         (
             soroban_sdk::symbol_short!("upgrade"),

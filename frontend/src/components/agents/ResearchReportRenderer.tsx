@@ -37,12 +37,14 @@ const tocLinkStyle: React.CSSProperties = {
 const ResearchReportRenderer: React.FC<Props> = ({ result, searchQuery }) => {
   const { t } = useTranslation();
   const markdown = getMarkdown(result);
+  const [headings, setHeadings] = useState<Heading[]>([]);
   const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!contentRef.current) return;
 
     const headingElements = contentRef.current.querySelectorAll('h1, h2, h3, h4, h5, h6');
+    const headingList: Heading[] = [];
     let h2Count = 0;
     let h3Count = 0;
 
@@ -69,7 +71,13 @@ const ResearchReportRenderer: React.FC<Props> = ({ result, searchQuery }) => {
       link.setAttribute('aria-label', `Link to ${text}`);
       link.innerHTML = '🔗';
       heading.appendChild(link);
+
+      if (level <= 3) {
+        headingList.push({ level, text, id });
+      }
     });
+
+    setHeadings(headingList);
   }, [markdown]);
 
   if (!markdown) {

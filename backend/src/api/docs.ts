@@ -26,12 +26,42 @@ ai-net uses header-based cryptographic authentication schemes:
 - Used for creating tasks, retrieving task state, and managing owned resources.
 - Example: \`walletpublickey: GBZXN7PIRZGNMHGA728XZVOG2GUFIDLAZ6AF2I2MD2OCYTAF2K1K4AAA\`
 
-### 2. Agent Cryptographic Signature Authentication (\`AgentSignatureAuth\`)
+### 2. Agent Cryptographic Signature Authentication (\`AgentSignatureAuth\` + \`AgentChallengeAuth\`)
+- **Applies to:** \`POST /api/agents/register\`, \`POST /api/agents/:id/heartbeat\`, \`DELETE /api/agents/:id\`
 - **Headers:**
-  - \`x-signature: <Base64-or-Hex-Ed25519-Signature>\`
-  - \`x-challenge: <Signed-Challenge-String>\`
-- Used for agent de-registration and privileged agent operations.
-- The challenge string must match the challenge issued by the server within the replay window.
+  - \`x-challenge: <nonce>\` — the single-use, expiring nonce issued by the server
+  - \`x-signature: <Base64-or-Hex-Ed25519-Signature>\` — signature of the canonical message
+
+Obtain a challenge first:
+
+\`\`\`
+POST /api/agents/challenge
+{ "purpose": "register" | "heartbeat" | "delete",
+  "publicKey": "<agent Stellar public key>",
+  "agentId": "<required for heartbeat and delete>",
+  "payload": { ...the exact body you will send to the protected route } }
+
+→ 200 { "challenge": "...", "message": "ai-net:agent-auth:v1\\n<purpose>\\n<publicKey>\\n<challenge>\\n<sha256(payload)>", "expiresAt": "..." }
+\`\`\`
+
+Sign \`message\` with the agent's Stellar secret key and send both headers. The signature is
+verified against the registered \`stellarPublicKey\`, and the challenge is bound to the route
+purpose, the claimed key and a SHA-256 hash of the payload — so a signature is valid for exactly
+one request and cannot be replayed against another route, another payload, or another agent.
+
+| Failure | \`error.code\` | Meaning |
+|---|---|---|
+| No, unknown, expired, replayed or mismatched challenge | \`AGENT_CHALLENGE_INVALID\` | Request a new challenge and retry |
+| Missing, malformed or non-matching signature | \`AGENT_SIGNATURE_INVALID\` | The key does not control this agent |
+
+Both return HTTP 401. Failed *unsigned* attempts are throttled separately from the success path
+(\`AGENT_AUTH_FAILURE_LIMIT_MAX\` per IP per \`AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS\`) so agent ids
+cannot be enumerated cheaply.
+
+**Migration:** while the \`agent_ownership_proof\` feature flag is disabled, unsigned
+\`register\` and \`heartbeat\` calls are still accepted and answered with \`Deprecation\`,
+\`Sunset\` and \`Warning\` headers (see \`AGENT_AUTH_SUNSET_DATE\`). \`DELETE\` always requires a
+signature. Unsigned calls are refused once the flag is on, which is the default.
 
 ---
 

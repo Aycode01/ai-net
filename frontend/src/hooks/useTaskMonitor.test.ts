@@ -4,13 +4,21 @@ import type { DAGNode, TaskResponse } from '../types/api';
 import { apiClient } from '../services/api';
 import { useTaskMonitor } from './useTaskMonitor';
 
+const reconnectStream = vi.hoisted(() => vi.fn());
+
 vi.mock('../services/api', () => ({
   apiClient: { get: vi.fn() },
 }));
 
 vi.mock('./useTaskWebSocket', () => ({
-  useTaskWebSocket: () => ({ isConnected: false, status: 'disconnected' }),
+  useTaskWebSocket: () => ({
+    isConnected: false,
+    status: 'disconnected',
+    reconnect: reconnectStream,
+  }),
 }));
+
+vi.mock('./useWallet', () => ({ useWallet: () => ({ publicKey: 'GCONNECTEDWALLET' }) }));
 
 const getTask = vi.mocked(apiClient.get);
 
@@ -36,6 +44,16 @@ const task = (dag: DAGNode[]): TaskResponse => ({
 describe('useTaskMonitor initial payments', () => {
   beforeEach(() => {
     getTask.mockReset();
+    reconnectStream.mockReset();
+  });
+
+  it('exposes the WebSocket manual-reconnect action to the task page', async () => {
+    getTask.mockResolvedValue(task([]));
+    const { result } = renderHook(() => useTaskMonitor('task-1'));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.reconnectStream).toBe(reconnectStream);
   });
 
   it('builds a timeline entry from a completed node carrying a payment result', async () => {
@@ -49,7 +67,7 @@ describe('useTaskMonitor initial payments', () => {
             timestamp: '2026-09-01T10:03:00.000Z',
           },
         }),
-      ]),
+      ])
     );
 
     const { result } = renderHook(() => useTaskMonitor('task-1'));
@@ -69,9 +87,7 @@ describe('useTaskMonitor initial payments', () => {
   });
 
   it('falls back to the task updatedAt when the payment result has no timestamp', async () => {
-    getTask.mockResolvedValue(
-      task([node({ result: { txHash: 'abc123', amount: '1.25' } })]),
-    );
+    getTask.mockResolvedValue(task([node({ result: { txHash: 'abc123', amount: '1.25' } })]));
 
     const { result } = renderHook(() => useTaskMonitor('task-1'));
 
@@ -95,7 +111,7 @@ describe('useTaskMonitor initial payments', () => {
           nodeId: 'bad-timestamp',
           result: { txHash: 'abc123', amount: 2, timestamp: 1700000000 },
         }),
-      ]),
+      ])
     );
 
     const { result } = renderHook(() => useTaskMonitor('task-1'));

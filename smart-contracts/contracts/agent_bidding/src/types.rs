@@ -264,6 +264,10 @@ pub enum DataKey {
     Winner(Symbol),
     /// Stores the [`Escrow`] record for a task after `award_contract`.
     Escrow(Symbol),
+    /// Stellar Asset Contract address used for bonds, budgets and escrow.
+    PaymentAsset,
+    /// Decimals of the configured payment asset.
+    AssetDecimals,
 }
 
 // ─── Event Payloads ──────────────────────────────────────────────────────────
@@ -352,6 +356,17 @@ pub struct RefundClaimedEvent {
 }
 
 pub type BondRefundClaimedEvent = RefundClaimedEvent;
+
+/// Emitted when escrowed funds are transferred out, either to the winning
+/// agent (`release_escrow`) or back to the creator (`refund_escrow`).
+/// `amount` is the number of asset units actually transferred.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowSettledEvent {
+    pub task_id: Symbol,
+    pub recipient: Address,
+    pub amount: i128,
+}
 
 // ─── Bond lifecycle events (issue #486) ─────────────────────────────────────
 

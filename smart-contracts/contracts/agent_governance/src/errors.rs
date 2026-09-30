@@ -46,18 +46,9 @@ pub enum Error {
     ProposalFinalized = 15,
     /// Proposal title or description must not be empty.
     EmptyMetadata = 16,
-    /// The caller is not the governance admin.
-    NotAdmin = 17,
-    /// Proposal creation and voting are paused.
-    ContractPaused = 18,
-    /// The execution target is missing, unknown, or not a contract.
-    InvalidTarget = 19,
-    /// Execution calldata exceeds `MAX_CALLDATA_LEN`.
-    CalldataTooLarge = 20,
-    /// `calldata` does not hash to the pinned `expected_hash`.
-    PayloadHashMismatch = 21,
-    /// A `ParameterChange` proposal was created before a registry was set.
-    RegistryNotSet = 22,
-    /// The voter had no voting power at the proposal's snapshot point.
-    NoSnapshotPower = 23,
+    AgentNotFound = 17,
+    AgentFrozen = 18,
+    InsufficientBond = 19,
+    AgentDeregistered = 20,
+    AgentNotEligible = 21,
 }

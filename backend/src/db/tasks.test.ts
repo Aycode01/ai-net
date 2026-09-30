@@ -38,6 +38,19 @@ function makeDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_events_task_seq
       ON task_events (task_id, task_seq ASC);
+    CREATE TABLE IF NOT EXISTS quality_scores (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      taskId       TEXT    NOT NULL,
+      nodeId       TEXT    NOT NULL,
+      agentId      TEXT,
+      agentType    TEXT    NOT NULL,
+      score        REAL    NOT NULL,
+      completeness REAL    NOT NULL,
+      relevance    REAL    NOT NULL,
+      format       REAL    NOT NULL,
+      needsReview  INTEGER DEFAULT 0,
+      timestamp    TEXT    NOT NULL
+    );
   `);
   return db;
 }
@@ -225,7 +238,7 @@ describe("createTaskDb — insertEvent / getEventHistory", () => {
     db.insertEvent({ taskId: "task_001", type: "node_started", nodeId: "n1", timestamp: ts });
     db.insertEvent({ taskId: "task_001", type: "node_completed", nodeId: "n1", timestamp: ts });
 
-    const events = db.getEventHistory("task_001");
+    const events = db.getEventHistory("task_001").items;
     expect(events).toHaveLength(2);
     expect(events[0].type).toBe("node_started");
     expect(events[1].type).toBe("node_completed");
@@ -238,14 +251,14 @@ describe("createTaskDb — insertEvent / getEventHistory", () => {
     const payload = { result: "done", score: 0.9 };
     db.insertEvent({ taskId: "task_001", type: "node_completed", nodeId: "n1", payload, timestamp: new Date().toISOString() });
 
-    const [event] = db.getEventHistory("task_001");
+    const [event] = db.getEventHistory("task_001").items;
     expect(event.payload).toEqual(payload);
   });
 
   it("returns empty array for a task with no events", () => {
     const db = createTaskDb(makeDb());
     db.insert(makeTask());
-    expect(db.getEventHistory("task_001")).toHaveLength(0);
+    expect(db.getEventHistory("task_001").items).toHaveLength(0);
   });
 
   it("handles null nodeId gracefully", () => {
@@ -253,7 +266,7 @@ describe("createTaskDb — insertEvent / getEventHistory", () => {
     db.insert(makeTask());
 
     db.insertEvent({ taskId: "task_001", type: "task_started", timestamp: new Date().toISOString() });
-    const events = db.getEventHistory("task_001");
+    const events = db.getEventHistory("task_001").items;
     expect(events[0].nodeId).toBeUndefined();
   });
 });
