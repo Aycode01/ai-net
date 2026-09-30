@@ -12,6 +12,11 @@ import { WS_CLOSE } from '../../types/stream';
 import { createLogger } from '../../utils/logger';
 import { runWithTraceContext } from '../../services/traceContext';
 import { getConfig } from '../../config';
+import {
+  NonceStore,
+  verifyWalletSignature,
+  WALLET_NONCE_TTL_MS,
+} from '../../services/auth/walletChallenge';
 import { TaskStreamHub } from './taskStreamHub';
 
 const STREAM_PATH = /^\/(?:api\/)?tasks\/([^/?]+)\/stream(?:\?.*)?$/;
@@ -179,6 +184,10 @@ export interface TaskStreamDeps extends TaskStreamOptions {
   eventStore: EventStore;
   eventBus?: typeof defaultEventBus;
   getTask?: (taskId: string) => Task | undefined;
+  /** Shared nonce store (defaults to a per-server store with the standard TTL). */
+  nonceStore?: NonceStore;
+  /** Nonce TTL override, mainly for tests. */
+  nonceTtlMs?: number;
 }
 
 /**
@@ -193,8 +202,9 @@ export interface TaskStreamDeps extends TaskStreamOptions {
  *
  *       ### Handshake & Authentication:
  *       1. Connect to `ws://<host>/tasks/:id/stream` (optionally appending `?lastEventId=<seq>` for cursor resumption).
- *       2. Send JSON auth payload within 10 seconds: `{"walletPublicKey": "G..."}`.
- *       3. Server verifies ownership. If wallet does not own task, connection closes with close code `4003` (Forbidden).
+ *       2. Server immediately sends `{ "type": "auth_challenge", "nonce": "<uuid>" }` — a single-use, expiring nonce.
+ *       3. Within 10 seconds send JSON auth payload: `{ "walletPublicKey": "G...", "nonce": "<server nonce>", "signature": "<base64 Ed25519 signature of nonce>" }`.
+ *       4. Server verifies the signature with the same challenge/verify flow as the agents endpoints. A correct public key without a valid signature is rejected. If wallet does not own task, connection closes with close code `4003` (Forbidden). Replayed or expired nonces are rejected.
  *
  *       ### Events Received:
  *       - `node_started`: Node execution began with assigned agent.
@@ -234,12 +244,17 @@ export interface TaskStreamDeps extends TaskStreamOptions {
  * Attach the live DAG-execution stream to an HTTP server.
  *
  * Exposes ws://<host>/tasks/:id/stream. Each connection:
- *   1. must send `{ walletPublicKey }` as its first message (auth handshake);
- *   2. is validated against the task owner — non-owners get a 403 close frame;
- *   3. receives a chronological replay of past events from the store — all of
+ *   1. receives a server-issued, single-use, expiring `auth_challenge` nonce;
+ *   2. must send `{ walletPublicKey, nonce, signature }` as its first message
+ *      (auth handshake), where `signature` is the base64 Ed25519 signature of
+ *      `nonce` made with the wallet's Stellar secret key;
+ *   3. is validated against the task owner AND the signature via the shared
+ *      `verifyWalletSignature` challenge flow — non-owners, invalid
+ *      signatures, and replayed/expired nonces get a 403 close frame;
+ *   4. receives a chronological replay of past events from the store — all of
  *      them by default, or only those with seq > N when the handshake URL
  *      carries an optional `?lastEventId=N` cursor;
- *   4. then streams live events as the Coordinator emits them.
+ *   5. then streams live events as the Coordinator emits them.
  *
  * Every event sent to the client carries a per-task monotonic `seq`, so the
  * client can persist the last seq it saw and resume from it on reconnect.
@@ -264,6 +279,7 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
     pongTimeoutMs = DEFAULT_PONG_TIMEOUT_MS,
     authTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
     inactivityTimeoutMs = DEFAULT_INACTIVITY_TIMEOUT_MS,
+    nonceStore = new NonceStore(deps.nonceTtlMs ?? WALLET_NONCE_TTL_MS),
   } = deps;
 
   const maxMessagesPerMinute = getConfig().WS_MAX_MESSAGES_PER_MINUTE;
@@ -373,6 +389,10 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
       }
     };
 
+    // Single-use challenge for THIS connection. The client must sign it
+    // within `authTimeoutMs`; consume() burns it so replays are rejected.
+    const expectedNonce = nonceStore.issue();
+
     // Events are delivered by the shared hub, which reads the store once per
     // tick for all clients on this task. This callback only normalises to the
     // wire format (snake_case type, seq cursor) — each connection has its own
@@ -403,7 +423,25 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
       }, heartbeatIntervalMs);
     };
 
-    const completeAuth = (walletPublicKey: string): void => {
+    const completeAuth = (walletPublicKey: string, nonce: string, signature: string): void => {
+      // The nonce must be the single-use challenge issued for THIS connection.
+      // consume() burns it, so a replayed signature is rejected even when the
+      // public key is correct.
+      if (nonce !== expectedNonce) {
+        ws.close(WS_CLOSE.FORBIDDEN, 'Forbidden: nonce does not match this connection');
+        return;
+      }
+      const outcome = nonceStore.consume(nonce);
+      if (outcome !== 'valid') {
+        ws.close(WS_CLOSE.FORBIDDEN, `Forbidden: nonce ${outcome}`);
+        return;
+      }
+      // Same challenge/verify flow as the agents endpoints: possession of the
+      // public key proves nothing — only a valid Ed25519 signature does.
+      if (!verifyWalletSignature(walletPublicKey, nonce, signature)) {
+        ws.close(WS_CLOSE.FORBIDDEN, 'Forbidden: invalid signature');
+        return;
+      }
       if (walletPublicKey !== task.walletPublicKey) {
         ws.close(WS_CLOSE.FORBIDDEN, 'Forbidden: wallet does not own task');
         return;
@@ -447,12 +485,19 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
       }
 
       if (!authed) {
-        const walletPublicKey = (msg as { walletPublicKey?: unknown })?.walletPublicKey;
-        if (typeof walletPublicKey !== 'string' || walletPublicKey === '') {
-          ws.close(WS_CLOSE.BAD_REQUEST, 'First message must be { walletPublicKey }');
+        const frame = msg as { walletPublicKey?: unknown; nonce?: unknown; signature?: unknown };
+        const walletPublicKey = frame?.walletPublicKey;
+        const nonce = frame?.nonce;
+        const signature = frame?.signature;
+        if (
+          typeof walletPublicKey !== 'string' || walletPublicKey === '' ||
+          typeof nonce !== 'string' || nonce === '' ||
+          typeof signature !== 'string' || signature === ''
+        ) {
+          ws.close(WS_CLOSE.BAD_REQUEST, 'First message must be { walletPublicKey, nonce, signature }');
           return;
         }
-        completeAuth(walletPublicKey);
+        completeAuth(walletPublicKey, nonce, signature);
         return;
       }
 
@@ -462,6 +507,11 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
         pongTimer = undefined;
       }
     });
+
+    // Issue the single-use auth challenge AFTER handlers are attached so the
+    // client cannot race the server. The client must sign `expectedNonce`
+    // within `authTimeoutMs`.
+    send({ type: 'auth_challenge', nonce: expectedNonce });
 
     ws.on('close', cleanup);
     ws.on('error', cleanup);
