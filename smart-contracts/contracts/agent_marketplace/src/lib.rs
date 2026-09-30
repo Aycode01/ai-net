@@ -222,6 +222,7 @@ impl AgentMarketplaceContract {
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         owner.require_auth();
+        verify_agent_eligibility(&env, &agent_id)?;
 
         if price_stroops <= 0 {
             return Err(Error::InvalidPrice);
@@ -329,6 +330,8 @@ impl AgentMarketplaceContract {
             .persistent()
             .get(&key)
             .ok_or(Error::NotFound)?;
+
+        verify_agent_eligibility(&env, &listing.agent_id)?;
 
         if !listing.active {
             return Err(Error::ServiceNotAvailable);

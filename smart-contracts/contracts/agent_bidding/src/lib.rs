@@ -529,6 +529,13 @@ impl AgentBiddingContract {
         Ok(())
     }
 
+    /// Admin: set the agent registry address.
+    pub fn set_agent_registry(env: Env, registry: Address) -> Result<(), Error> {
+        let _admin = require_admin(&env)?;
+        env.storage().instance().set(&DataKey::AgentRegistry, &registry);
+        Ok(())
+    }
+
     // ── Submit Sealed Bid ─────────────────────────────────────────────────
 
     /// Submit a sealed bid during the bidding period.
@@ -555,6 +562,7 @@ impl AgentBiddingContract {
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         bidder.require_auth();
+        verify_agent_eligibility(&env, &task_id)?;
 
         let mut auction = load_auction(&env, &task_id)?;
         require_live(&auction)?;

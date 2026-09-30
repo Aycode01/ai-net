@@ -1247,6 +1247,39 @@ impl AgentRegistryContract {
             .unwrap_or(false)
     }
 
+    /// Cross-contract eligibility check helper.
+    ///
+    /// Verifies that `agent_id` refers to a registered, unfrozen, solvent agent.
+    pub fn verify_agent_eligible(env: Env, agent_id: Symbol) -> Result<(), Error> {
+        let agent_key = DataKey::Agent(agent_id.clone());
+        let record: AgentRecord = match env.storage().persistent().get(&agent_key) {
+            Some(rec) => rec,
+            None => {
+                let cooldown_key = DataKey::BondCooldown(agent_id);
+                if env.storage().persistent().has(&cooldown_key) {
+                    return Err(Error::AgentDeregistered);
+                }
+                return Err(Error::NotFound);
+            }
+        };
+
+        let is_frozen = env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::FrozenAgent(agent_id))
+            .unwrap_or(false);
+        if is_frozen {
+            return Err(Error::AgentFrozen);
+        }
+
+        let min_bond = min_bond(&env);
+        if record.bond_amount < min_bond {
+            return Err(Error::InsufficientBond);
+        }
+
+        Ok(())
+    }
+
     // ── Agent registration ───────────────────────────────────────────────────
 
     pub fn register_agent(env: Env, record: AgentRecord) -> Result<(), Error> {
