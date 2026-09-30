@@ -7,7 +7,7 @@
  * dispatch/queue, etc.) and by the server entry-point (`src/index.ts`).
  */
 
-import express, { Request, Response, NextFunction } from "express";
+import express, { Request, Response, NextFunction, Router } from "express";
 import { createServer, Server as HttpServer } from "http";
 import swaggerUi from "swagger-ui-express";
 
@@ -38,7 +38,7 @@ import { metricsRouter } from "./routes/metrics";
 import { createStatsRouter } from "./routes/stats";
 import { createReconciliationRouter, type ReconciliationRouterOptions } from "./routes/reconciliation";
 import { rateLimitMiddleware, registerRateLimitMiddleware, publicLimiter, authedLimiter, adminLimiter } from "./middleware/rateLimit";
-import { authMiddleware, adminAuthMiddleware } from "./middleware/auth";
+import { adminAuthMiddleware } from "./middleware/auth";
 import { createCorsMiddleware } from "./middleware/cors";
 import { compressionMiddleware } from "./middleware/compression";
 import { errorHandler } from "./middleware/errorHandler";
@@ -126,6 +126,7 @@ function tryLoadRegistryLookup():
 export function createApp(opts: AppOptions = {}): {
   httpServer: HttpServer;
   close: (callback?: () => void) => void;
+  versionDispatchedRoutes: VersionDispatchedRoutes;
 } {
   const config = getConfig();
   const logger = createLogger({ module: "api-app" });
@@ -140,7 +141,11 @@ export function createApp(opts: AppOptions = {}): {
     }
     next();
   });
-  app.use(createCorsMiddleware());
+  // Pass `app` so `Access-Control-Allow-Methods` is derived from the routes
+  // that actually get registered below, rather than a hand-maintained list
+  // (issue #659). The derivation is per-request, so the mount order here is
+  // fine.
+  app.use(createCorsMiddleware(app));
   app.use(requestId);
   app.use(requestLogger);
   app.use(metricsMiddleware);
@@ -268,14 +273,25 @@ export function createApp(opts: AppOptions = {}): {
   );
 
   app.get("/openapi.json", (_req: Request, res: Response) => {
-    res.json(openapiSpec);
+    res.json(getOpenapiJson());
   });
+
+  app.get("/openapi.yaml", (_req: Request, res: Response) => {
+    res.type("text/yaml").send(getOpenapiYaml());
+  });
+
+  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(getOpenapiJson(), swaggerUiOptions));
 
   // ── Task routes ────────────────────────────────────────────────────────────
   // Authenticated task creation uses the tighter authed limiter.
   const v1TasksRouter = createV1TasksRouter(dispatch, releasePayment, jobQueue);
   const v2TasksRouter = createV2TasksRouter(dispatch, releasePayment, jobQueue);
 
+  // The v1/v2 implementation is picked from the negotiated API version, so the
+  // mount is a dispatcher function rather than a sub-router. That would make the
+  // task routes invisible to router-walking tooling, so both implementations
+  // are published on the returned handle for the OpenAPI parity test to
+  // introspect. Semantics are unchanged: 1.x → v1, everything else → v2.
   app.use("/api/tasks", authedLimiter.middleware, (req, res, next) => {
     const apiVersion = res.locals.apiVersion || "1.0";
     if (apiVersion.startsWith("1.")) {
@@ -371,7 +387,14 @@ export function createApp(opts: AppOptions = {}): {
 
   const routeCount = (app as unknown as { _router?: { stack?: unknown[] } })._router?.stack?.length;
   logger.debug({ routeCount }, "api app initialized");
-  return { httpServer, close };
+  return {
+    httpServer,
+    close,
+    versionDispatchedRoutes: {
+      mountPath: "/api/tasks",
+      routers: [v1TasksRouter, v2TasksRouter],
+    },
+  };
 }
 
 /**

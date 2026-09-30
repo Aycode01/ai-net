@@ -487,17 +487,10 @@ export function getDefaultIdempotencyStore(
       db = isInMemoryPath(dbPath) ? new Database(':memory:') : openDatabase(dbPath);
     }
 
-    const ttlMs =
-      config?.IDEMPOTENCY_TTL_MS ??
-      (Number(process.env.IDEMPOTENCY_TTL_MS) || DEFAULT_TTL_MS);
-    const pendingTtlMs =
-      config?.IDEMPOTENCY_PENDING_TTL_MS ??
-      (Number(process.env.IDEMPOTENCY_PENDING_TTL_MS) || DEFAULT_PENDING_TTL_MS);
-    const cleanupIntervalMs =
-      config?.IDEMPOTENCY_CLEANUP_MS ??
-      (Number(process.env.IDEMPOTENCY_CLEANUP_MS) || DEFAULT_CLEANUP_MS);
-
-    _defaultStore = createIdempotencyStore(db, { ttlMs, pendingTtlMs, cleanupIntervalMs });
+    _defaultStore = createIdempotencyStore(db, {
+      ttlMs: config?.IDEMPOTENCY_TTL_MS ?? (Number(process.env.IDEMPOTENCY_TTL_MS) || DEFAULT_TTL_MS),
+      cleanupIntervalMs: config?.IDEMPOTENCY_CLEANUP_MS ?? (Number(process.env.IDEMPOTENCY_CLEANUP_MS) || DEFAULT_CLEANUP_MS),
+    });
   }
   return _defaultStore;
 }

@@ -5,7 +5,7 @@
 //! callers can branch on the numeric code without coupling to a specific SDK
 //! build.
 //!
-//! The code range used here (`1..=26`) is local to this contract. Codes are
+//! The code range used here (`1..=33`) is local to this contract. Codes are
 //! chosen to read naturally in logs while remaining stable across releases:
 //! **never renumber an existing variant** once the contract is deployed.
 

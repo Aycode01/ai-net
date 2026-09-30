@@ -62,10 +62,19 @@ describe('CORS Middleware', () => {
     expect(methods).toContain('GET');
   });
 
-  // #658: the idempotency middleware reads the `Idempotency-Key` header, but
-  // browsers can only send it if the preflight approves it. While it was
-  // missing, POST /api/tasks was unreachable from a browser.
-  it('permits the Idempotency-Key header through preflight', async () => {
+  // #659: PATCH was rejected outright, so a browser could not preflight a
+  // PATCH request even though the server treats PATCH as a mutation method.
+  it('advertises PATCH in the allowed methods', async () => {
+    const res = await request(app)
+      .options('/test')
+      .set('Origin', 'http://trusted.com')
+      .set('Access-Control-Request-Method', 'PATCH');
+
+    expect(res.status).toBeLessThan(300);
+    expect(String(res.headers['access-control-allow-methods'])).toContain('PATCH');
+  });
+
+  it('permits Idempotency-Key through preflight', async () => {
     const res = await request(app)
       .options('/test')
       .set('Origin', 'http://trusted.com')
@@ -75,6 +84,30 @@ describe('CORS Middleware', () => {
     expect(res.status).toBeLessThan(300);
     const allowed = String(res.headers['access-control-allow-headers'] || '').toLowerCase();
     expect(allowed).toContain('idempotency-key');
+  });
+
+  it('permits the tracing and correlation headers through preflight', async () => {
+    const res = await request(app)
+      .options('/test')
+      .set('Origin', 'http://trusted.com')
+      .set('Access-Control-Request-Method', 'POST')
+      .set(
+        'Access-Control-Request-Headers',
+        'x-request-id, x-trace-id, x-correlation-id, traceparent, x-user-id, api-version',
+      );
+
+    expect(res.status).toBeLessThan(300);
+    const allowed = String(res.headers['access-control-allow-headers'] || '').toLowerCase();
+    for (const header of [
+      'x-request-id',
+      'x-trace-id',
+      'x-correlation-id',
+      'traceparent',
+      'x-user-id',
+      'api-version',
+    ]) {
+      expect(allowed).toContain(header);
+    }
   });
 
   it('falls back to http://localhost:3000 when ALLOWED_ORIGINS is unset', async () => {

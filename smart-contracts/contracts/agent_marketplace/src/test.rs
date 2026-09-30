@@ -3,7 +3,10 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _},
+    Address, Env, IntoVal, Symbol, TryFromVal, TryIntoVal, Val,
+};
 
 fn setup() -> (Env, AgentMarketplaceContractClient<'static>) {
     let env = Env::default();
@@ -48,7 +51,6 @@ fn initialize_cannot_be_called_twice() {
 fn list_service_success() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
-
     let result = client.try_list_service(
         &Symbol::new(&env, "svc1"),
         &Symbol::new(&env, "agent1"),
@@ -435,10 +437,42 @@ fn search_services_still_works_when_paused() {
     assert_eq!(results.len(), 1);
 }
 
+// ========================================================================
+// Negative Authorization Tests (Issue #549)
+// ========================================================================
+
+#[test]
+fn negative_auth_initialize() {
+    let env = Env::default();
+    env.mock_auths(&[]);
+    let id = env.register(AgentMarketplaceContract, ());
+    let client = AgentMarketplaceContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    assert!(client.try_initialize(&admin).is_err());
+}
+
 #[test]
 fn negative_auth_set_admin() {
     let (env, client, _admin) = setup_with_admin();
     let intruder = Address::generate(&env);
     env.mock_auths(&[]);
-    assert!(client.try_set_admin(&intruder).is_err());
+    assert_eq!(
+        client.try_set_admin(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn negative_auth_pause() {
+    let (env, client, _admin) = setup_with_admin();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_pause(), Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn negative_auth_unpause() {
+    let (env, client, _admin) = setup_with_admin();
+    client.pause();
+    env.mock_auths(&[]);
+    assert_eq!(client.try_unpause(), Err(Ok(Error::Unauthorized)));
 }
