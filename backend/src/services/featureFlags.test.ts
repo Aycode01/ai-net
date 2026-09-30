@@ -1,4 +1,3 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   isEnabled,
   setFlag,
@@ -7,13 +6,16 @@ import {
   KNOWN_FLAGS,
 } from "./featureFlags";
 
+const originalEnv = { ...process.env };
+
 beforeEach(() => {
   clearRuntimeOverrides();
+  process.env = { ...originalEnv };
 });
 
 afterEach(() => {
   clearRuntimeOverrides();
-  vi.unstubAllEnvs();
+  process.env = { ...originalEnv };
 });
 
 describe("isEnabled", () => {
@@ -30,7 +32,7 @@ describe("isEnabled", () => {
   });
 
   it("env var overrides default but not runtime", () => {
-    vi.stubEnv("FEATURE_DAG_PREVIEW", "true");
+    process.env.FEATURE_DAG_PREVIEW = "true";
     expect(isEnabled("dag_preview")).toBe(true);
 
     setFlag("dag_preview", false);
@@ -38,7 +40,7 @@ describe("isEnabled", () => {
   });
 
   it("accepts '1' as truthy env value", () => {
-    vi.stubEnv("FEATURE_EXPERIMENTAL_AGENTS", "1");
+    process.env.FEATURE_EXPERIMENTAL_AGENTS = "1";
     expect(isEnabled("experimental_agents")).toBe(true);
   });
 });
@@ -76,7 +78,7 @@ describe("getAllFlags", () => {
   });
 
   it("marks env-driven flags with source=env", () => {
-    vi.stubEnv("FEATURE_EXPERIMENTAL_AGENTS", "true");
+    process.env.FEATURE_EXPERIMENTAL_AGENTS = "true";
     const flags = getAllFlags();
     expect(flags.experimental_agents.source).toBe("env");
   });
