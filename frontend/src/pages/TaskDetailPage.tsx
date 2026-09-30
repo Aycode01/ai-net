@@ -222,6 +222,13 @@ const TaskDetailPage: React.FC = () => {
           color: 'var(--status-warning-text)',
           label: t('page.task.ws.connecting'),
         };
+      case 'authentication-required':
+        return {
+          bg: 'var(--status-warning-surface)',
+          border: 'var(--status-warning-border)',
+          color: 'var(--status-warning-text)',
+          label: t('page.task.ws.authenticationRequired'),
+        };
       case 'error':
       case 'disconnected':
       default:

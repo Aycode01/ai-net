@@ -18,6 +18,8 @@ vi.mock('./useTaskWebSocket', () => ({
   }),
 }));
 
+vi.mock('./useWallet', () => ({ useWallet: () => ({ publicKey: 'GCONNECTEDWALLET' }) }));
+
 const getTask = vi.mocked(apiClient.get);
 
 const node = (overrides: Partial<DAGNode>): DAGNode => ({

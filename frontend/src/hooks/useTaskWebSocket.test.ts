@@ -11,6 +11,7 @@ class MockWebSocket {
   onclose: ((event: CloseEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
   readyState: number = WebSocket.CONNECTING;
+  sent: string[] = [];
 
   constructor(public url: string) {
     MockWebSocket.instance = this;
@@ -23,8 +24,8 @@ class MockWebSocket {
     }
   }
 
-  send(_data: string) {
-    // Mock implementation
+  send(data: string) {
+    this.sent.push(data);
   }
 
   // Test helpers
@@ -100,6 +101,33 @@ describe('useTaskWebSocket', () => {
     expect(result.current.isConnected).toBe(true);
     expect(result.current.status).toBe('connected');
     expect(mockOptions.onConnect).toHaveBeenCalled();
+  });
+
+  it('sends the wallet authentication frame as the first message after opening', () => {
+    renderHook(() =>
+      useTaskWebSocket({
+        taskId: 'owned-task',
+        walletPublicKey: 'GOWNER',
+        onMessage: vi.fn(),
+      })
+    );
+
+    act(() => MockWebSocket.instance!.simulateOpen());
+
+    expect(MockWebSocket.instance!.sent[0]).toBe(JSON.stringify({ walletPublicKey: 'GOWNER' }));
+  });
+
+  it('does not open an authenticated stream without a wallet and reports the requirement', () => {
+    const { result } = renderHook(() =>
+      useTaskWebSocket({
+        taskId: 'owned-task',
+        requireAuthentication: true,
+        onMessage: vi.fn(),
+      })
+    );
+
+    expect(MockWebSocket.instance).toBeNull();
+    expect(result.current.status).toBe('authentication-required');
   });
 
   it('should handle incoming messages', () => {

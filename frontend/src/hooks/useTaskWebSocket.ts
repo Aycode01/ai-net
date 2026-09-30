@@ -32,7 +32,8 @@ export interface UseTaskWebSocketOptions {
   maxJitterMs?: number;
 }
 
-export type WebSocketStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
+export type WebSocketStatus =
+  'connecting' | 'connected' | 'disconnected' | 'error' | 'authentication-required';
 
 /** Application-defined close code for a stale socket: mirros backend WS_CLOSE.STALE. */
 const WS_CLOSE_STALE = 4408;
@@ -134,6 +135,12 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
   }, [clearReconnectTimeout]);
 
   const connectWebSocket = useCallback(() => {
+    if (requireAuthentication && !walletPublicKey) {
+      clearReconnectTimeout();
+      setIsConnected(false);
+      setStatus('authentication-required');
+      return;
+    }
     if (wsRef.current) {
       // Neutralise the previous socket so its own close/error handlers cannot
       // schedule a reconnect while we're opening a fresh one.
@@ -216,13 +223,20 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
         // with the resume cursor so the server replays the gap. If the gap
         // persists (e.g. the store pruned intermediate events) we accept the
         // stream rather than reconnect-loop forever.
-        if (seq > expected && expected > 0 && !gapRetriedRef.current && ws.readyState === WebSocket.OPEN) {
+        if (
+          seq > expected &&
+          expected > 0 &&
+          !gapRetriedRef.current &&
+          ws.readyState === WebSocket.OPEN
+        ) {
           gapRetriedRef.current = true;
           lastSeqRef.current = seq;
           resumeCursorRef.current = seq;
           try {
             sessionStorage.setItem(cursorStorageKey(taskId), String(seq));
-          } catch { /* non-fatal */ }
+          } catch {
+            /* non-fatal */
+          }
           // Neutralise the current socket's handlers so its own close does not
           // schedule an extra reconnect — we re-sync via the cursor below.
           ws.onopen = null;
@@ -236,7 +250,9 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
         resumeCursorRef.current = seq;
         try {
           sessionStorage.setItem(cursorStorageKey(taskId), String(seq));
-        } catch { /* non-fatal */ }
+        } catch {
+          /* non-fatal */
+        }
       }
 
       onMessageRef.current(typedData);
@@ -277,7 +293,15 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
         }, delay);
       }
     };
-  }, [taskId, baseUrl, walletPublicKey, maxReconnectAttempts, maxJitterMs, clearReconnectTimeout]);
+  }, [
+    taskId,
+    baseUrl,
+    walletPublicKey,
+    requireAuthentication,
+    maxReconnectAttempts,
+    maxJitterMs,
+    clearReconnectTimeout,
+  ]);
 
   const reconnect = useCallback(() => {
     reconnectAttemptRef.current = 0;
@@ -286,6 +310,12 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
 
   useEffect(() => {
     if (!taskId) return;
+
+    if (requireAuthentication && !walletPublicKey) {
+      setIsConnected(false);
+      setStatus('authentication-required');
+      return;
+    }
 
     // Restore the persisted cursor for this task so a page reload resumes.
     try {
@@ -297,14 +327,16 @@ export const useTaskWebSocket = (options: UseTaskWebSocketOptions) => {
           resumeCursorRef.current = n;
         }
       }
-    } catch { /* non-fatal */ }
+    } catch {
+      /* non-fatal */
+    }
 
     connectWebSocket();
 
     return () => {
       disconnect();
     };
-  }, [taskId, connectWebSocket, disconnect]);
+  }, [taskId, walletPublicKey, requireAuthentication, connectWebSocket, disconnect]);
 
   return {
     isConnected,

@@ -5,6 +5,7 @@ import { useTaskWebSocket } from './useTaskWebSocket';
 import { useNodeState } from './useNodeState';
 import { useTaskPayments } from './useTaskPayments';
 import { useTaskOutputs } from './useTaskOutputs';
+import { useWallet } from './useWallet';
 
 /** A completed node's result that records the payment released for it. */
 interface PaymentResult {
@@ -30,6 +31,7 @@ export const useTaskMonitor = (taskId: string | undefined) => {
   const [task, setTask] = useState<TaskResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
+  const { publicKey } = useWallet();
 
   // Initialize sub-hooks
   const nodeState = useNodeState(taskId || '');
@@ -66,6 +68,8 @@ export const useTaskMonitor = (taskId: string | undefined) => {
   } = useTaskWebSocket({
     taskId: taskId || '',
     onMessage: handleWebSocketMessage,
+    walletPublicKey: publicKey ?? undefined,
+    requireAuthentication: true,
   });
 
   const fetchTask = async (id: string) => {
