@@ -58,24 +58,9 @@ const VERSION_MANIFEST: VersionEntry[] = [
 export function createVersionsRouter(): Router {
   const router = Router();
 
-  /**
-   * @openapi
-   * /api/versions:
-   *   get:
-   *     summary: API versioning lifecycle manifest
-   *     description: >
-   *       Lists all API versions with their deprecation status, sunset dates,
-   *       and breaking-change summaries. Clients should poll this endpoint to
-   *       detect when an in-use version has been deprecated or is near its
-   *       sunset date.
-   *     tags: [Versioning]
-   *     security: []
-   *     responses:
-   *       200:
-   *         description: Version manifest
-   */
   router.get("/", (_req: Request, res: Response) => {
-    const current = VERSION_MANIFEST.find((v) => v.status === "current");
+    const manifest = getVersionManifest();
+    const current = manifest.find((v) => v.status === "current");
     res.json({
       latestVersion: current?.version ?? "2.0",
       defaultVersion: config.API_DEFAULT_VERSION,
@@ -84,7 +69,7 @@ export function createVersionsRouter(): Router {
         sunsetGracePeriodMonths: 12,
         policyUrl: "/docs#api-versioning",
       },
-      versions: VERSION_MANIFEST,
+      versions: manifest,
     });
   });
 

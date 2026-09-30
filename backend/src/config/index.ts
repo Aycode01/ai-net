@@ -45,14 +45,19 @@ const envSchema = z.object({
     .default("false"),
   SOROBAN_RPC_URL: z.string().url().default("https://soroban-testnet.stellar.org"),
   REGISTRY_CONTRACT_ID: z.string().optional(),
+
   VENICE_API_KEY: z.string().min(1, "VENICE_API_KEY is required"),
-  // Filesystem path to the SQLite database that holds the ai-net schema.
-  // Applied by `npm run db:migrate`, which resolves it via
-  // `resolveDatabasePath()` in src/db/index.ts.
   VENICE_BASE_URL: z.string().url().default("https://api.venice.ai/api/v1"),
+  VENICE_MODEL_VERSION: z.string().default("v1"),
+  VENICE_CACHE_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  VENICE_CACHE_CODING_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
+  VENICE_CACHE_SIMILARITY_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
+  VENICE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  VENICE_PROVIDER_MAX_RETRIES: z.coerce.number().int().positive().default(3),
+  VENICE_FALLBACK_API_KEYS: z.string().optional(),
+  VENICE_FALLBACK_BASE_URLS: z.string().optional(),
+
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required").default("./data/ai-net.db"),
-  // Overrides the location of the versioned migration files. Only needed when
-  // migrations are kept outside the repository's `src/db/migrations` folder.
   DB_MIGRATIONS_DIR: z.string().optional(),
   STELLAR_COORDINATOR_SECRET: z.string().optional().superRefine(rejectPlaceholder),
   STELLAR_TEST_SECRET: z.string().optional().superRefine(rejectPlaceholder),
@@ -67,32 +72,30 @@ const envSchema = z.object({
   CACHE_TTL_AGENTS: z.coerce.number().int().nonnegative().default(60),
   CACHE_TTL_STATS: z.coerce.number().int().nonnegative().default(30),
   CACHE_TTL_HEALTH: z.coerce.number().int().nonnegative().default(10),
-  /** Deployment-scoped key prefix for registry cache entries (Issue #427). */
   REGISTRY_CACHE_KEY_PREFIX: z.string().default("registry"),
 
   MAX_PROMPT_LENGTH: z.coerce.number().int().positive().default(10_000),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(20),
   REGISTER_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_PUBLIC_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_PUBLIC_MAX_REQUESTS: z.coerce.number().int().positive().default(120),
+  RATE_LIMIT_AUTHED_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_AUTHED_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
+  RATE_LIMIT_ADMIN_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_ADMIN_MAX_REQUESTS: z.coerce.number().int().positive().default(20),
   DAILY_TASK_LIMIT_PER_WALLET: z.coerce.number().int().min(0).default(100),
 
-  /** Token budget management and per-task cost tracking (Issue #390). */
-  /** Total tokens (input + output) a single task may consume before it halts. */
   TASK_TOKEN_BUDGET: z.coerce.number().int().positive().default(200_000),
-  /** Ceiling on one LLM call's max_tokens. */
   LLM_MAX_TOKENS_PER_CALL: z.coerce.number().int().positive().default(8_192),
-  /** Ceiling on one LLM call's input prompt; longer prompts are trimmed. */
   LLM_MAX_PROMPT_TOKENS: z.coerce.number().int().positive().default(16_000),
-  /** `MODEL=inputUsd:outputUsd,MODEL=...` overrides for the pricing table. */
   VENICE_PRICING: z.string().optional(),
-  /** How often in-flight task costs are flushed to the database (ms). */
   COST_FLUSH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
 
   HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
   HEARTBEAT_STALE_THRESHOLD_MINUTES: z.coerce.number().int().positive().default(5),
   AGENT_OFFLINE_DELETE_HOURS: z.coerce.number().int().positive().default(24),
 
-  /** Agent heartbeat watchdog: grace period before eviction (Issue #379). */
   AGENT_WATCHDOG_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   AGENT_WATCHDOG_GRACE_MINUTES: z.coerce.number().int().positive().default(10),
 
@@ -101,7 +104,10 @@ const envSchema = z.object({
 
   COMPRESSION_THRESHOLD: z.coerce.number().int().min(0).default(1024),
   COMPRESSION_LEVEL: z.coerce.number().int().min(1).max(9).default(6),
-  COMPRESSION_ENABLE_BROTLI: z.enum(["true", "false"]).transform((v) => v === "true").default("true"),
+  COMPRESSION_ENABLE_BROTLI: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .default("true"),
 
   API_LATEST_VERSION: z.string().default("2.0"),
   API_SUPPORTED_VERSIONS: z.string().default("1.0,1.1,2.0"),
@@ -125,29 +131,10 @@ const envSchema = z.object({
   ERROR_REGISTRY_MAINTENANCE_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   ERROR_REGISTRY_CAP_PER_AGENT: z.coerce.number().int().positive().default(100),
 
-  // ── Event store retention & compaction (Issue #383) ─────────────────────────
-  /**
-   * On-disk path for the append-only event store.  A file path is required for
-   * the retention job to be meaningful — with `:memory:` the whole event log is
-   * discarded on restart, so there is nothing to archive or compact.
-   */
   EVENT_STORE_PATH: z.string().default("./data/events.db"),
-  /**
-   * Retention window in days.  Events belonging to a *finished* task whose most
-   * recent event is older than this are archived and then purged from the live
-   * `task_events` table.  Days (not row counts) because the boundary is task
-   * age, not table pressure.
-   */
   EVENT_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
-  /** How often the compaction pass runs, in milliseconds. */
   EVENT_COMPACTION_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
-  /**
-   * Maximum number of tasks compacted per pass.  Bounds the work (and therefore
-   * the writer-lock hold time) of a single tick so the live event path is not
-   * starved by a large backlog.
-   */
   EVENT_COMPACTION_BATCH_TASKS: z.coerce.number().int().positive().default(50),
-  /** Master switch for the retention job.  Also disabled when NODE_ENV=test. */
   EVENT_COMPACTION_ENABLED: z
     .enum(["true", "false"])
     .transform((v) => v === "true")
@@ -203,9 +190,7 @@ const envSchema = z.object({
     .superRefine(rejectPlaceholder),
   /** Access token validity in seconds. Default: 900 (15 min). */
   AUTH_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
-  /** Refresh token sliding expiry validity in seconds. Default: 604 800 (7 days). */
   AUTH_REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(604_800),
-  /** Max absolute session lifetime in seconds. Default: 2 592 000 (30 days). */
   AUTH_SESSION_MAX_TTL_SECONDS: z.coerce.number().int().positive().default(2_592_000),
 
   // ── Quality Scorer Configuration ─────────────────────────────────────────────
@@ -281,12 +266,9 @@ export class ConfigValidationError extends Error {
 
 let cachedConfig: Config | null = null;
 
-function emptyToUndefined(value: unknown): unknown {
-  return typeof value === "string" && value.trim() === "" ? undefined : value;
-}
-
 function withRuntimeDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const nodeEnv = env.NODE_ENV ?? "development";
+  const dbUrl = env.DATABASE_URL ?? env.DB_PATH;
   const testDefaults =
     nodeEnv === "test"
       ? {
@@ -312,7 +294,8 @@ function withRuntimeDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     ...testDefaults,
     ...devDefaults,
     ...env,
-    STELLAR_HORIZON_URL: env.STELLAR_HORIZON_URL ?? env.STELLAR_HORIZON,
+    DATABASE_URL: dbUrl ?? testDefaults.DATABASE_URL ?? "./data/ai-net.db",
+    STELLAR_HORIZON_URL: env.STELLAR_HORIZON_URL ?? env.STELLAR_HORIZON ?? "https://horizon-testnet.stellar.org",
   };
 }
 
@@ -372,6 +355,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 }
 
 export function getConfig(): Config {
+  if (process.env.NODE_ENV === "test") {
+    return loadConfig();
+  }
   return cachedConfig ?? loadConfig();
 }
 
@@ -419,3 +405,5 @@ export function redactedConfigSnapshot(cfg: Config = getConfig()): Record<string
     Object.entries(cfg).map(([key, value]) => [key, redactConfigValue(key, value)]),
   );
 }
+
+export { envSchema };

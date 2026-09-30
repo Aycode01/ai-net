@@ -47,6 +47,8 @@ export const DEFAULT_WEIGHTS: Record<QualityDimension, number> = {
 
 export const DEFAULT_REVIEW_THRESHOLD = 60;
 
+import { getConfig } from '../config';
+
 /**
  * Load quality scorer configuration from config.
  * Called lazily so config changes (env vars) take effect without redeploy.

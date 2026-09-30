@@ -9,6 +9,8 @@ import { getJobDb } from "../queue";
 import { createLogger } from "../utils/logger";
 import { config } from "../config";
 
+import { getConfig } from "../config";
+
 const logger = createLogger({ component: "admin-control" });
 
 const DEFAULT_AUDIT_DB = path.join(process.cwd(), "admin_audit.db");
@@ -65,14 +67,6 @@ function getAuditDb(): Database.Database {
     `);
   }
   return auditDb;
-}
-
-export function getReadOnlyState(): ReadOnlyState {
-  return { ...readOnlyState };
-}
-
-export function isReadOnly(): boolean {
-  return readOnlyState.enabled;
 }
 
 export function setReadOnlyState(enabled: boolean, actor: string, reason?: string): ReadOnlyState {

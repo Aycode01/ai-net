@@ -12,7 +12,7 @@ import { rateLimitMiddleware } from "../../middleware/rateLimit";
 import { idempotencyMiddleware } from "../../middleware/idempotency";
 import { currentTraceId } from "../../../services/traceContext";
 import { getConfig } from "../../../config";
-import { RateLimitError, NotFoundError, ForbiddenError, ConflictError } from "../../../errors";
+import { RateLimitError, NotFoundError, ForbiddenError, ConflictError, ValidationError } from "../../../errors";
 import { taskStreamUrl } from "../stream";
 
 import { getGlobalJobQueue, type JobQueue, type JobPriority } from "../../../queue";

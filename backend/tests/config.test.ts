@@ -1,6 +1,8 @@
-import { loadConfig, resetConfigForTests } from "../src/config";
+import fs from "fs";
+import path from "path";
+import { loadConfig, resetConfigForTests, envSchema } from "../src/config";
 
-describe("config validation", () => {
+describe("config validation & schema parity", () => {
   afterEach(() => {
     resetConfigForTests();
   });

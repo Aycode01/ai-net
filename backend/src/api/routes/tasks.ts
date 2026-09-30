@@ -15,6 +15,8 @@ import { ValidationError, NotFoundError, AppError, RateLimitError, ConflictError
 import { getGlobalJobQueue, type JobQueue, type JobPriority } from "../../queue";
 import { config } from "../../config";
 
+import { getConfig } from "../../config";
+
 // ── Validation config ────────────────────────────────────────────────────────
 // Read at module load time so the value is stable for the lifetime of the
 // process. Tests that need a different value should set process.env before

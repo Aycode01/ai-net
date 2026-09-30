@@ -24,6 +24,8 @@ function base64UrlDecode(str: string): string {
   return Buffer.from(base64, "base64").toString("utf-8");
 }
 
+import { getConfig } from "../../config";
+
 export class TokenService {
   private jwtSecret: string;
   private accessTtlSeconds: number;

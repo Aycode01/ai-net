@@ -66,8 +66,7 @@ const AgentChallengeRequestSchema = z.object({
 });
 
 const DEFAULT_HEALTH_TIMEOUT_MS = 3_000;
-const HORIZON_URL = process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org";
-const horizon = new Horizon.Server(HORIZON_URL);
+const getHorizon = () => new Horizon.Server(getConfig().STELLAR_HORIZON_URL);
 
 /**
  * Purposes that may still be called unsigned while the `agent_ownership_proof`

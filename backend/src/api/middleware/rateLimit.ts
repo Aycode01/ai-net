@@ -256,42 +256,31 @@ export function getRateLimiter(): RedisRateLimiter {
 //
 // Limits are intentionally conservative; operators should tune via env.
 
-function readEnvInt(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function readEnvWindowMs(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
 /**
- * Lazily-created group limiters.  Using factory functions so tests can reset
- * process.env before the limiter is instantiated.
+ * Lazily-created group limiters. Using factory functions so tests can reset
+ * config before the limiter is instantiated.
  */
 export function createPublicLimiter(): RateLimiter {
+  const cfg = getConfig();
   return createRateLimiter({
-    windowMs: readEnvWindowMs("RATE_LIMIT_PUBLIC_WINDOW_MS", 60_000),
-    maxRequests: readEnvInt("RATE_LIMIT_PUBLIC_MAX_REQUESTS", 120),
+    windowMs: cfg.RATE_LIMIT_PUBLIC_WINDOW_MS,
+    maxRequests: cfg.RATE_LIMIT_PUBLIC_MAX_REQUESTS,
   });
 }
 
 export function createAuthedLimiter(): RateLimiter {
+  const cfg = getConfig();
   return createRateLimiter({
-    windowMs: readEnvWindowMs("RATE_LIMIT_AUTHED_WINDOW_MS", 60_000),
-    maxRequests: readEnvInt("RATE_LIMIT_AUTHED_MAX_REQUESTS", 30),
+    windowMs: cfg.RATE_LIMIT_AUTHED_WINDOW_MS,
+    maxRequests: cfg.RATE_LIMIT_AUTHED_MAX_REQUESTS,
   });
 }
 
 export function createAdminLimiter(): RateLimiter {
+  const cfg = getConfig();
   return createRateLimiter({
-    windowMs: readEnvWindowMs("RATE_LIMIT_ADMIN_WINDOW_MS", 60_000),
-    maxRequests: readEnvInt("RATE_LIMIT_ADMIN_MAX_REQUESTS", 20),
+    windowMs: cfg.RATE_LIMIT_ADMIN_WINDOW_MS,
+    maxRequests: cfg.RATE_LIMIT_ADMIN_MAX_REQUESTS,
   });
 }
 
