@@ -258,6 +258,7 @@ impl UpgradeManager {
         initial_version: String,
         initial_wasm_hash: BytesN<32>,
     ) -> Result<(), UpgradeError> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(UpgradeError::InvalidVersion);
         }
@@ -776,6 +777,20 @@ mod tests {
     }
 
     #[test]
+    fn test_negative_auth_initialize() {
+        let env = Env::default();
+        env.ledger().set_sequence_number(1);
+        env.mock_auths(&[]);
+        let contract_id = env.register(UpgradeManager, ());
+        let client = UpgradeManagerClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let initial_hash = test_wasm_hash(&env, 1);
+        assert!(client
+            .try_initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash)
+            .is_err());
+    }
+
+    #[test]
     fn test_gas_estimation() {
         let (env, client, _admin) = create_test_env();
 
@@ -800,5 +815,161 @@ mod tests {
 
         let expected = GAS_UPGRADE_BASE + (GAS_MIGRATION_PER_ITEM * 100) + (3 * 5000);
         assert_eq!(gas_estimate, expected);
+    }
+
+    // ========================================================================
+    // Negative Authorization Tests (Issue #549)
+    // ========================================================================
+
+    #[test]
+    fn negative_auth_set_admin() {
+        let (env, client, admin) = create_test_env();
+        let initial_hash = test_wasm_hash(&env, 1);
+        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
+
+        let intruder = Address::generate(&env);
+        env.mock_auths(&[]);
+
+        let result = client.try_set_admin(&intruder);
+        assert_eq!(result, Err(Ok(UpgradeError::Unauthorized)));
+    }
+
+    #[test]
+    fn negative_auth_pause() {
+        let (env, client, admin) = create_test_env();
+        let initial_hash = test_wasm_hash(&env, 1);
+        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
+
+        env.mock_auths(&[]);
+
+        let result = client.try_pause();
+        assert_eq!(result, Err(Ok(UpgradeError::Unauthorized)));
+    }
+
+    #[test]
+    fn negative_auth_unpause() {
+        let (env, client, admin) = create_test_env();
+        let initial_hash = test_wasm_hash(&env, 1);
+        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
+
+        env.mock_all_auths();
+        client.pause();
+
+        env.mock_auths(&[]);
+
+        let result = client.try_unpause();
+        assert_eq!(result, Err(Ok(UpgradeError::Unauthorized)));
+    }
+
+    #[test]
+    fn negative_auth_propose_upgrade() {
+        let (env, client, admin) = create_test_env();
+        let initial_hash = test_wasm_hash(&env, 1);
+        let new_hash = test_wasm_hash(&env, 2);
+        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
+
+        let migration_plan = MigrationPlan {
+            pre_migration_checks: Vec::new(&env),
+            data_transformations: Vec::new(&env),
+            post_migration_validations: Vec::new(&env),
+            estimated_items: 10,
+        };
+
+        env.mock_auths(&[]);
+
+        let result = client.try_propose_upgrade(
+            &String::from_str(&env, "2.0.0"),
+            &new_hash,
+            &String::from_str(&env, "Unauthorized upgrade"),
+            &migration_plan,
+        );
+        assert_eq!(result, Err(Ok(UpgradeError::Unauthorized)));
+    }
+
+    #[test]
+    fn negative_auth_validate_proposal() {
+        let (env, client, admin) = create_test_env();
+        let initial_hash = test_wasm_hash(&env, 1);
+        let new_hash = test_wasm_hash(&env, 2);
+        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
+
+        let migration_plan = MigrationPlan {
+            pre_migration_checks: Vec::new(&env),
+            data_transformations: Vec::new(&env),
+            post_migration_validations: Vec::new(&env),
+            estimated_items: 10,
+        };
+
+        env.mock_all_auths();
+        client.propose_upgrade(
+            &String::from_str(&env, "2.0.0"),
+            &new_hash,
+            &String::from_str(&env, "Test upgrade"),
+            &migration_plan,
+        );
+
+        env.mock_auths(&[]);
+
+        let result = client.try_validate_proposal();
+        assert_eq!(result, Err(Ok(UpgradeError::Unauthorized)));
+    }
+
+    #[test]
+    fn negative_auth_execute_upgrade() {
+        let (env, client, admin) = create_test_env();
+        let initial_hash = test_wasm_hash(&env, 1);
+        let new_hash = test_wasm_hash(&env, 2);
+        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
+
+        let migration_plan = MigrationPlan {
+            pre_migration_checks: Vec::new(&env),
+            data_transformations: Vec::new(&env),
+            post_migration_validations: Vec::new(&env),
+            estimated_items: 10,
+        };
+
+        env.mock_all_auths();
+        client.propose_upgrade(
+            &String::from_str(&env, "2.0.0"),
+            &new_hash,
+            &String::from_str(&env, "Test upgrade"),
+            &migration_plan,
+        );
+        client.validate_proposal();
+
+        env.mock_auths(&[]);
+
+        let result = client.try_execute_upgrade();
+        assert_eq!(result, Err(Ok(UpgradeError::Unauthorized)));
+    }
+
+    #[test]
+    fn negative_auth_rollback_upgrade() {
+        let (env, client, admin) = create_test_env();
+        let initial_hash = test_wasm_hash(&env, 1);
+        let new_hash = test_wasm_hash(&env, 2);
+        client.initialize(&admin, &String::from_str(&env, "1.0.0"), &initial_hash);
+
+        let migration_plan = MigrationPlan {
+            pre_migration_checks: Vec::new(&env),
+            data_transformations: Vec::new(&env),
+            post_migration_validations: Vec::new(&env),
+            estimated_items: 5,
+        };
+
+        env.mock_all_auths();
+        client.propose_upgrade(
+            &String::from_str(&env, "2.0.0"),
+            &new_hash,
+            &String::from_str(&env, "Test upgrade"),
+            &migration_plan,
+        );
+        client.validate_proposal();
+        client.execute_upgrade();
+
+        env.mock_auths(&[]);
+
+        let result = client.try_rollback_upgrade();
+        assert_eq!(result, Err(Ok(UpgradeError::Unauthorized)));
     }
 }

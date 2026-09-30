@@ -17,6 +17,7 @@ import {
   verifyWalletSignature,
   WALLET_NONCE_TTL_MS,
 } from '../../services/auth/walletChallenge';
+import { TaskStreamHub } from './taskStreamHub';
 
 const STREAM_PATH = /^\/(?:api\/)?tasks\/([^/?]+)\/stream(?:\?.*)?$/;
 
@@ -283,6 +284,12 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
 
   const maxMessagesPerMinute = getConfig().WS_MAX_MESSAGES_PER_MINUTE;
 
+  // One EventBus subscription and one bounded read per task, shared by every
+  // client watching that task (#655). Clients used to each subscribe and each
+  // re-query the store per tick, which made reads scale with the subscriber
+  // count and tripped MaxListenersExceededWarning past 100 clients.
+  const streamHub = new TaskStreamHub({ store: eventStore, bus: eventBus });
+
   const wss = new WebSocketServer({ noServer: true });
   activeStreamServers.add(wss);
 
@@ -334,10 +341,11 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
     const traceId = extractTraceId(_req) || randomUUID();
 
     let authed = false;
-    // Cursor for the next flush: events with seq > lastSentSeq are replayed.
-    // With ?lastEventId=N we resume after seq N; without it we fall back to -1
-    // so the full history (seq 0 → latest) is replayed — backward compatible.
-    let lastSentSeq = lastEventId ?? -1;
+    // Resume cursor for this connection. With ?lastEventId=N we resume after seq
+    // N; without it we fall back to -1 so the full history (seq 0 → latest) is
+    // replayed — backward compatible. The hub advances its own per-subscriber
+    // cursor from here on, so this value is only the starting point.
+    const initialCursor = lastEventId ?? -1;
     let unsubLive: (() => void) | undefined;
     let heartbeat: NodeJS.Timeout | undefined;
     let pongTimer: NodeJS.Timeout | undefined;
@@ -385,17 +393,12 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
     // within `authTimeoutMs`; consume() burns it so replays are rejected.
     const expectedNonce = nonceStore.issue();
 
-    // Stream every persisted event newer than the last one we sent. Driven by
-    // both the initial replay and each live emit, so ordering is canonical
-    // (store seq) and no event is ever sent twice.
-    const flush = (): void => {
-      const events = eventStore.listByTaskSince(taskId, lastSentSeq);
-      for (const event of events) {
-        // Normalise to the wire format (snake_case type, seq cursor) before
-        // sending so clients see the same shape regardless of internal storage.
-        send(toWireEvent(event, traceId));
-        lastSentSeq = event.taskSeq;
-      }
+    // Events are delivered by the shared hub, which reads the store once per
+    // tick for all clients on this task. This callback only normalises to the
+    // wire format (snake_case type, seq cursor) — each connection has its own
+    // traceId, so formatting stays per-connection even though the read does not.
+    const deliver = (event: StoredEvent): void => {
+      send(toWireEvent(event, traceId));
     };
 
     const cleanup = (): void => {
@@ -448,12 +451,12 @@ export function attachTaskStream(deps: TaskStreamDeps): () => void {
       resetInactivityTimer();
 
       // Subscribe before the initial replay so any event emitted during replay
-      // is captured; flush() dedupes via lastSentSeq, so order is preserved
-      // and nothing is delivered twice.
-      // The subscribe/flush run inside the WS trace context so any logging
+      // is captured; the hub tracks this client's cursor independently, so order
+      // is preserved and nothing is delivered twice.
+      // The subscribe/replay run inside the WS trace context so any logging
       // during delivery carries the same traceId.
-      unsubLive = eventBus.subscribe(taskId, () => flush());
-      flush();
+      unsubLive = streamHub.subscribe(taskId, { lastEventId: initialCursor }, deliver);
+      streamHub.flush(taskId);
       startHeartbeat();
 
       runWithTraceContext(

@@ -106,9 +106,18 @@ const DesignRenderer: React.FC<Props> = ({ result, searchQuery }) => {
   const filteredColors = query
     ? details.colors.filter((c) => (c.name || '').toLowerCase().includes(query) || (c.hex || '').toLowerCase().includes(query))
     : details.colors;
+  // Keep each filtered image paired with its index in the *unfiltered* list:
+  // the lightbox navigates the full gallery, so opening a filtered thumbnail
+  // has to land on the right position rather than the start.
   const filteredImages = query
-    ? details.images.filter((img) => (img.title || '').toLowerCase().includes(query) || (img.alt || '').toLowerCase().includes(query))
-    : details.images;
+    ? details.images
+        .map((img, index) => ({ img, index }))
+        .filter(
+          ({ img }) =>
+            (img.title || '').toLowerCase().includes(query) ||
+            (img.alt || '').toLowerCase().includes(query),
+        )
+    : details.images.map((img, index) => ({ img, index }));
 
   const handleCopyColor = async (hex: string) => {
     try {
@@ -126,7 +135,7 @@ const DesignRenderer: React.FC<Props> = ({ result, searchQuery }) => {
       {filteredImages.length > 0 && (
         <div style={{ marginBottom: '32px' }} data-testid="design-images-gallery">
           <h4 style={{ marginBottom: '14px', color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 600 }}>
-            {t('agent.design.outputsTitle', { total: details.images.length })}
+            {t('agent.design.outputsTitle', { total: filteredImages.length })}
           </h4>
           <div
             style={{
@@ -135,10 +144,10 @@ const DesignRenderer: React.FC<Props> = ({ result, searchQuery }) => {
               gap: '16px',
             }}
           >
-            {filteredImages.map((img, idx) => (
+            {filteredImages.map(({ img, index: idx }) => (
               <div
                 key={`design-img-${idx}`}
-                onClick={() => lightbox.openLightbox(filteredImages, idx)}
+                onClick={() => lightbox.openLightbox(details.images, idx)}
                 style={{
                   position: 'relative',
                   backgroundColor: 'var(--surface-hover-subtle)',

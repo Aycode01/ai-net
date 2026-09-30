@@ -123,8 +123,10 @@ export function getJobDb(dbPath?: string): Database.Database {
   return _jobDb;
 }
 
-export function closeJobDb(): void {
-  _jobDb?.close();
+export async function closeJobDb(): Promise<void> {
+  const db = _jobDb;
+  if (!db) return;
+  db.close();
   _jobDb = null;
 }
 

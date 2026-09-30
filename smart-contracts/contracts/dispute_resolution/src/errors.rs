@@ -21,6 +21,8 @@ pub enum Error {
     InvalidAmount = 13,
     InvalidVoterPool = 14,
     EvidenceLimitReached = 15,
+    AppealExpired = 16,
+    AppealAlreadyFiled = 17,
 }
 
 impl Error {
@@ -41,6 +43,8 @@ impl Error {
             13 => Some(Self::InvalidAmount),
             14 => Some(Self::InvalidVoterPool),
             15 => Some(Self::EvidenceLimitReached),
+            16 => Some(Self::AppealExpired),
+            17 => Some(Self::AppealAlreadyFiled),
             _ => None,
         }
     }

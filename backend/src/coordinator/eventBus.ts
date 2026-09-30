@@ -93,7 +93,12 @@ export interface EventBusOptions {
   maxListeners?: number;
 }
 
-class EventBus extends EventEmitter {
+/**
+ * Exported so tests can build an isolated bus against a stub store instead of
+ * sharing the process-wide singleton. Production code should use the
+ * {@link eventBus} singleton below.
+ */
+export class EventBus extends EventEmitter {
   /** Internal channel that receives every event regardless of taskId. */
   private static readonly ALL = '__all__';
 
@@ -112,6 +117,10 @@ class EventBus extends EventEmitter {
     // below something to rehydrate from, and what makes the retention job
     // meaningful.
     this.store = options.store ?? getEventStore();
+    // Backstop only. Per-task listener counts are no longer driven by client
+    // count: `TaskStreamHub` keeps exactly one subscription per task no matter
+    // how many WebSocket clients are attached (#655), so this ceiling is only
+    // reachable by an actual leak.
     this.setMaxListeners(options.maxListeners ?? 100);
 
     // ── Rehydrate seq counters from the DB ──────────────────────────────────

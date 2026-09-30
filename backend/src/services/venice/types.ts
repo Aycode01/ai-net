@@ -4,11 +4,38 @@ import type { RequestDeduplicator } from './dedup.js';
 
 export type AgentType = 'research' | 'risk' | 'coding' | 'design' | 'report';
 
+/** Token counts as reported by the Venice completions API. */
+export interface VeniceUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
 export interface CompleteOptions {
   maxTokens?: number;
   temperature?: number;
   /** Bypass the response cache (both read and write) when true. */
   force?: boolean;
+  /**
+   * Correlation for the call's spend. Supplied by the task budget ledger so
+   * the burn is attributed to the right task/node/agent (Issue #390).
+   */
+  budget?: VeniceBudgetContext;
+  /**
+   * Invoked with the provider-reported token usage after every call, including
+   * cache hits (where the estimate is passed instead of provider numbers).
+   */
+  onUsage?: (usage: VeniceUsage) => void;
+}
+
+/** Identity + allowance for a single LLM call, used for cost attribution. */
+export interface VeniceBudgetContext {
+  taskId: string;
+  nodeId: string;
+  agentId: string;
+  agentType: AgentType;
+  /** Tokens the caller may still spend; clamped to the hard cap internally. */
+  maxTokens?: number;
 }
 
 /** Tunables for the Venice response cache. */

@@ -37,6 +37,11 @@ jest.mock('../src/services/errorRegistryMaintenance', () => ({
   ErrorRegistryMaintenanceService: jest.fn(() => ({ start: jest.fn(), stop: jest.fn() })),
 }));
 
+jest.mock('../src/services/idempotency', () => ({
+  getDefaultIdempotencyStore: jest.fn(),
+  resetDefaultIdempotencyStore: jest.fn(),
+}));
+
 jest.mock('../src/registry/sync', () => ({
   stopAgentSync: jest.fn(),
   startAgentSync: jest.fn(),
@@ -96,6 +101,7 @@ describe('setupGracefulShutdown', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (closeTaskDb as jest.Mock).mockResolvedValue(undefined);
     mockProcessExit = jest.spyOn(process, 'exit').mockImplementation((() => {}) as any);
     mockProcessOn = jest.spyOn(process, 'on').mockImplementation(() => undefined as any);
 
@@ -190,11 +196,54 @@ describe('setupGracefulShutdown', () => {
     expect(mockProcessExit).toHaveBeenCalledWith(0);
   });
 
-  it('honours GRACEFUL_SHUTDOWN_TIMEOUT from config rather than hardcoded 10s', async () => {
-    jest.useFakeTimers();
+  it('waits for worker drain, maintenance, and database close promises before exiting', async () => {
+    let finishAppClose!: () => void;
+    let finishMaintenance!: () => void;
+    let finishTaskDbClose!: () => void;
+    mockCloseApp = jest.fn((callback?: () => void) => { finishAppClose = callback!; });
+    extras.maintenanceService.stop.mockImplementation(
+      () => new Promise<void>((resolve) => { finishMaintenance = resolve; }),
+    );
+    (closeTaskDb as jest.Mock).mockImplementation(
+      () => new Promise<void>((resolve) => { finishTaskDbClose = resolve; }),
+    );
 
-    mockCloseApp = jest.fn((_callback?: () => void) => {
-      // never calls back — simulates hung drain
+    const shutdown = setupGracefulShutdown(
+      mockHttpServer,
+      mockCloseApp,
+      { GRACEFUL_SHUTDOWN_TIMEOUT: 5 },
+      extras,
+    );
+    const shutdownPromise = shutdown('SIGTERM');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(mockCloseApp).toHaveBeenCalled();
+    expect(extras.maintenanceService.stop).not.toHaveBeenCalled();
+    expect(closeTaskDb).not.toHaveBeenCalled();
+    expect(mockProcessExit).not.toHaveBeenCalled();
+
+    finishAppClose();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(extras.maintenanceService.stop).toHaveBeenCalled();
+    expect(closeTaskDb).not.toHaveBeenCalled();
+    expect(mockProcessExit).not.toHaveBeenCalled();
+
+    finishMaintenance();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeTaskDb).toHaveBeenCalled();
+    expect(mockProcessExit).not.toHaveBeenCalled();
+
+    finishTaskDbClose();
+    await shutdownPromise;
+    expect(mockProcessExit).toHaveBeenCalledWith(0);
+  });
+
+  it('honours GRACEFUL_SHUTDOWN_TIMEOUT but waits for drains before exiting', async () => {
+    jest.useFakeTimers();
+    let finishServerClose!: () => void;
+
+    mockCloseApp = jest.fn((callback?: () => void) => {
+      finishServerClose = callback!;
     });
 
     const shutdown = setupGracefulShutdown(
@@ -203,14 +252,18 @@ describe('setupGracefulShutdown', () => {
       { GRACEFUL_SHUTDOWN_TIMEOUT: 25 },
     );
 
-    shutdown('SIGTERM');
+    const shutdownPromise = shutdown('SIGTERM');
 
     // At 10 seconds (old hardcoded value), should NOT have force-exited
     jest.advanceTimersByTime(10_000);
     expect(mockProcessExit).not.toHaveBeenCalled();
 
-    // At 25 seconds (configured value), SHOULD force-exit
+    // At 25 seconds (configured value), record the timeout without exiting
     jest.advanceTimersByTime(15_000);
+    expect(mockProcessExit).not.toHaveBeenCalled();
+
+    finishServerClose();
+    await shutdownPromise;
     expect(mockProcessExit).toHaveBeenCalledWith(1);
 
     jest.useRealTimers();
@@ -218,16 +271,23 @@ describe('setupGracefulShutdown', () => {
 
   it('defaults to 30s timeout when GRACEFUL_SHUTDOWN_TIMEOUT is unset', async () => {
     jest.useFakeTimers();
+    let finishServerClose!: () => void;
 
-    mockCloseApp = jest.fn();
+    mockCloseApp = jest.fn((callback?: () => void) => {
+      finishServerClose = callback!;
+    });
 
     const shutdown = setupGracefulShutdown(mockHttpServer, mockCloseApp, {});
-    shutdown('SIGINT');
+    const shutdownPromise = shutdown('SIGINT');
 
     jest.advanceTimersByTime(29_000);
     expect(mockProcessExit).not.toHaveBeenCalled();
 
     jest.advanceTimersByTime(2_000);
+    expect(mockProcessExit).not.toHaveBeenCalled();
+
+    finishServerClose();
+    await shutdownPromise;
     expect(mockProcessExit).toHaveBeenCalledWith(1);
 
     jest.useRealTimers();
@@ -255,19 +315,23 @@ describe('setupGracefulShutdown', () => {
     expect(mockCloseApp).toHaveBeenCalledTimes(1);
   });
 
-  it('triggers forced exit on timeout if server drain hangs', async () => {
+  it('does not force-exit while server drain is still pending', async () => {
     jest.useFakeTimers();
+    let finishServerClose!: () => void;
 
-    mockCloseApp = jest.fn((_callback?: () => void) => {
-      // Do nothing to trigger timeout
+    mockCloseApp = jest.fn((callback?: () => void) => {
+      finishServerClose = callback!;
     });
 
     const shutdown = setupGracefulShutdown(mockHttpServer, mockCloseApp, { GRACEFUL_SHUTDOWN_TIMEOUT: 10 });
 
-    shutdown('SIGINT');
+    const shutdownPromise = shutdown('SIGINT');
 
     jest.advanceTimersByTime(10000);
+    expect(mockProcessExit).not.toHaveBeenCalled();
 
+    finishServerClose();
+    await shutdownPromise;
     expect(mockProcessExit).toHaveBeenCalledWith(1);
 
     jest.useRealTimers();
