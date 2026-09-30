@@ -94,12 +94,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "OracleManager"
+                              "symbol": "Version"
                             }
                           ]
                         },
                         "val": {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                          "string": "1.0.0"
                         }
                       },
                       {
