@@ -10,6 +10,7 @@
  * information available as structured JSON.
  */
 import { Router, Request, Response } from "express";
+import { config } from "../../config";
 
 export interface VersionEntry {
   version: string;
@@ -29,7 +30,7 @@ const VERSION_MANIFEST: VersionEntry[] = [
     version: "1.0",
     status: "deprecated",
     deprecatedAt: "2026-01-01",
-    sunsetAt: process.env.API_V1_SUNSET_DATE ?? "2027-01-01",
+    sunsetAt: config.API_V1_SUNSET_DATE ?? "2027-01-01",
     breakingChanges: [],
     migratesTo: "2.0",
   },
@@ -37,7 +38,7 @@ const VERSION_MANIFEST: VersionEntry[] = [
     version: "1.1",
     status: "deprecated",
     deprecatedAt: "2026-06-01",
-    sunsetAt: process.env.API_V1_SUNSET_DATE ?? "2027-01-01",
+    sunsetAt: config.API_V1_SUNSET_DATE ?? "2027-01-01",
     breakingChanges: [
       "Task response envelope changed: `result` moved to `data.result`.",
     ],
@@ -77,7 +78,7 @@ export function createVersionsRouter(): Router {
     const current = VERSION_MANIFEST.find((v) => v.status === "current");
     res.json({
       latestVersion: current?.version ?? "2.0",
-      defaultVersion: process.env.API_DEFAULT_VERSION ?? "1.0",
+      defaultVersion: config.API_DEFAULT_VERSION,
       policy: {
         deprecationNoticeMonths: 6,
         sunsetGracePeriodMonths: 12,

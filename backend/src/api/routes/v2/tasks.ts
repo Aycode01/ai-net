@@ -5,7 +5,7 @@ import { getTaskDb, createTaskDb } from "../../../db/tasks";
 import { decompose } from "../../../coordinator";
 import type { Task } from "../../../types/task";
 import { executeDAG, type DispatchFn, type PaymentReleaseFn } from "../../../coordinator/coordinator";
-import { createTask, getTask } from "../../../coordinator/taskStore";
+import { createTask, getTask, abortTask } from "../../../coordinator/taskStore";
 import { createLogger } from "../../../utils/logger";
 import { validate } from "../../middleware/validate";
 import { rateLimitMiddleware } from "../../middleware/rateLimit";
@@ -16,9 +16,10 @@ import { RateLimitError, NotFoundError, ForbiddenError, ConflictError } from "..
 import { taskStreamUrl } from "../stream";
 
 import { getGlobalJobQueue, type JobQueue, type JobPriority } from "../../../queue";
+import { config } from "../../../config";
 
 // ── Validation config ────────────────────────────────────────────────────────
-const DAILY_TASK_LIMIT = Number(process.env.DAILY_TASK_LIMIT_PER_WALLET ?? 100);
+const DAILY_TASK_LIMIT = config.DAILY_TASK_LIMIT_PER_WALLET;
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -274,34 +275,58 @@ export function createV2TasksRouter(
       );
     }
 
-    if (task.status !== "queued") {
-      throw new ConflictError(
-        `Cannot cancel task in '${task.status}' status`,
-        { taskId: req.params.id, status: task.status },
-        res.locals.correlationId as string | undefined,
-      );
+    const nowTs = new Date().toISOString();
+
+    if (task.status === "queued") {
+      db.updateStatus(req.params.id, "cancelled");
+
+      res.json({
+        data: {
+          taskId: req.params.id,
+          status: "cancelled",
+        },
+        _meta: {
+          version: "2.0",
+          timestamp: nowTs,
+          requestId: res.locals.requestId || null,
+          apiVersion: res.locals.apiVersion || "2.0",
+        },
+        _links: {
+          self: `/api/tasks/${req.params.id}`,
+        },
+      });
+      return;
     }
 
-    db.updateStatus(req.params.id, "cancelled");
+    if (task.status === "running") {
+      // Signal the coordinator to abort in-flight execution; the response is
+      // returned immediately (async cancellation).
+      abortTask(req.params.id);
+      db.updateStatus(req.params.id, "cancelled");
 
-    const now = new Date().toISOString();
+      res.json({
+        data: {
+          taskId: req.params.id,
+          status: "cancelling",
+        },
+        _meta: {
+          version: "2.0",
+          timestamp: nowTs,
+          requestId: res.locals.requestId || null,
+          apiVersion: res.locals.apiVersion || "2.0",
+        },
+        _links: {
+          self: `/api/tasks/${req.params.id}`,
+        },
+      });
+      return;
+    }
 
-    // v2 enhanced response format
-    res.json({
-      data: {
-        taskId: req.params.id,
-        status: "cancelled",
-      },
-      _meta: {
-        version: "2.0",
-        timestamp: now,
-        requestId: res.locals.requestId || null,
-        apiVersion: res.locals.apiVersion || "2.0",
-      },
-      _links: {
-        self: `/api/tasks/${req.params.id}`,
-      },
-    });
+    throw new ConflictError(
+      `Cannot cancel task in '${task.status}' status`,
+      { taskId: req.params.id, status: task.status },
+      res.locals.correlationId as string | undefined,
+    );
     } catch (err) {
       next(err);
     }

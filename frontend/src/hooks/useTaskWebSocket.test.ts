@@ -11,6 +11,7 @@ class MockWebSocket {
   onclose: ((event: CloseEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
   readyState: number = WebSocket.CONNECTING;
+  sent: string[] = [];
 
   constructor(public url: string) {
     MockWebSocket.instance = this;
@@ -23,8 +24,8 @@ class MockWebSocket {
     }
   }
 
-  send(_data: string) {
-    // Mock implementation
+  send(data: string) {
+    this.sent.push(data);
   }
 
   // Test helpers
@@ -102,6 +103,33 @@ describe('useTaskWebSocket', () => {
     expect(mockOptions.onConnect).toHaveBeenCalled();
   });
 
+  it('sends the wallet authentication frame as the first message after opening', () => {
+    renderHook(() =>
+      useTaskWebSocket({
+        taskId: 'owned-task',
+        walletPublicKey: 'GOWNER',
+        onMessage: vi.fn(),
+      })
+    );
+
+    act(() => MockWebSocket.instance!.simulateOpen());
+
+    expect(MockWebSocket.instance!.sent[0]).toBe(JSON.stringify({ walletPublicKey: 'GOWNER' }));
+  });
+
+  it('does not open an authenticated stream without a wallet and reports the requirement', () => {
+    const { result } = renderHook(() =>
+      useTaskWebSocket({
+        taskId: 'owned-task',
+        requireAuthentication: true,
+        onMessage: vi.fn(),
+      })
+    );
+
+    expect(MockWebSocket.instance).toBeNull();
+    expect(result.current.status).toBe('authentication-required');
+  });
+
   it('should handle incoming messages', () => {
     const onMessage = vi.fn();
     const mockOptions: UseTaskWebSocketOptions = {
@@ -163,7 +191,7 @@ describe('useTaskWebSocket', () => {
 
     // Check if reconnection is scheduled
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
-    
+
     setTimeoutSpy.mockRestore();
   });
 
@@ -224,7 +252,7 @@ describe('useTaskWebSocket', () => {
       MockWebSocket.instance!.simulateClose();
     });
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
-    
+
     setTimeoutSpy.mockRestore();
   });
 
@@ -248,13 +276,40 @@ describe('useTaskWebSocket', () => {
 
     // 6th disconnection should not schedule another reconnection
     const timeoutCallsBefore = setTimeoutSpy.mock.calls.length;
-    
+
     act(() => {
       MockWebSocket.instance!.simulateClose();
     });
 
     expect(setTimeoutSpy.mock.calls.length).toBe(timeoutCallsBefore);
-    
+
     setTimeoutSpy.mockRestore();
+  });
+
+  it('recovers after exhausting automatic retries when manually reconnected', () => {
+    const { result } = renderHook(() =>
+      useTaskWebSocket({
+        taskId: 'test-task',
+        onMessage: vi.fn(),
+        maxReconnectAttempts: 2,
+      })
+    );
+
+    act(() => MockWebSocket.instance!.simulateClose());
+    act(() => vi.advanceTimersByTime(1000));
+    act(() => MockWebSocket.instance!.simulateClose());
+    act(() => vi.advanceTimersByTime(2000));
+    act(() => MockWebSocket.instance!.simulateClose());
+
+    expect(result.current.status).toBe('disconnected');
+    const exhaustedSocket = MockWebSocket.instance;
+
+    act(() => result.current.reconnect());
+    expect(MockWebSocket.instance).not.toBe(exhaustedSocket);
+    expect(result.current.status).toBe('connecting');
+
+    act(() => MockWebSocket.instance!.simulateOpen());
+    expect(result.current.status).toBe('connected');
+    expect(result.current.isConnected).toBe(true);
   });
 });

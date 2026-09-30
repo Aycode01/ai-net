@@ -46,4 +46,9 @@ pub enum Error {
     ProposalFinalized = 15,
     /// Proposal title or description must not be empty.
     EmptyMetadata = 16,
+    AgentNotFound = 17,
+    AgentFrozen = 18,
+    InsufficientBond = 19,
+    AgentDeregistered = 20,
+    AgentNotEligible = 21,
 }
