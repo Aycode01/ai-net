@@ -1,4 +1,8 @@
 {
+  "page.agents.pagination": "Agent pages",
+  "page.agents.pageFilters": "Filters and sorting apply to this page.",
+  "page.agents.firstPage": "First page",
+  "page.agents.nextPage": "Next page",
   "nav.dashboard": "Dashboard",
   "nav.agents": "Agents",
   "nav.agentRegistry": "Agent Registry",

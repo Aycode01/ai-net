@@ -84,6 +84,22 @@ const DEFAULTS = {
   gracePeriodMinutes: 10,
 };
 
+/**
+ * Every online agent, collected page by page. `AgentDb.list()` is bounded, and
+ * the scan must see the stalest agents too. Pages are drained before any
+ * `markStale` call so status flips cannot shift the cursor mid-scan.
+ */
+function listAllOnline(db: AgentDb): AgentRecord[] {
+  const agents: AgentRecord[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = db.listCursor({ status: "online", limit: 100, cursor });
+    agents.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return agents;
+}
+
 export function createAgentWatchdog(options: AgentWatchdogOptions = {}): AgentWatchdog {
   const intervalMs = options.intervalMs ?? DEFAULTS.intervalMs;
   const gracePeriodMinutes = options.gracePeriodMinutes ?? DEFAULTS.gracePeriodMinutes;
@@ -133,7 +149,7 @@ export function createAgentWatchdog(options: AgentWatchdogOptions = {}): AgentWa
     // dispatched, which immediately removes it from this list — so an agent
     // would be quarantined here and then never seen again. Phase 2 owns the
     // rest of the lifecycle.
-    for (const agent of db.list({ status: "online" })) {
+    for (const agent of listAllOnline(db)) {
       const lastSeenMs = Date.parse(agent.lastSeenAt);
       // An unparseable lastSeenAt is treated as maximally stale rather than
       // skipped — a corrupted timestamp must not be a way to stay registered.
