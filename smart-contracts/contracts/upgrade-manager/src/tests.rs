@@ -16,7 +16,7 @@ use crate::{
     DEFAULT_PROPOSAL_EXPIRY, DEFAULT_THRESHOLD, DEFAULT_TIMELOCK_DELAY, ROLLBACK_WINDOW_LEDGERS,
 };
 use soroban_sdk::{
-    testutils::{Events as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _},
     Address, BytesN, Env, String, Vec,
 };
 
@@ -113,21 +113,21 @@ fn test_multisig_config_rejects_invalid_threshold() {
     // threshold 0
     assert_eq!(
         f.client
-            .try_set_multisig_config(&f.admin1, &admins, &0, &DEFAULT_TIMELOCK_DELAY)
+            .try_set_multisig_config(&admins, &0, &DEFAULT_TIMELOCK_DELAY)
             .err(),
         Some(Ok(UpgradeError::InvalidMultisigConfig))
     );
     // threshold above signer count
     assert_eq!(
         f.client
-            .try_set_multisig_config(&f.admin1, &admins, &5, &DEFAULT_TIMELOCK_DELAY)
+            .try_set_multisig_config(&admins, &5, &DEFAULT_TIMELOCK_DELAY)
             .err(),
         Some(Ok(UpgradeError::InvalidMultisigConfig))
     );
     // zero timelock
     assert_eq!(
         f.client
-            .try_set_multisig_config(&f.admin1, &admins, &1, &0)
+            .try_set_multisig_config(&admins, &1, &0)
             .err(),
         Some(Ok(UpgradeError::InvalidMultisigConfig))
     );
@@ -567,7 +567,7 @@ fn test_unsigned_caller_cannot_change_multisig_or_admin() {
     f.env.mock_auths(&[]);
     let r1 = f
         .client
-        .try_set_multisig_config(&f.admin1, &admins, &1, &DEFAULT_TIMELOCK_DELAY);
+        .try_set_multisig_config(&admins, &1, &DEFAULT_TIMELOCK_DELAY);
     let r2 = f.client.try_set_admin(&f.admin2);
     f.env.mock_all_auths();
 
