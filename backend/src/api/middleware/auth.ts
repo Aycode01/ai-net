@@ -61,6 +61,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 
 /**
  * Require a valid session access token.
+ *
+ * Unlike {@link authMiddleware} this **fails closed**: a request with no
+ * token, an expired token, or a static API key is rejected. Routes that act on
+ * `req.user` (session revocation, session listing, audit logs) depend on that
+ * invariant, because they would otherwise dereference `undefined`.
  */
 export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
   const auth = req.headers["authorization"] ?? "";
@@ -110,10 +115,9 @@ export function resolveAdminApiKey(): string | undefined {
     fromConfig = (require("../../config") as typeof import("../../config")).getConfig()
       .ADMIN_API_KEY;
   } catch {
-    // Config not loaded — fall through to the environment.
+    // Config not loaded — ignore.
   }
-  const key = fromConfig ?? process.env.ADMIN_API_KEY;
-  return key && key.length > 0 ? key : undefined;
+  return fromConfig && fromConfig.length > 0 ? fromConfig : undefined;
 }
 
 /** Constant-time string comparison; length differences short-circuit safely. */

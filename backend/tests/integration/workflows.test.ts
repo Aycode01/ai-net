@@ -229,9 +229,9 @@ describe("Integration: agent registration → heartbeat → failover", () => {
   });
 
   it("GET /api/agents returns the registered agent", async () => {
-    const res = await request(app.httpServer).get("/api/agents");
+    const res = await request(app.httpServer).get("/api/agents?limit=100");
     expect(res.status).toBe(200);
-    const found = res.body.find((a: any) => a.id === "integration-agent-1");
+    const found = res.body.data.items.find((a: any) => a.id === "integration-agent-1");
     expect(found).toBeDefined();
     expect(found.capabilities).toContain("research");
   });

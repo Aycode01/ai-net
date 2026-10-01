@@ -10,6 +10,7 @@ import {
 } from '../../services/venice/index.js';
 import { estimateTokens, trimToTokenBudget } from '../../services/budget';
 import { HeartbeatClient } from '../heartbeat.js';
+import { signAgentRequest } from '../agentAuthClient.js';
 import { getConfig } from '../../config/index.js';
 import { createLogger } from '../../utils/logger';
 
@@ -27,6 +28,16 @@ export interface BaseAgentConfig {
   veniceClient?: VeniceClientLike;
   apiBaseUrl?: string;
   agentId?: string;
+  /**
+   * Stellar public key this agent registers under (#557). Used to request and
+   * sign the ownership challenge for registration and heartbeats.
+   */
+  stellarPublicKey?: string;
+  /**
+   * Stellar secret backing {@link BaseAgentConfig.stellarPublicKey} (#557, #558).
+   * Kept in memory only — never logged and never sent to the coordinator.
+   */
+  stellarSecret?: string;
 }
 
 export interface AgentTask {
@@ -60,6 +71,17 @@ export abstract class BaseAgent {
   protected readonly venice: VeniceClientLike;
   protected readonly apiBaseUrl: string;
   protected readonly agentId: string;
+  /**
+   * Stellar account this agent registers under (#557). Resolved from the
+   * explicit config first so a caller can impersonate a specific account, then
+   * from STELLAR_PUBLIC_KEY for the single-agent deployment case.
+   */
+  protected readonly stellarPublicKey: string;
+  /**
+   * Secret backing {@link stellarPublicKey} (#558). Held in memory only — never
+   * logged and never sent to the coordinator.
+   */
+  protected readonly stellarSecret?: string;
   protected readonly log = createLogger({ component: 'agent' });
   private readonly heartbeatClient: HeartbeatClient | null = null;
   /** Token counters for the task currently executing, reset per execute(). */
@@ -73,11 +95,15 @@ export abstract class BaseAgent {
     }
     this.apiBaseUrl = config.apiBaseUrl ?? 'http://127.0.0.1:3001';
     this.agentId = config.agentId ?? `${this.getCapability()}-agent-1`;
+    this.stellarPublicKey = config.stellarPublicKey ?? getConfig().STELLAR_PUBLIC_KEY ?? '';
+    this.stellarSecret = config.stellarSecret ?? getConfig().STELLAR_TEST_SECRET;
 
     if (config.apiBaseUrl) {
       this.heartbeatClient = new HeartbeatClient({
         apiBaseUrl: this.apiBaseUrl,
         agentId: this.agentId,
+        publicKey: this.stellarPublicKey,
+        secret: this.stellarSecret,
       });
     }
   }
@@ -100,19 +126,34 @@ export abstract class BaseAgent {
   }
 
   async register(): Promise<void> {
-    const body = JSON.stringify({
+    const body = {
       agentId: this.agentId,
       capabilities: [this.getCapability()],
       pricingXLM: 0.5,
       endpoint: `${this.apiBaseUrl}/agents/${this.getCapability()}`,
-      stellarPublicKey: getConfig().STELLAR_PUBLIC_KEY ?? '',
-    });
+      stellarPublicKey: this.stellarPublicKey,
+    };
+
+    // Registration is only accepted with proof that we control the claimed
+    // Stellar account (#557); fall back to unsigned only if we cannot sign.
+    const signed = this.stellarPublicKey
+      ? await signAgentRequest({
+          apiBaseUrl: this.apiBaseUrl,
+          purpose: 'register',
+          publicKey: this.stellarPublicKey,
+          secret: this.stellarSecret,
+          payload: body,
+        })
+      : null;
 
     try {
       const response = await fetch(`${this.apiBaseUrl}/api/agents/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(signed ?? {}),
+        },
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
         console.warn(

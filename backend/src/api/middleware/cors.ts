@@ -23,7 +23,12 @@
  */
 
 import cors from 'cors';
+import type { NextFunction, Request, Response } from 'express';
 import { allowedOrigins } from '../../config';
+import { ForbiddenError } from '../../errors/ForbiddenError';
+import { createLogger } from '../../utils/logger';
+
+const logger = createLogger({ module: 'cors' });
 
 // ---------------------------------------------------------------------------
 // Allowed request headers
@@ -169,7 +174,11 @@ export function buildCorsOptions(app?: unknown) {
       if (!origin || origins.includes(origin)) {
         callback(null, true);
       } else {
-        callback(new Error('Not allowed by CORS'));
+        // Rejected origins are a client policy outcome, not a server fault.
+        // Log at debug level only so scanners cannot flood error logs with
+        // attacker-controlled origin strings.
+        logger.debug('CORS origin rejected');
+        callback(new ForbiddenError('Not allowed by CORS'));
       }
     },
     credentials: true,
@@ -189,9 +198,23 @@ export function buildCorsOptions(app?: unknown) {
 export function createCorsMiddleware(app?: unknown) {
   const base = buildCorsOptions();
 
-  return cors((_req, callback) => {
+  const corsHandler = cors((_req, callback) => {
     // `cors` resolves its options through this delegate on every request, so
     // the route table is read only once all routers are mounted.
     callback(null, { ...base, methods: allowedMethods(app) });
   });
+
+  // Ensure `Vary: Origin` is present on every path — including rejections —
+  // so a cached rejection is never served to a legitimate origin.
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const existing = res.getHeader('Vary');
+    if (!existing) {
+      res.setHeader('Vary', 'Origin');
+    } else if (typeof existing === 'string' && !existing.includes('Origin')) {
+      res.setHeader('Vary', `${existing}, Origin`);
+    } else if (Array.isArray(existing) && !existing.includes('Origin')) {
+      res.setHeader('Vary', [...existing, 'Origin']);
+    }
+    corsHandler(req, res, next);
+  };
 }

@@ -256,42 +256,31 @@ export function getRateLimiter(): RedisRateLimiter {
 //
 // Limits are intentionally conservative; operators should tune via env.
 
-function readEnvInt(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function readEnvWindowMs(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
 /**
- * Lazily-created group limiters.  Using factory functions so tests can reset
- * process.env before the limiter is instantiated.
+ * Lazily-created group limiters. Using factory functions so tests can reset
+ * config before the limiter is instantiated.
  */
 export function createPublicLimiter(): RateLimiter {
+  const cfg = getConfig();
   return createRateLimiter({
-    windowMs: readEnvWindowMs("RATE_LIMIT_PUBLIC_WINDOW_MS", 60_000),
-    maxRequests: readEnvInt("RATE_LIMIT_PUBLIC_MAX_REQUESTS", 120),
+    windowMs: cfg.RATE_LIMIT_PUBLIC_WINDOW_MS,
+    maxRequests: cfg.RATE_LIMIT_PUBLIC_MAX_REQUESTS,
   });
 }
 
 export function createAuthedLimiter(): RateLimiter {
+  const cfg = getConfig();
   return createRateLimiter({
-    windowMs: readEnvWindowMs("RATE_LIMIT_AUTHED_WINDOW_MS", 60_000),
-    maxRequests: readEnvInt("RATE_LIMIT_AUTHED_MAX_REQUESTS", 30),
+    windowMs: cfg.RATE_LIMIT_AUTHED_WINDOW_MS,
+    maxRequests: cfg.RATE_LIMIT_AUTHED_MAX_REQUESTS,
   });
 }
 
 export function createAdminLimiter(): RateLimiter {
+  const cfg = getConfig();
   return createRateLimiter({
-    windowMs: readEnvWindowMs("RATE_LIMIT_ADMIN_WINDOW_MS", 60_000),
-    maxRequests: readEnvInt("RATE_LIMIT_ADMIN_MAX_REQUESTS", 20),
+    windowMs: cfg.RATE_LIMIT_ADMIN_WINDOW_MS,
+    maxRequests: cfg.RATE_LIMIT_ADMIN_MAX_REQUESTS,
   });
 }
 
@@ -360,3 +349,90 @@ export const registerRateLimitMiddleware = (
  */
 const heartbeatLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 60 });
 export const heartbeatRateLimitMiddleware = heartbeatLimiter.middleware;
+
+/**
+ * Rate limiter for POST /api/agents/challenge.
+ * 30 requests per minute per IP — each call mints fresh entropy and stores an
+ * entry, so it is deliberately tighter than the generic public limiter.
+ */
+const agentChallengeLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 30 });
+export const agentChallengeRateLimitMiddleware = agentChallengeLimiter.middleware;
+
+// ── Ownership-proof failure limiter (#558) ────────────────────────────────────
+//
+// Register / heartbeat / delete share a success-path limiter, so a caller who
+// simply omits the signature would otherwise be able to probe for agent
+// existence at that rate. This counter is incremented *only* when an ownership
+// proof fails, which keeps a well-behaved agent off the limit while making
+// guessing expensive.
+
+interface FailureWindow {
+  timestamps: number[];
+}
+
+const failureWindows = new LRUCache<string, FailureWindow>({
+  max: 10_000,
+  ttl: 60_000,
+  updateAgeOnGet: false,
+});
+
+/** Record a failed ownership proof against `identifier` (normally the client IP). */
+export function recordAuthFailure(identifier: string): void {
+  const win = failureWindows.get(identifier) ?? { timestamps: [] };
+  win.timestamps.push(Date.now());
+  failureWindows.set(identifier, win);
+}
+
+/** Current failed-proof count for `identifier`. Exposed for tests. */
+export function authFailureCount(identifier: string): number {
+  return failureWindows.get(identifier)?.timestamps.length ?? 0;
+}
+
+/** Drop all recorded failures. Test-only escape hatch. */
+export function resetAuthFailures(): void {
+  failureWindows.clear();
+}
+
+/**
+ * Guard the agent ownership-proof failure path (#558).
+ *
+ * Unlike {@link createRateLimiter} this only counts *unsigned* requests:
+ * successful requests pass through untouched, and a request that does present
+ * `x-signature` is always let through, because it has already paid for a real
+ * Ed25519 verification and is therefore not a cheap probe. Without that carve
+ * out, one attacker exhausting the budget could lock every correctly-signing
+ * agent behind the same NAT egress IP out of its own heartbeat.
+ */
+export function agentAuthFailureGuard(req: Request, res: Response, next: NextFunction): void {
+  const presented = req.headers["x-signature"];
+  if (presented && (Array.isArray(presented) ? presented[0] : presented)) {
+    next();
+    return;
+  }
+
+  const ip = req.ip ?? "unknown";
+  // Both limits are part of the validated config, which is itself built from
+  // the environment (AGENT_AUTH_FAILURE_LIMIT_*), so there is no raw env read
+  // to do here.
+  const config = getConfig();
+  const windowMs = config.AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS;
+  const maxFailures = config.AGENT_AUTH_FAILURE_LIMIT_MAX;
+
+  const cutoff = Date.now() - windowMs;
+  const timestamps = (failureWindows.get(ip)?.timestamps ?? []).filter((t) => t > cutoff);
+  failureWindows.set(ip, { timestamps });
+
+  if (timestamps.length < maxFailures) {
+    next();
+    return;
+  }
+
+  const retryAfter = Math.ceil(windowMs / 1000);
+  res.setHeader("Retry-After", String(retryAfter));
+  res.status(429).json({
+    error: {
+      message: "Too many failed agent authentication attempts",
+      code: "RATE_LIMITED",
+    },
+  });
+}

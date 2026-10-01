@@ -3,9 +3,8 @@ import { randomUUID } from 'crypto';
 import type { AgentRegistration, AgentRegistry } from '../types/agent';
 import type { PaymentService } from '../types/payment';
 import { eventBus } from './eventBus';
-import { updateNode, updateTask, getTask } from './taskStore';
+import { updateNode, updateTask, getTask, registerTaskController, unregisterTaskController } from './taskStore';
 import { createTaskDb, getTaskDb } from '../db/tasks';
-
 import type { DAGNode, Task } from '../types/task';
 import {
   QualityScorer,
@@ -301,26 +300,41 @@ export class Coordinator {
   async executeDAG(
     taskId: string,
     dag: DAGNode[],
-    onProgress?: (percentage: number) => void
+    onProgress?: (percentage: number) => void,
+    signal?: AbortSignal
   ): Promise<void> {
-    // Establish an AsyncLocalStorage trace context (if not already present)
-    // so downstream logging, span creation, and agent dispatch all share the
-    // same traceId — regardless of whether we're invoked from an HTTP request
-    // (context already set) or the background job worker (no context).
-    const existing = currentTraceId();
-    if (existing) {
-      await this.executeDAGInContext(taskId, dag, onProgress);
-      return;
+    // Register an AbortController so DELETE /api/tasks/:id can abort this run.
+    // We create our own controller and link it to any externally supplied signal
+    // so the caller can also abort by aborting an upstream controller.
+    const controller = new AbortController();
+    if (signal) {
+      signal.addEventListener('abort', () => controller.abort(), { once: true });
     }
-    const child = childSpanContext();
-    const context = child ?? { traceId: this.correlationId || randomUUID(), spanId: randomUUID(), taskId };
-    await runWithTraceContext(context, () => this.executeDAGInContext(taskId, dag, onProgress));
+    registerTaskController(taskId, controller);
+
+    try {
+      // Establish an AsyncLocalStorage trace context (if not already present)
+      // so downstream logging, span creation, and agent dispatch all share the
+      // same traceId — regardless of whether we're invoked from an HTTP request
+      // (context already set) or the background job worker (no context).
+      const existing = currentTraceId();
+      if (existing) {
+        await this.executeDAGInContext(taskId, dag, onProgress, controller.signal);
+        return;
+      }
+      const child = childSpanContext();
+      const context = child ?? { traceId: this.correlationId || randomUUID(), spanId: randomUUID(), taskId };
+      await runWithTraceContext(context, () => this.executeDAGInContext(taskId, dag, onProgress, controller.signal));
+    } finally {
+      unregisterTaskController(taskId);
+    }
   }
 
   private async executeDAGInContext(
     taskId: string,
     dag: DAGNode[],
-    onProgress?: (percentage: number) => void
+    onProgress?: (percentage: number) => void,
+    abortSignal?: AbortSignal
   ): Promise<void> {
     // Re-resolve correlationId from AsyncLocalStorage in case it was not
     // available when the coordinator was constructed (e.g. job-worker path).
@@ -368,7 +382,35 @@ export class Coordinator {
 
     await new Promise<void>(resolve => {
       const finishIfSettled = (): void => {
-        if (settled || completed.size + failed.size !== dag.length) return;
+        if (settled) return;
+
+        // ── Cancellation path ──────────────────────────────────────────────
+        // When aborted, mark the task cancelled as soon as all in-flight nodes
+        // have resolved (we cannot forcibly stop already-dispatched HTTP
+        // requests, but we stop scheduling new ones).
+        if (abortSignal?.aborted && inFlight === 0) {
+          settled = true;
+          updateTaskIfPresent(taskId, { status: 'cancelled', dag });
+          this.settleCost(taskId, 'failed');
+          this.bus.emit(taskId, {
+            type: 'task_cancelled' as any,
+            taskId,
+            timestamp: now(),
+          });
+          this.log.info(
+            { taskId, completedCount: completed.size, cancelledCount: dag.filter(n => n.status === 'cancelled').length },
+            'DAG execution cancelled'
+          );
+          if (dagSpan) {
+            tracingService.endSpan(dagSpan.spanId, 'cancelled', {
+              completedCount: completed.size,
+            });
+          }
+          resolve();
+          return;
+        }
+
+        if (completed.size + failed.size !== dag.length) return;
         settled = true;
 
         const status = failed.size === 0 ? 'completed' : 'failed';
@@ -403,6 +445,38 @@ export class Coordinator {
 
         resolve();
       };
+
+      /**
+       * Cancel all pending nodes when an abort signal fires.
+       * Nodes that are already running are allowed to finish; only those that
+       * have not yet been scheduled are marked cancelled so the task can settle.
+       */
+      const cancelPendingNodes = (): void => {
+        for (const node of dag) {
+          if (node.status !== 'pending') continue;
+          node.status = 'cancelled' as any;
+          node.error = 'task_cancelled';
+          // Mark as failed in the accounting sets so finishIfSettled can settle
+          failed.add(node.nodeId);
+          updateNode(taskId, node.nodeId, { status: 'failed' as any, error: 'task_cancelled' });
+          this.bus.emit(taskId, {
+            type: 'node_failed',
+            taskId,
+            nodeId: node.nodeId,
+            timestamp: now(),
+            payload: { error: 'task_cancelled' },
+          });
+        }
+      };
+
+      // Also listen for the abort signal mid-flight (e.g. fired while nodes
+      // are executing) so we stop scheduling the moment it fires.
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => {
+          cancelPendingNodes();
+          finishIfSettled();
+        }, { once: true });
+      }
 
       const failBlockedNodes = (includeDeadlocked: boolean): void => {
         for (const node of dag) {
@@ -441,6 +515,15 @@ export class Coordinator {
       };
 
       const scheduleReadyNodes = (): void => {
+        // ── Abort check ────────────────────────────────────────────────────
+        // If the task has been cancelled while nodes were in-flight, cancel
+        // all pending nodes immediately without dispatching new work.
+        if (abortSignal?.aborted) {
+          cancelPendingNodes();
+          finishIfSettled();
+          return;
+        }
+
         let scheduledAny = false;
 
         for (const node of dag) {

@@ -69,6 +69,9 @@ jobs:
       - name: Lint check
         run: npm run lint
 
+      - name: Validate .env.example matches config schema
+        run: npm run validate:env
+
       - name: Type-check and build
         run: npm run build
 

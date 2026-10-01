@@ -98,3 +98,41 @@ describe("coordinator/taskStore — CRUD via TaskDb", () => {
 // cross-task isolation and close()), so the duplicated — and unimportable —
 // copies are not repeated here.
 
+// ─── AbortController registry (Issue #62) ─────────────────────────────────────
+
+describe("taskStore — AbortController registry (Issue #62)", () => {
+  const { registerTaskController, unregisterTaskController, abortTask } =
+    jest.requireActual<typeof import("./taskStore")>("./taskStore");
+
+  it("abortTask returns false when no controller is registered", () => {
+    expect(abortTask("nonexistent-task")).toBe(false);
+  });
+
+  it("abortTask returns true and signals when a controller is registered", () => {
+    const controller = new AbortController();
+    registerTaskController("task-abc", controller);
+
+    expect(controller.signal.aborted).toBe(false);
+    const result = abortTask("task-abc");
+    expect(result).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  it("abortTask removes the entry after signalling", () => {
+    const controller = new AbortController();
+    registerTaskController("task-xyz", controller);
+    abortTask("task-xyz");
+
+    // A second call should now return false (entry removed)
+    expect(abortTask("task-xyz")).toBe(false);
+  });
+
+  it("unregisterTaskController removes an entry without aborting", () => {
+    const controller = new AbortController();
+    registerTaskController("task-noreg", controller);
+    unregisterTaskController("task-noreg");
+
+    expect(controller.signal.aborted).toBe(false);
+    expect(abortTask("task-noreg")).toBe(false);
+  });
+});

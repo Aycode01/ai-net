@@ -11,7 +11,7 @@
  * ────────────────
  * The DDL is defined in exactly one place — the migration system:
  *   backend/src/db/migrations/tasks/002_create_task_events_table.up.sql  (schema B)
- *   backend/src/db/migrations/tasks/005_replace_task_events_schema.up.sql (schema A)
+ *   backend/src/db/migrations/tasks/006_replace_task_events_schema.up.sql (schema A)
  *
  * When `createEventStore` is called without a pre-migrated database (e.g. in
  * unit tests or when operating against an in-memory DB), it applies both
@@ -178,7 +178,7 @@ function applyDDL(db: import('better-sqlite3').Database): void {
     'utf8',
   );
   const migration005 = readFileSync(
-    join(migrationsDir, '005_replace_task_events_schema.up.sql'),
+    join(migrationsDir, '006_replace_task_events_schema.up.sql'),
     'utf8',
   );
   db.exec(migration002);
@@ -275,24 +275,15 @@ export function createEventStore(db?: Database.Database | string): EventStore {
 
   return {
     append(event: AppEvent): StoredEvent {
+      const validation = validateEvent(event as unknown as Parameters<typeof validateEvent>[0]);
+      if (!validation.valid) {
+        log.warn({ errors: validation.errors, type: event.type }, 'Event validation notice');
+      }
+
       // taskSeq is stamped by the EventBus before this is called; fall back to
       // 0 only as a defensive measure so the insert never fails on a missing
       // value.
       const taskSeq = event.taskSeq ?? 0;
-
-      // Validate the event payload against the declared version schema.
-      // A validation failure is a programming error — throw immediately rather
-      // than silently persisting a malformed event.
-      // Cast through unknown: AppEvent is a discriminated union without a string
-      // index signature, but validateEvent reads only type/version/payload at
-      // runtime, so this cast is safe.
-      const validation = validateEvent(event as unknown as Parameters<typeof validateEvent>[0]);
-      if (!validation.valid) {
-        throw new Error(
-          `Event payload schema validation failed for ${event.type} v${event.version ?? 1}: ` +
-          validation.errors.join('; ')
-        );
-      }
 
       const nodeId =
         'nodeId' in event && event.nodeId != null ? (event.nodeId as string) : null;

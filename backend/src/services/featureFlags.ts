@@ -19,6 +19,7 @@ export const KNOWN_FLAGS = [
   "experimental_agents",
   "quality_scorer",
   "reconciliation",
+  "agent_ownership_proof",
 ] as const;
 
 export type FeatureFlag = (typeof KNOWN_FLAGS)[number];
@@ -30,6 +31,10 @@ const DEFAULTS: Record<FeatureFlag, boolean> = {
   experimental_agents: false,
   quality_scorer: true,
   reconciliation: true,
+  // Enforced by default. Setting this to `false` re-opens the *unsigned*
+  // register/heartbeat path so existing agent clients keep working during a
+  // migration window — see AGENT_AUTH_SUNSET_DATE for the cutover date.
+  agent_ownership_proof: true,
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -39,11 +44,15 @@ const runtimeOverrides = new Map<FeatureFlag, boolean>();
 
 // ─── Resolution ───────────────────────────────────────────────────────────────
 
+import { getConfig } from "../config";
+
 function readEnvFlag(flag: FeatureFlag): boolean | undefined {
+  const cfg = getConfig() as Record<string, any>;
   const key = `FEATURE_${flag.toUpperCase()}`;
-  const val = process.env[key];
-  if (val === undefined) return undefined;
-  return val === "1" || val.toLowerCase() === "true";
+  const val = cfg[key];
+  if (val === undefined || val === null) return undefined;
+  if (typeof val === "boolean") return val;
+  return val === "1" || String(val).toLowerCase() === "true";
 }
 
 /**

@@ -3,6 +3,34 @@ import { z } from "zod";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pkg = require("../../package.json");
 
+/**
+ * Reject known placeholder values for secret-bearing configuration keys.
+ * This prevents accidental deployment with placeholder values from .env.example.
+ */
+function rejectPlaceholder(value: string | undefined, ctx: z.RefinementCtx): void {
+  // Optional keys are only checked when they are actually provided.
+  if (value === undefined) return;
+
+  const lowerValue = value.toLowerCase();
+  const placeholderPatterns = [
+    /^your_.*_here$/,
+    /^test-.*$/,
+    /^change-in-production$/,
+    /^dev-.*$/,
+    /^default-.*$/,
+  ];
+
+  for (const pattern of placeholderPatterns) {
+    if (pattern.test(lowerValue)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Value "${value}" appears to be a placeholder. Please provide a real secret value.`,
+      });
+      return;
+    }
+  }
+}
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3001),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -20,17 +48,22 @@ const envSchema = z.object({
     .default("false"),
   SOROBAN_RPC_URL: z.string().url().default("https://soroban-testnet.stellar.org"),
   REGISTRY_CONTRACT_ID: z.string().optional(),
+
   VENICE_API_KEY: z.string().min(1, "VENICE_API_KEY is required"),
-  // Filesystem path to the SQLite database that holds the ai-net schema.
-  // Applied by `npm run db:migrate`, which resolves it via
-  // `resolveDatabasePath()` in src/db/index.ts.
   VENICE_BASE_URL: z.string().url().default("https://api.venice.ai/api/v1"),
+  VENICE_MODEL_VERSION: z.string().default("v1"),
+  VENICE_CACHE_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  VENICE_CACHE_CODING_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
+  VENICE_CACHE_SIMILARITY_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
+  VENICE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  VENICE_PROVIDER_MAX_RETRIES: z.coerce.number().int().positive().default(3),
+  VENICE_FALLBACK_API_KEYS: z.string().optional(),
+  VENICE_FALLBACK_BASE_URLS: z.string().optional(),
+
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required").default("./data/ai-net.db"),
-  // Overrides the location of the versioned migration files. Only needed when
-  // migrations are kept outside the repository's `src/db/migrations` folder.
   DB_MIGRATIONS_DIR: z.string().optional(),
-  STELLAR_COORDINATOR_SECRET: z.string().optional(),
-  STELLAR_TEST_SECRET: z.string().optional(),
+  STELLAR_COORDINATOR_SECRET: z.string().optional().superRefine(rejectPlaceholder),
+  STELLAR_TEST_SECRET: z.string().optional().superRefine(rejectPlaceholder),
   ALLOWED_ORIGINS: z.string().default("http://localhost:3000"),
   NPM_PACKAGE_VERSION: z.string().default(pkg.version ?? "0.1.0"),
   GRACEFUL_SHUTDOWN_TIMEOUT: z.coerce.number().int().positive().default(30),
@@ -42,32 +75,30 @@ const envSchema = z.object({
   CACHE_TTL_AGENTS: z.coerce.number().int().nonnegative().default(60),
   CACHE_TTL_STATS: z.coerce.number().int().nonnegative().default(30),
   CACHE_TTL_HEALTH: z.coerce.number().int().nonnegative().default(10),
-  /** Deployment-scoped key prefix for registry cache entries (Issue #427). */
   REGISTRY_CACHE_KEY_PREFIX: z.string().default("registry"),
 
   MAX_PROMPT_LENGTH: z.coerce.number().int().positive().default(10_000),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(20),
   REGISTER_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_PUBLIC_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_PUBLIC_MAX_REQUESTS: z.coerce.number().int().positive().default(120),
+  RATE_LIMIT_AUTHED_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_AUTHED_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
+  RATE_LIMIT_ADMIN_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_ADMIN_MAX_REQUESTS: z.coerce.number().int().positive().default(20),
   DAILY_TASK_LIMIT_PER_WALLET: z.coerce.number().int().min(0).default(100),
 
-  /** Token budget management and per-task cost tracking (Issue #390). */
-  /** Total tokens (input + output) a single task may consume before it halts. */
   TASK_TOKEN_BUDGET: z.coerce.number().int().positive().default(200_000),
-  /** Ceiling on one LLM call's max_tokens. */
   LLM_MAX_TOKENS_PER_CALL: z.coerce.number().int().positive().default(8_192),
-  /** Ceiling on one LLM call's input prompt; longer prompts are trimmed. */
   LLM_MAX_PROMPT_TOKENS: z.coerce.number().int().positive().default(16_000),
-  /** `MODEL=inputUsd:outputUsd,MODEL=...` overrides for the pricing table. */
   VENICE_PRICING: z.string().optional(),
-  /** How often in-flight task costs are flushed to the database (ms). */
   COST_FLUSH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
 
   HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
   HEARTBEAT_STALE_THRESHOLD_MINUTES: z.coerce.number().int().positive().default(5),
   AGENT_OFFLINE_DELETE_HOURS: z.coerce.number().int().positive().default(24),
 
-  /** Agent heartbeat watchdog: grace period before eviction (Issue #379). */
   AGENT_WATCHDOG_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   AGENT_WATCHDOG_GRACE_MINUTES: z.coerce.number().int().positive().default(10),
 
@@ -76,7 +107,10 @@ const envSchema = z.object({
 
   COMPRESSION_THRESHOLD: z.coerce.number().int().min(0).default(1024),
   COMPRESSION_LEVEL: z.coerce.number().int().min(1).max(9).default(6),
-  COMPRESSION_ENABLE_BROTLI: z.enum(["true", "false"]).transform((v) => v === "true").default("true"),
+  COMPRESSION_ENABLE_BROTLI: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .default("true"),
 
   API_LATEST_VERSION: z.string().default("2.0"),
   API_SUPPORTED_VERSIONS: z.string().default("1.0,1.1,2.0"),
@@ -100,39 +134,46 @@ const envSchema = z.object({
   ERROR_REGISTRY_MAINTENANCE_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   ERROR_REGISTRY_CAP_PER_AGENT: z.coerce.number().int().positive().default(100),
 
-  // ── Event store retention & compaction (Issue #383) ─────────────────────────
-  /**
-   * On-disk path for the append-only event store.  A file path is required for
-   * the retention job to be meaningful — with `:memory:` the whole event log is
-   * discarded on restart, so there is nothing to archive or compact.
-   */
   EVENT_STORE_PATH: z.string().default("./data/events.db"),
-  /**
-   * Retention window in days.  Events belonging to a *finished* task whose most
-   * recent event is older than this are archived and then purged from the live
-   * `task_events` table.  Days (not row counts) because the boundary is task
-   * age, not table pressure.
-   */
   EVENT_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
-  /** How often the compaction pass runs, in milliseconds. */
   EVENT_COMPACTION_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
-  /**
-   * Maximum number of tasks compacted per pass.  Bounds the work (and therefore
-   * the writer-lock hold time) of a single tick so the live event path is not
-   * starved by a large backlog.
-   */
   EVENT_COMPACTION_BATCH_TASKS: z.coerce.number().int().positive().default(50),
-  /** Master switch for the retention job.  Also disabled when NODE_ENV=test. */
   EVENT_COMPACTION_ENABLED: z
     .enum(["true", "false"])
     .transform((v) => v === "true")
     .default("true"),
 
   // ── Idempotency store (Issue #657) ───────────────────────────────────────────
-  /** How long idempotency keys are retained before they can be replayed. Default: 24 h. */
+  /** How long completed idempotency keys are retained for replay. Default: 24 h. */
   IDEMPOTENCY_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
+  /**
+   * How long an in-flight idempotency reservation is honoured before it is
+   * treated as abandoned and the key becomes reusable. Kept short so a handler
+   * that dies without releasing its slot does not block the key for a full day.
+   */
+  IDEMPOTENCY_PENDING_TTL_MS: z.coerce.number().int().positive().default(300_000),
   /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
   IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
+
+  /** Express trusted proxy policy: none, a hop count, or trusted IP/CIDR ranges. */
+  TRUST_PROXY: z
+    .string()
+    .trim()
+    .default("none")
+    .transform((value): boolean | number | string => {
+      if (
+        !value ||
+        value.toLowerCase() === "none" ||
+        value.toLowerCase() === "false"
+      ) {
+        return false;
+      }
+      if (/^\d+$/.test(value)) {
+        const hopCount = Number(value);
+        return Number.isSafeInteger(hopCount) ? hopCount : value;
+      }
+      return value;
+    }),
 
   WS_MAX_CONNECTIONS_PER_CLIENT: z.coerce.number().int().positive().default(5),
   WS_MAX_MESSAGES_PER_MINUTE: z.coerce.number().int().positive().default(100),
@@ -146,13 +187,60 @@ const envSchema = z.object({
 
   // ── Authentication & Session Security ───────────────────────────────────────
   /** JWT secret key used to sign and verify access tokens. */
-  AUTH_JWT_SECRET: z.string().default("ai-net-default-auth-secret-change-in-production"),
+  AUTH_JWT_SECRET: z
+    .string()
+    .min(32, "AUTH_JWT_SECRET must be at least 32 characters")
+    .superRefine(rejectPlaceholder),
   /** Access token validity in seconds. Default: 900 (15 min). */
   AUTH_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
-  /** Refresh token sliding expiry validity in seconds. Default: 604 800 (7 days). */
   AUTH_REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(604_800),
-  /** Max absolute session lifetime in seconds. Default: 2 592 000 (30 days). */
   AUTH_SESSION_MAX_TTL_SECONDS: z.coerce.number().int().positive().default(2_592_000),
+
+  // ── Quality Scorer Configuration ─────────────────────────────────────────────
+  /** Weight for completeness score in quality calculation. Default: 0.4 */
+  QUALITY_WEIGHT_COMPLETENESS: z.coerce.number().min(0).max(1).default(0.4),
+  /** Weight for relevance score in quality calculation. Default: 0.3 */
+  QUALITY_WEIGHT_RELEVANCE: z.coerce.number().min(0).max(1).default(0.3),
+  /** Weight for format score in quality calculation. Default: 0.3 */
+  QUALITY_WEIGHT_FORMAT: z.coerce.number().min(0).max(1).default(0.3),
+  /** Threshold for requiring manual review. Default: 60 */
+  QUALITY_REVIEW_THRESHOLD: z.coerce.number().int().min(0).max(100).default(60),
+  /** Enable percentile-based quality scoring. Default: false */
+  QUALITY_PERCENTILE_ENABLED: z.enum(["true", "false"]).transform((v) => v === "true").default("false"),
+  /** Minimum samples required for percentile calculation. Default: 10 */
+  QUALITY_PERCENTILE_MIN_SAMPLES: z.coerce.number().int().positive().default(10),
+
+  // ── Admin Control Configuration ─────────────────────────────────────────────
+  /** Enable read-only mode for the API. Default: false */
+  AI_NET_READ_ONLY: z.enum(["true", "false"]).transform((v) => v === "true").default("false"),
+  /** Reason for read-only mode. Optional. */
+  AI_NET_READ_ONLY_REASON: z.string().optional(),
+  /** Path to admin audit database. Default: ./data/admin-audit.db */
+  ADMIN_AUDIT_DB_PATH: z.string().default("./data/admin-audit.db"),
+  /** Directory for admin backups. Default: ./data/backups/admin */
+  ADMIN_BACKUP_DIR: z.string().default("./data/backups/admin"),
+
+  // ── Agent ownership proof (#557, #558) ───────────────────────────────────────
+  /**
+   * Lifetime of a single-use agent auth challenge. Kept short because a
+   * challenge is redeemed exactly once; 5 minutes covers clock skew.
+   */
+  AGENT_CHALLENGE_TTL_MS: z.coerce.number().int().positive().default(300_000),
+  /** Failed *unsigned* agent-auth attempts tolerated per IP per window. */
+  AGENT_AUTH_FAILURE_LIMIT_MAX: z.coerce.number().int().positive().default(20),
+  /** Sliding window the failed unsigned agent-auth budget is measured over. */
+  AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * ISO-8601 date the unsigned register/heartbeat path stops being tolerated.
+   * Unset (the default) advertises no `Sunset` header yet.
+   */
+  AGENT_AUTH_SUNSET_DATE: z.string().optional(),
+
+  // ── Job leases (#648) ───────────────────────────────────────────────────────
+  /** How long a worker's claim on a job stays valid without a heartbeat. */
+  JOB_LEASE_TTL_MS: z.coerce.number().int().positive().default(30_000),
+  /** How often a running job's lease is renewed — must be well inside the TTL. */
+  JOB_LEASE_HEARTBEAT_MS: z.coerce.number().int().positive().default(10_000),
 });
 
 export type RawConfig = z.infer<typeof envSchema>;
@@ -173,12 +261,9 @@ export class ConfigValidationError extends Error {
 
 let cachedConfig: Config | null = null;
 
-function emptyToUndefined(value: unknown): unknown {
-  return typeof value === "string" && value.trim() === "" ? undefined : value;
-}
-
 function withRuntimeDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const nodeEnv = env.NODE_ENV ?? "development";
+  const dbUrl = env.DATABASE_URL ?? env.DB_PATH;
   const testDefaults =
     nodeEnv === "test"
       ? {
@@ -189,13 +274,23 @@ function withRuntimeDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
           EVENT_STORE_PATH: ":memory:",
           VENICE_API_KEY: "test-venice-key",
           LOG_LEVEL: "silent",
+          AUTH_JWT_SECRET: "test-jwt-secret-for-development-only",
+        }
+      : {};
+
+  const devDefaults =
+    nodeEnv === "development"
+      ? {
+          AUTH_JWT_SECRET: env.AUTH_JWT_SECRET ?? "dev-jwt-secret-change-in-production",
         }
       : {};
 
   return {
     ...testDefaults,
+    ...devDefaults,
     ...env,
-    STELLAR_HORIZON_URL: env.STELLAR_HORIZON_URL ?? env.STELLAR_HORIZON,
+    DATABASE_URL: dbUrl ?? testDefaults.DATABASE_URL ?? "./data/ai-net.db",
+    STELLAR_HORIZON_URL: env.STELLAR_HORIZON_URL ?? env.STELLAR_HORIZON ?? "https://horizon-testnet.stellar.org",
   };
 }
 
@@ -220,6 +315,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new ConfigValidationError(result.error.issues);
   }
 
+  const nodeEnv = result.data.NODE_ENV;
+
+  // Fail closed in production: AUTH_JWT_SECRET must be explicitly set
+  if (nodeEnv === "production") {
+    const providedSecret = env.AUTH_JWT_SECRET;
+    if (!providedSecret) {
+      throw new ConfigValidationError([
+        {
+          code: z.ZodIssueCode.custom,
+          path: ["AUTH_JWT_SECRET"],
+          message: "AUTH_JWT_SECRET is required in production",
+        },
+      ]);
+    }
+  }
+
+  // Warn in development if using default secret
+  if (nodeEnv === "development") {
+    const secret = result.data.AUTH_JWT_SECRET;
+    if (secret === "dev-jwt-secret-change-in-production") {
+      console.warn(
+        "[config] WARNING: Using default AUTH_JWT_SECRET in development. " +
+          "Set AUTH_JWT_SECRET to a secure random value in production."
+      );
+    }
+  }
+
   cachedConfig = {
     ...result.data,
     STELLAR_NETWORK_PASSPHRASE: networkPassphrase(result.data.STELLAR_NETWORK),
@@ -228,6 +350,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 }
 
 export function getConfig(): Config {
+  if (process.env.NODE_ENV === "test") {
+    return loadConfig();
+  }
   return cachedConfig ?? loadConfig();
 }
 
@@ -275,3 +400,5 @@ export function redactedConfigSnapshot(cfg: Config = getConfig()): Record<string
     Object.entries(cfg).map(([key, value]) => [key, redactConfigValue(key, value)]),
   );
 }
+
+export { envSchema };

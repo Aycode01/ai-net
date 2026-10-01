@@ -210,10 +210,10 @@ fn apply_final_ruling(
 impl DisputeResolutionContract {
     /// Initialize the contract once.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyExists);
         }
-        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish(
@@ -589,6 +589,11 @@ impl DisputeResolutionContract {
 
     /// Record the outcome after a voting round. The first outcome is provisional;
     /// an unappealed ruling must be finalized after its appeal window.
+    ///
+    /// Resolution is only permitted once the voting window has closed, i.e.
+    /// `now >= voting_deadline`. Calling earlier returns
+    /// [`Error::VotingStillOpen`]; calling on a finalized dispute returns
+    /// [`Error::DisputeAlreadyResolved`].
     pub fn resolve(env: Env, dispute_id: Symbol) -> Result<DisputeOutcome, Error> {
         let mut dispute = load_dispute(&env, &dispute_id)?;
         if dispute.status == DisputeStatus::Resolved {
@@ -599,7 +604,7 @@ impl DisputeResolutionContract {
         }
         let now = env.ledger().timestamp();
         if now < dispute.voting_deadline {
-            return Err(Error::InvalidPhase);
+            return Err(Error::VotingStillOpen);
         }
         if dispute.status != DisputeStatus::Voting {
             start_voting(&env, &mut dispute);
@@ -670,6 +675,11 @@ impl DisputeResolutionContract {
 
     /// The losing party may request one appeal during the first ruling's
     /// appeal window. The appeal receives a fresh bounded voting round.
+    ///
+    /// Only a dispute carrying a provisional ruling (`AppealPending`) can be
+    /// appealed. A dispute with no ruling yet (`Filed`, `EvidencePhase`,
+    /// `Voting`) returns [`Error::NotResolved`]; a finalized dispute
+    /// (`Resolved`) returns [`Error::DisputeAlreadyResolved`].
     pub fn appeal_dispute(
         env: Env,
         dispute_id: Symbol,
@@ -678,8 +688,12 @@ impl DisputeResolutionContract {
         require_not_paused(&env)?;
         appellant.require_auth();
         let mut dispute = load_dispute(&env, &dispute_id)?;
-        if dispute.status != DisputeStatus::AppealPending {
-            return Err(Error::InvalidPhase);
+        match dispute.status {
+            DisputeStatus::AppealPending => {}
+            DisputeStatus::Resolved => return Err(Error::DisputeAlreadyResolved),
+            DisputeStatus::Filed | DisputeStatus::EvidencePhase | DisputeStatus::Voting => {
+                return Err(Error::NotResolved)
+            }
         }
         if dispute.appealed {
             return Err(Error::AppealAlreadyFiled);

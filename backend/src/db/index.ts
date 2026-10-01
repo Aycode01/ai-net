@@ -29,10 +29,12 @@ export function isInMemoryPath(dbPath: string): boolean {
   return value === ":memory:" || value.startsWith("file::memory:") || /mode=memory/.test(value);
 }
 
+import { getConfig } from "../config";
+
 /**
  * Resolve the SQLite file path for the consolidated database.
  *
- * Precedence: explicit argument → `DB_PATH` → `DATABASE_URL` → default. A
+ * Precedence: explicit argument → config.DATABASE_URL → default. A
  * `file:` prefix is stripped and relative paths are resolved against the
  * current working directory so `./data/ai-net.db` in `.env` means the same
  * thing regardless of where the process was started.
@@ -41,7 +43,7 @@ export function isInMemoryPath(dbPath: string): boolean {
  *   (e.g. `postgresql://…`), which would otherwise create a bogus file name.
  */
 export function resolveDatabasePath(override?: string): string {
-  const raw = (override ?? process.env.DB_PATH ?? process.env.DATABASE_URL ?? DEFAULT_DB_PATH).trim();
+  const raw = (override ?? getConfig().DATABASE_URL ?? DEFAULT_DB_PATH).trim();
 
   if (raw === "") {
     throw new Error("Database path is empty — set DB_PATH or DATABASE_URL.");

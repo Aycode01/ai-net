@@ -49,6 +49,16 @@ const backupSchema = z.object({
   directory: z.string().min(1).optional(),
 });
 
+/** Shared query-string schema for the paginated job-listing endpoints. */
+const jobListQuerySchema = z.object({
+  status: z
+    .enum(["pending", "active", "completed", "failed", "dead-letter"])
+    .optional(),
+  taskId: z.string().min(1).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+});
+
 export interface AdminRouterOptions {
   queue?: JobQueue;
   reconciliation?: ReconciliationRouterOptions;
@@ -861,13 +871,19 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
    *                 page: { type: integer }
    *                 pageSize: { type: integer }
    */
-  router.get("/jobs", (req: Request, res: Response) => {
-    const status = req.query.status as JobStatus | undefined;
-    const taskId = req.query.taskId as string | undefined;
-    const page = req.query.page ? Number(req.query.page) : 1;
-    const pageSize = req.query.pageSize ? Number(req.query.pageSize) : 50;
+  router.get("/jobs", (req: Request, res: Response, next: NextFunction) => {
+    const parsed = jobListQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      next(new ValidationError(
+        "Invalid query parameters",
+        { issues: parsed.error.flatten() },
+        res.locals.correlationId as string | undefined,
+      ));
+      return;
+    }
 
-    const result = jobQueue.listJobs({ status, taskId, page, pageSize });
+    const { status, taskId, page, pageSize } = parsed.data;
+    const result = jobQueue.listJobs({ status: status as JobStatus | undefined, taskId, page, pageSize });
     res.json(result);
   });
 
@@ -903,10 +919,20 @@ export function createAdminQueueRouter(queue?: JobQueue): Router {
    *                 page: { type: integer }
    *                 pageSize: { type: integer }
    */
-  router.get("/dead-letter", (req: Request, res: Response) => {
-    const page = req.query.page ? Number(req.query.page) : 1;
-    const pageSize = req.query.pageSize ? Number(req.query.pageSize) : 50;
+  router.get("/dead-letter", (req: Request, res: Response, next: NextFunction) => {
+    const parsed = jobListQuerySchema
+      .pick({ page: true, pageSize: true })
+      .safeParse(req.query);
+    if (!parsed.success) {
+      next(new ValidationError(
+        "Invalid query parameters",
+        { issues: parsed.error.flatten() },
+        res.locals.correlationId as string | undefined,
+      ));
+      return;
+    }
 
+    const { page, pageSize } = parsed.data;
     const result = jobQueue.getDeadLetterJobs(page, pageSize);
     res.json(result);
   });

@@ -556,6 +556,42 @@ pub struct BridgeProofRevokedEvent {
     pub revoked_by: Address,
 }
 
+// ─── Agent capability versioning events (issue #243) ─────────────────────────
+
+/// Data payload for `(registry, ver_pub)`.
+///
+/// Published by `register_agent_version` when a new version is successfully
+/// stored. Off-chain indexers can maintain a full version history per agent
+/// without polling contract storage.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentVersionPublishedEvent {
+    /// Agent that published the new version.
+    pub agent_id: Symbol,
+    /// Owner who authorised the version registration.
+    pub owner: Address,
+    /// The version that was just published.
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+/// Data payload for `(registry, ver_sup)`.
+///
+/// Published by `register_agent_version` for the *previous* latest version
+/// once it is superseded. Indexers can use this to mark stale versions in
+/// their caches.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentVersionSupersededEvent {
+    /// Agent whose previous version was superseded.
+    pub agent_id: Symbol,
+    /// The version that was superseded.
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
 // ─── Security audit trail events (issue #261) ────────────────────────────────
 
 /// Emitted for every privileged operation recorded in the audit log.

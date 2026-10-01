@@ -11,11 +11,13 @@ const MANAGED_ENV_VARS = ["FEATURE_DAG_PREVIEW", "FEATURE_EXPERIMENTAL_AGENTS"] 
 
 const savedEnv = new Map<string, string | undefined>();
 
+const originalEnv = { ...process.env };
 beforeEach(() => {
   for (const key of MANAGED_ENV_VARS) {
     savedEnv.set(key, process.env[key]);
   }
   clearRuntimeOverrides();
+  process.env = { ...originalEnv };
 });
 
 afterEach(() => {
@@ -28,6 +30,7 @@ afterEach(() => {
     }
   }
   clearRuntimeOverrides();
+  process.env = { ...originalEnv };
 });
 
 describe("isEnabled", () => {

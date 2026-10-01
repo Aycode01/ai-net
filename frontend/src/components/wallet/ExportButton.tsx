@@ -2,20 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Download, FileText, Table as TableIcon } from 'lucide-react'
 import type { TransactionEvent } from '../../hooks/useTransactionHistory'
+import { toCsv } from '../../utils/transactionCsv'
 import styles from './ExportButton.module.css'
 
 interface ExportButtonProps {
   transactions: TransactionEvent[]
   publicKey: string
-}
-
-function toCsv(transactions: TransactionEvent[]): string {
-  const header = ['Date', 'Direction', 'Amount (XLM)', 'Counterparty', 'Memo', 'Transaction Hash']
-  const rows = transactions.map((tx) => [
-    tx.timestamp, tx.direction, tx.amount, tx.counterparty, tx.memo ?? '', tx.txHash,
-  ])
-  const escapeCell = (value: string) => `"${value.replace(/"/g, '""')}"`
-  return [header, ...rows].map((row) => row.map((cell) => escapeCell(String(cell))).join(',')).join('\r\n')
 }
 
 function downloadBlob(content: BlobPart, filename: string, mimeType: string): void {

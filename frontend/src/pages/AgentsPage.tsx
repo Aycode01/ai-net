@@ -59,7 +59,7 @@ export function AgentsPageSkeleton() {
 
 function AgentsPage() {
   const { t } = useTranslation()
-  const { agents, loading, error, refetch } = useAgentRegistry()
+  const { agents, loading, error, refetch, fetching, isFirstPage, hasNextPage, firstPage, nextPage } = useAgentRegistry()
   const [searchParams, setSearchParams] = useSearchParams()
   const [selected, setSelected] = useState<AgentRecord | null>(null)
 
@@ -144,6 +144,18 @@ function AgentsPage() {
             onRowClick={setSelected}
           />
         </div>
+      )}
+
+      {!loading && (
+        <nav className={styles.pagination} aria-label={t('page.agents.pagination')} aria-busy={fetching}>
+          <span>{t('page.agents.pageFilters')}</span>
+          <button type="button" onClick={firstPage} disabled={fetching || isFirstPage}>
+            {t('page.agents.firstPage')}
+          </button>
+          <button type="button" onClick={nextPage} disabled={fetching || !hasNextPage}>
+            {t('page.agents.nextPage')}
+          </button>
+        </nav>
       )}
 
       <AgentDetailModal agent={selected} onClose={() => setSelected(null)} />

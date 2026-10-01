@@ -75,6 +75,8 @@ const TaskHistoryPage: React.FC = () => {
     loading,
     error,
     refetch,
+    hasNextPage,
+    loadMore,
     selectedIds,
     toggleSelect,
     clearSelection,
@@ -188,6 +190,19 @@ const TaskHistoryPage: React.FC = () => {
         isComparing={isComparing}
         hasFilters={hasFilters}
       />
+
+      {hasNextPage && (
+        <div className={styles.loadMoreContainer}>
+          <button
+            type="button"
+            className={styles.loadMoreButton}
+            onClick={loadMore}
+            disabled={loading}
+          >
+            {loading ? 'Loading…' : 'Load more'}
+          </button>
+        </div>
+      )}
 
       {/* Comparison panel — shown when both tasks selected */}
       {isComparing && taskA && taskB && (

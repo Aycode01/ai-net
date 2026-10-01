@@ -1,4 +1,4 @@
-import React, { Suspense, useState } from 'react';
+import React, { Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Capability, AgentResult, ResearchReportResult, CodingResult, RiskResult, DesignResult } from '../../types/agent';
 import RiskMatrix from './RiskMatrix';
@@ -14,6 +14,8 @@ interface Props {
   agentName?: string;
   executionTimeMs?: number;
   tokenCount?: number;
+  searchQuery?: string;
+  onSearchChange?: (query: string) => void;
 }
 
 const LoadingFallback: React.FC = () => {
@@ -38,14 +40,30 @@ const AgentOutputRenderer: React.FC<Props> = ({
   agentName,
   executionTimeMs,
   tokenCount,
+  searchQuery: controlledSearchQuery,
+  onSearchChange,
 }) => {
   const { t } = useTranslation();
-  // Filter query and full-screen mode are owned here and threaded down to the
-  // individual renderers as a prop — they are all search against, and lifting
-  // them keeps the header controls in one place.
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isFullScreen, setIsFullScreen] = useState(false);
+  const [internalSearchQuery, setInternalSearchQuery] = useState<string>(
+    controlledSearchQuery ?? ''
+  );
+  const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
 
+  // Keep internal state in sync when used as a controlled component.
+  // Filter query is owned here and threaded down to the individual renderers
+  // as a prop — lifting it keeps the header controls in one place, while the
+  // controlled props allow a parent to drive the filter externally.
+  useEffect(() => {
+    if (controlledSearchQuery !== undefined) {
+      setInternalSearchQuery(controlledSearchQuery);
+    }
+  }, [controlledSearchQuery]);
+
+  const searchQuery = controlledSearchQuery ?? internalSearchQuery;
+  const setSearchQuery = (value: string): void => {
+    setInternalSearchQuery(value);
+    onSearchChange?.(value);
+  };
   const displayName = agentName ?? agentType;
   // All renderers handle null/undefined result with an empty-state placeholder
   if (result === null || result === undefined) {
