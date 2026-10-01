@@ -31,6 +31,17 @@ function rejectPlaceholder(value: string | undefined, ctx: z.RefinementCtx): voi
   }
 }
 
+/**
+ * Fallback secrets injected by `withRuntimeDefaults()`.
+ *
+ * These must not look like the placeholders rejected by `rejectPlaceholder()`
+ * (in particular they must not start with `test-`/`dev-`), otherwise the very
+ * defaults that make `NODE_ENV=test` and local development work would fail
+ * schema validation.
+ */
+const TEST_FALLBACK_JWT_SECRET = "ai-net-jest-suite-jwt-secret-0123456789abcdef";
+const DEV_FALLBACK_JWT_SECRET = "ai-net-local-development-jwt-secret-0123456789";
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3001),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -236,6 +247,21 @@ const envSchema = z.object({
    */
   AGENT_AUTH_SUNSET_DATE: z.string().optional(),
 
+  // ── Feature flags (#425) ────────────────────────────────────────────────────
+  /**
+   * Overrides for the compiled-in defaults in `services/featureFlags.ts`, which
+   * resolves them dynamically as `FEATURE_<FLAG_NAME>`. They must be declared
+   * here so Zod does not strip them from the parsed config: a key that is not
+   * in the schema can never be read back through `getConfig()`. Keep in sync
+   * with `KNOWN_FLAGS`; an empty value means "use the compiled-in default".
+   */
+  FEATURE_STREAMING_RESPONSES: z.string().optional(),
+  FEATURE_DAG_PREVIEW: z.string().optional(),
+  FEATURE_EXPERIMENTAL_AGENTS: z.string().optional(),
+  FEATURE_QUALITY_SCORER: z.string().optional(),
+  FEATURE_RECONCILIATION: z.string().optional(),
+  FEATURE_AGENT_OWNERSHIP_PROOF: z.string().optional(),
+
   // ── Job leases (#648) ───────────────────────────────────────────────────────
   /** How long a worker's claim on a job stays valid without a heartbeat. */
   JOB_LEASE_TTL_MS: z.coerce.number().int().positive().default(30_000),
@@ -274,14 +300,14 @@ function withRuntimeDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
           EVENT_STORE_PATH: ":memory:",
           VENICE_API_KEY: "test-venice-key",
           LOG_LEVEL: "silent",
-          AUTH_JWT_SECRET: "test-jwt-secret-for-development-only",
+          AUTH_JWT_SECRET: TEST_FALLBACK_JWT_SECRET,
         }
       : {};
 
   const devDefaults =
     nodeEnv === "development"
       ? {
-          AUTH_JWT_SECRET: env.AUTH_JWT_SECRET ?? "dev-jwt-secret-change-in-production",
+          AUTH_JWT_SECRET: env.AUTH_JWT_SECRET ?? DEV_FALLBACK_JWT_SECRET,
         }
       : {};
 
@@ -334,7 +360,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // Warn in development if using default secret
   if (nodeEnv === "development") {
     const secret = result.data.AUTH_JWT_SECRET;
-    if (secret === "dev-jwt-secret-change-in-production") {
+    if (secret === DEV_FALLBACK_JWT_SECRET) {
       console.warn(
         "[config] WARNING: Using default AUTH_JWT_SECRET in development. " +
           "Set AUTH_JWT_SECRET to a secure random value in production."
