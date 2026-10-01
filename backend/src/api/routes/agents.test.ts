@@ -180,8 +180,13 @@ describe("DELETE /api/agents/:id", () => {
     const app = buildApp(db);
     const res = await request(app).delete("/api/agents/del-agent");
     expect(res.status).toBe(401);
+    // The shared challenge–response helper used by register/heartbeat/delete
+    // reports the missing challenge first and tags it AGENT_CHALLENGE_INVALID
+    // (#557/#558), replacing the legacy "Missing challenge or signature" text.
     const msg = typeof res.body.error === "string" ? res.body.error : res.body.error?.message;
-    expect(msg).toMatch(/Missing challenge or signature/i);
+    expect(msg).toMatch(/Missing agent challenge/i);
+    const code = (res.body.error as { code?: string } | undefined)?.code;
+    expect(code).toBe("AGENT_CHALLENGE_INVALID");
   });
 
   it("returns 401 when signature is invalid", async () => {
@@ -371,7 +376,9 @@ describe("GET /api/agents — schema DDL (issue #646)", () => {
 
     try {
       for (let i = 0; i < 5; i += 1) {
-        const res = await request(app).get("/api/agents");
+        // `limit` is mandatory on the bounded list contract; the DDL guarantee
+        // this test covers is about the request path, not about query parsing.
+        const res = await request(app).get("/api/agents?limit=50");
         expect(res.status).toBe(200);
       }
 

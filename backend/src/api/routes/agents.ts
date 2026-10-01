@@ -1,7 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { Horizon } from "@stellar/stellar-sdk";
-import { verifyWalletSignature } from "../../services/auth/walletChallenge";
 import { getAgentDb, createAgentDb, AgentDb } from "../../db/agents";
 import {
   agentAuthFailureGuard,
@@ -9,7 +8,7 @@ import {
   heartbeatRateLimitMiddleware,
   recordAuthFailure,
 } from "../middleware/rateLimit";
-import { NotFoundError, ValidationError, UnauthorizedError, AppError } from "../../errors";
+import { NotFoundError, ValidationError, AppError } from "../../errors";
 import { cacheMiddleware } from "../middleware/cache";
 import { invalidateAgentsCache } from "../../cache/invalidation";
 import { ttlForRoute, getConfig } from "../../config";
@@ -717,18 +716,11 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
           throw new NotFoundError("Agent", req.params.id, undefined, correlationId);
         }
 
-        const signature = req.headers["x-signature"] as string | undefined;
-        const challenge = req.headers["x-challenge"] as string | undefined;
-        if (!signature || !challenge) {
-          throw new UnauthorizedError("Missing challenge or signature", undefined, correlationId);
-        }
-
-
-        const isValid = verifyWalletSignature(agent.stellarPublicKey, challenge, signature);
-        if (!isValid) {
-          throw new UnauthorizedError("Invalid signature", undefined, correlationId);
-        }
-
+        // Ownership is proven by the shared challenge–response helper, exactly
+        // as register and heartbeat do: it validates the challenge purpose, the
+        // claimed public key and the payload hash, and it burns the nonce. A
+        // second, ad-hoc `verifyWalletSignature` over the raw challenge would
+        // reject the canonical message clients actually sign (#557/#558).
         requireOwnership(req, res, {
           purpose: "delete",
           publicKey: agent.stellarPublicKey,
