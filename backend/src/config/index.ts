@@ -59,6 +59,11 @@ const envSchema = z.object({
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required").default("./data/ai-net.db"),
   DB_MIGRATIONS_DIR: z.string().optional(),
+  /** Apply pending schema migrations during server startup (Issue #274). */
+  AUTO_MIGRATE: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .default("true"),
   STELLAR_COORDINATOR_SECRET: z.string().optional().superRefine(rejectPlaceholder),
   STELLAR_TEST_SECRET: z.string().optional().superRefine(rejectPlaceholder),
   ALLOWED_ORIGINS: z.string().default("http://localhost:3000"),
