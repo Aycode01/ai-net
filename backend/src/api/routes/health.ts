@@ -317,5 +317,59 @@ router.get("/circuit-breakers", (_req: Request, res: Response) => {
   });
 });
 
+/**
+ * @openapi
+ * /health/queue:
+ *   get:
+ *     summary: Job queue depth and dead-letter count
+ *     operationId: getQueueHealth
+ *     description: >
+ *       Returns a lightweight operational snapshot of the distributed job queue:
+ *       how many jobs are waiting to run (`queueDepth`), how many are currently
+ *       being processed by a worker (`activeJobs`), and how many have exceeded
+ *       their retry budget and landed in the dead-letter queue (`deadLetterCount`).
+ *       Use this endpoint to drive alerting on queue back-pressure or DLQ growth
+ *       without the overhead of the full `/health/ready` dependency sweep.
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Queue snapshot
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [queueDepth, activeJobs, deadLetterCount]
+ *               properties:
+ *                 queueDepth:
+ *                   type: integer
+ *                   description: Number of jobs in `pending` or `failed`-but-retriable state
+ *                 activeJobs:
+ *                   type: integer
+ *                   description: Number of jobs currently being processed by a worker
+ *                 deadLetterCount:
+ *                   type: integer
+ *                   description: Number of jobs that exceeded their retry budget
+ *       500:
+ *         description: Queue store could not be read
+ */
+router.get("/queue", async (_req: Request, res: Response) => {
+  try {
+    const { createJobStore, getJobDb } = await import("../../queue/jobStore.js");
+    const store = createJobStore(getJobDb());
+    const stats = store.getStats();
+    res.json({
+      queueDepth: stats.pending + stats.failed,
+      activeJobs: stats.active,
+      deadLetterCount: stats.deadLetter,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to read job queue stats",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 export { router as healthRouter };
 export default router;
