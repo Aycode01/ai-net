@@ -39,7 +39,7 @@ function isRetryable(err: unknown): boolean {
 
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   let attempt = 0;
-  while (true) {
+  for (;;) {
     try {
       return await fn();
     } catch (err) {

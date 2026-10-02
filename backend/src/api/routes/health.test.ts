@@ -18,6 +18,7 @@ beforeAll(() => {
 
   // Initialise config singleton if not already done
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { loadConfig } = require("../../config");
     loadConfig();
   } catch {
@@ -28,6 +29,7 @@ beforeAll(() => {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildApp() {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { healthRouter } = require("./health");
   const app = express();
   app.use(express.json());
@@ -158,6 +160,7 @@ describe("GET /health/ready", () => {
 
   beforeEach(() => {
     fetchSpy = jest.spyOn(global, "fetch" as any).mockResolvedValue({ ok: true } as Response);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { metricsService } = require("../../services/metrics");
     wsSpy = jest
       .spyOn(metricsService, "getWebSocketStatus")
@@ -308,6 +311,7 @@ describe("GET /health/dashboard", () => {
     originalKey = process.env.ADMIN_API_KEY;
     process.env.ADMIN_API_KEY = ADMIN_KEY;
 
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { metricsService } = require("../../services/metrics");
     dashboardSpy = jest
       .spyOn(metricsService, "getDashboard")

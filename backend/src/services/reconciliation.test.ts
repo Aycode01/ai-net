@@ -369,6 +369,7 @@ describe("ReconciliationService alerts", () => {
 
 describe("createSqliteReconciliationReportStore", () => {
   it("persists reports and returns the latest by runAt", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const Database = require("better-sqlite3");
     const store = createSqliteReconciliationReportStore(new Database(":memory:"));
 
@@ -402,6 +403,7 @@ describe("createSqliteReconciliationReportStore", () => {
 
 describe("PaymentService reconciliation hook", () => {
   it("exposes listLocalRecords from the payment DB", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { PaymentService } = require("../payment/payment");
     const record = makeRecord();
