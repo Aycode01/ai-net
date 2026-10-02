@@ -33,7 +33,7 @@ import {
 } from "./routes/stream";
 import type { DAGNode } from "../types/task";
 import { agentsRouter } from "./routes/agents";
-import { healthRouter } from "./routes/health";
+import { healthRouter, migrationsRouter } from "./routes/health";
 import { metricsRouter } from "./routes/metrics";
 import { createStatsRouter } from "./routes/stats";
 import { createReconciliationRouter, type ReconciliationRouterOptions } from "./routes/reconciliation";
@@ -249,6 +249,10 @@ export function createApp(opts: AppOptions = {}): {
 
   // ── Health routes ───────────────────────────────────────────────────────────
   app.use("/health", publicLimiter.middleware, healthRouter);
+
+  // Schema migration status (Issue #274). Admin-guarded and rate limited like
+  // the other operational endpoints rather than the public health probes.
+  app.use("/migrations", adminLimiter.middleware, migrationsRouter);
 
   // ── Metrics routes (Issue #499) ───────────────────────────────────────────
   app.use("/metrics", metricsRouter);
