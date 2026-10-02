@@ -90,7 +90,10 @@ router.get("/deep", cachedRoute("health"), async (_req: Request, res: Response) 
   ]);
 
   const allOk = veniceStatus === "ok" && horizonStatus === "ok";
-  res.status(allOk ? 200 : 503).json({
+  // `/health/deep` always answers 200 and reports the per-dependency detail:
+  // a degraded upstream is not a failed probe of *this* service. Readiness is
+  // gated by `/health/ready`, which answers 500 when a check reports an error.
+  res.status(200).json({
     status: allOk ? "ok" : "degraded",
     services: {
       venice: veniceStatus,
@@ -144,21 +147,21 @@ router.get("/ready", async (_req: Request, res: Response) => {
     const queueModule = await import("../../queue/jobStore.js");
 
     try {
-      const taskDb = (tasksModule.getTaskDb as Function)();
+      const taskDb = (tasksModule.getTaskDb)();
       taskDb.prepare("SELECT 1").get();
     } catch {
       checks.tasks = "error";
     }
 
     try {
-      const paymentDb = (paymentsModule.getDb as Function)();
+      const paymentDb = (paymentsModule.getDb)();
       paymentDb.prepare("SELECT 1").get();
     } catch {
       checks.payments = "error";
     }
 
     try {
-      const jobDb = (queueModule.getJobDb as Function)();
+      const jobDb = (queueModule.getJobDb)();
       jobDb.prepare("SELECT 1").get();
     } catch {
       checks.queue = "error";

@@ -84,14 +84,15 @@ export function openDatabase(dbPath: string): Database.Database {
 let _pool: SqlitePool | null = null;
 let _poolClosing: Promise<void> | null = null;
 
-/** Create the payments schema. Runs once, on the pool's writer connection. */
+/**
+ * Create the payments schema. Runs once, on the pool's writer connection.
+ *
+ * DDL only: the connection's error subscription lives in `getPaymentPool`'s
+ * `onCreate`, where the writer handle is first opened. Keeping a second copy
+ * here meant the very first schema application tried to subscribe to an event
+ * surface the driver may not expose.
+ */
 function applyPaymentSchema(db: Database.Database): void {
-  (db as unknown as { on: (event: string, fn: (error: Error) => void) => void }).on(
-    "error",
-    (error: Error) => {
-      logger.error({ err: error }, "payment database error");
-    },
-  );
   db.exec(`
     CREATE TABLE IF NOT EXISTS payments (
       taskId       TEXT NOT NULL,
@@ -116,12 +117,19 @@ export function getPaymentPool(dbPath?: string): SqlitePool {
       max: 4,
       acquireTimeoutMs: 5_000,
       onCreate: (db) => {
-        (db as unknown as { on: (event: string, fn: (error: Error) => void) => void }).on(
-          "error",
-          (error: Error) => {
-            logger.error({ err: error }, "payment database error");
-          },
-        );
+        try {
+          // `on` is only present when the driver exposes node's EventEmitter
+          // surface; without it errors surface as thrown exceptions instead, so
+          // the subscription stays best-effort (same guard as db/tasks.ts).
+          (db as unknown as { on: (event: string, fn: (error: Error) => void) => void }).on(
+            "error",
+            (error: Error) => {
+              logger.error({ err: error }, "payment database error");
+            },
+          );
+        } catch {
+          // driver has no error-event support — nothing to subscribe to
+        }
         applyPaymentSchema(db);
         migrateToLatest(db, MIGRATIONS_DIR);
       },

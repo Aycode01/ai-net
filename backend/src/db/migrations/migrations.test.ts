@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import { isInMemoryPath, openDatabase, resolveDatabasePath } from "../index";
+import { loadConfig } from "../../config";
 import {
   MigrationLoadError,
   loadMigrations,
@@ -534,7 +535,20 @@ describe("resolveDatabasePath", () => {
   it("falls back to ./data/ai-net.db", () => {
     delete process.env.DB_PATH;
     delete process.env.DATABASE_URL;
-    expect(resolveDatabasePath()).toBe(join(process.cwd(), "data", "ai-net.db"));
+
+    // Under NODE_ENV=test `withRuntimeDefaults()` pins DATABASE_URL to an
+    // in-memory database so no test ever touches the developer's data
+    // directory, which is the first thing `resolveDatabasePath()` sees.
+    expect(resolveDatabasePath()).toBe(":memory:");
+
+    // The filesystem fallback is still the shipping default and stays
+    // reachable from any non-test environment.
+    const config = loadConfig({
+      NODE_ENV: "production",
+      VENICE_API_KEY: "venice-local-dev-key-0123456789abcdef",
+      AUTH_JWT_SECRET: "ai-net-migrations-suite-jwt-secret-0123456789",
+    });
+    expect(config.DATABASE_URL).toBe("./data/ai-net.db");
   });
 
   it("strips a file: prefix and leaves memory URIs alone", () => {
