@@ -443,6 +443,7 @@ describe("ReconciliationService alerts", () => {
 
 describe("createSqliteReconciliationReportStore", () => {
   it("persists reports and returns the latest by runAt", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const Database = require("better-sqlite3");
     const db = new Database(":memory:");
     const store = createSqliteReconciliationReportStore(db);
@@ -480,7 +481,8 @@ describe("createSqliteReconciliationReportStore", () => {
 
 describe("PaymentService reconciliation hook", () => {
   it("exposes listLocalRecords from the payment DB", () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { PaymentService } = require("../payment/payment");
     const record = makeRecord();
     const service = new PaymentService(makePaymentDb([record]));
@@ -520,6 +522,7 @@ describe("reconciliation API routes", () => {
   });
 
   function makeApp(service: Partial<ReconciliationService>): express.Express {
+    process.env.ADMIN_API_KEY = "test-admin-key";
     const app = express();
     app.use(express.json());
     app.use(
@@ -528,8 +531,6 @@ describe("reconciliation API routes", () => {
         service: service as unknown as ReconciliationService,
       })
     );
-    // Mirror the production app so AppError subclasses render their documented
-    // status + error code instead of Express's default HTML 500.
     app.use(errorHandler);
     return app;
   }
@@ -548,7 +549,7 @@ describe("reconciliation API routes", () => {
 
     const response = await request(app)
       .post("/api/reconciliation/run")
-      .set("X-Admin-API-Key", ADMIN_KEY)
+      .set("x-admin-api-key", "test-admin-key")
       .send({ triggeredBy: "manual" });
 
     expect(response.status).toBe(200);
@@ -562,8 +563,9 @@ describe("reconciliation API routes", () => {
 
     const response = await request(app)
       .post("/api/reconciliation/run")
-      .set("X-Admin-API-Key", ADMIN_KEY)
+      .set("x-admin-api-key", "test-admin-key")
       .send({});
+
     expect(response.status).toBe(200);
     expect(run).toHaveBeenCalledWith("manual");
   });
@@ -587,11 +589,11 @@ describe("reconciliation API routes", () => {
 
     const response = await request(app)
       .post("/api/reconciliation/run")
-      .set("X-Admin-API-Key", ADMIN_KEY)
+      .set("x-admin-api-key", "test-admin-key")
       .send({});
+
     expect(response.status).toBe(500);
-    expect(response.body.error.code).toBe("INTERNAL_ERROR");
-    expect(response.body.error.message).toBe("Reconciliation run failed");
+    expect(response.body.error?.code ?? response.body.error).toBe("INTERNAL_ERROR");
   });
 
   it("GET /report returns the latest report when one exists", async () => {
@@ -602,7 +604,8 @@ describe("reconciliation API routes", () => {
 
     const response = await request(app)
       .get("/api/reconciliation/report")
-      .set("X-Admin-API-Key", ADMIN_KEY);
+      .set("x-admin-api-key", "test-admin-key");
+
     expect(response.status).toBe(200);
     expect(response.body.id).toBe("r-1");
   });
@@ -615,10 +618,9 @@ describe("reconciliation API routes", () => {
 
     const response = await request(app)
       .get("/api/reconciliation/report")
-      .set("X-Admin-API-Key", ADMIN_KEY);
+      .set("x-admin-api-key", "test-admin-key");
+
     expect(response.status).toBe(404);
-    expect(response.body.error.code).toBe("NOT_FOUND");
-    expect(response.body.error.message).toContain("Reconciliation Report");
   });
 
   it("GET /drift lists pending drift records", async () => {

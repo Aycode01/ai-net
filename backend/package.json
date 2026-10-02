@@ -14,8 +14,11 @@
     "test:coverage": "jest --coverage --runInBand --forceExit",
     "test:e2e": "jest --config ../tests/e2e/jest.config.js --runInBand --forceExit",
     "test:performance": "ts-node tests/performance/run.ts",
+    "validate:env": "ts-node --transpile-only scripts/validate-env-example.ts",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
+    "db:migrate": "ts-node src/db/migrations/cli.ts",
+    "db:migrate:status": "ts-node src/db/migrations/cli.ts --status",
     "db:migrate": "ts-node src/db/cli.ts migrate",
     "db:migrate:status": "ts-node src/db/migrations/cli.ts --status",
     "db:rollback": "ts-node src/db/cli.ts rollback",
@@ -24,7 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "@stellar/stellar-sdk": "12.3.0",
-    "better-sqlite3": "9.6.0",
+    "better-sqlite3": "^13.0.3",
     "compression": "1.7.5",
     "cors": "^2.8.5",
     "express": "^4.18.2",
@@ -32,9 +35,11 @@
     "nanoid": "^3.3.7",
     "pino": "^10.3.1",
     "pino-http": "10.2.0",
+    "proxy-addr": "^2.0.7",
     "swagger-jsdoc": "^6.3.0",
     "swagger-ui-express": "^5.0.1",
     "ws": "^8.21.0",
+    "yaml": "^2.0.0-1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -58,8 +63,5 @@
     "ts-jest": "29.1.4",
     "ts-node": "10.9.2",
     "typescript": "^5.4.5"
-  },
-  "allowScripts": {
-    "better-sqlite3@9.6.0": true
   }
 }

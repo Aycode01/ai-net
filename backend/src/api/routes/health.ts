@@ -3,6 +3,8 @@ import { getConfig } from "../../config";
 import { adminAuthMiddleware } from "../middleware/auth";
 import { metricsService } from "../../services/metrics";
 import { tracingService } from "../../services/tracing";
+import { getAllCircuitBreakerStatuses } from "../../services/circuitBreaker.js";
+import { readMigrationStatus } from "../../db/migrations/status";
 
 const router = Router();
 const startTime = Date.now();
@@ -22,6 +24,23 @@ const livenessHandler: RequestHandler = (_req: Request, res: Response) => {
   });
 };
 
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: Liveness and process metadata
+ *     operationId: getHealth
+ *     description: Process-only liveness probe reporting uptime, build version and the configured Stellar network. Performs no dependency checks.
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Service is up
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/HealthStatus'
+ */
 router.get("/", livenessHandler);
 
 /**
@@ -39,15 +58,42 @@ router.get("/", livenessHandler);
  */
 router.get("/live", livenessHandler);
 
+/**
+ * @openapi
+ * /health/deep:
+ *   get:
+ *     summary: Dependency health check
+ *     operationId: getDeepHealth
+ *     description: Probes the Venice AI API and the configured Stellar Horizon endpoint, reporting 503 when either is unreachable.
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: All dependencies reachable
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DeepHealthStatus'
+ *       503:
+ *         description: At least one dependency is unreachable
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/DeepHealthStatus'
+ */
 router.get("/deep", cachedRoute("health"), async (_req: Request, res: Response) => {
   const config = getConfig();
+  const timeoutMs = config.HEALTH_PROBE_TIMEOUT_MS;
   const [veniceStatus, horizonStatus] = await Promise.all([
-    checkVenice(config.VENICE_API_KEY),
-    checkHorizon(config.STELLAR_HORIZON_URL),
+    checkVenice(config.VENICE_API_KEY, timeoutMs),
+    checkHorizon(config.STELLAR_HORIZON_URL, timeoutMs),
   ]);
 
   const allOk = veniceStatus === "ok" && horizonStatus === "ok";
-  res.status(allOk ? 200 : 503).json({
+  // `/health/deep` always answers 200 and reports the per-dependency detail:
+  // a degraded upstream is not a failed probe of *this* service. Readiness is
+  // gated by `/health/ready`, which answers 500 when a check reports an error.
+  res.status(200).json({
     status: allOk ? "ok" : "degraded",
     services: {
       venice: veniceStatus,
@@ -58,6 +104,33 @@ router.get("/deep", cachedRoute("health"), async (_req: Request, res: Response) 
   });
 });
 
+/**
+ * @openapi
+ * /health/ready:
+ *   get:
+ *     summary: Readiness check
+ *     operationId: getReadiness
+ *     description: >
+ *       Verifies the task, payment and job-queue databases, the Venice AI and
+ *       Horizon dependencies, and the WebSocket listener. Returns 500 when any
+ *       check reports `error`. A WebSocket probe of `unknown` does not fail
+ *       readiness, because the stream layer is optional.
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: All checks passed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ReadinessStatus'
+ *       500:
+ *         description: One or more checks failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ReadinessStatus'
+ */
 router.get("/ready", async (_req: Request, res: Response) => {
   const checks: Record<string, "ok" | "error" | "unknown"> = {
     tasks: "ok",
@@ -74,24 +147,24 @@ router.get("/ready", async (_req: Request, res: Response) => {
     const queueModule = await import("../../queue/jobStore.js");
 
     try {
-      const taskDb = (tasksModule.getTaskDb as Function)();
+      const taskDb = (tasksModule.getTaskDb)();
       taskDb.prepare("SELECT 1").get();
     } catch {
       checks.tasks = "error";
     }
 
     try {
-      const paymentDb = (paymentsModule.getDb as Function)();
+      const paymentDb = (paymentsModule.getDb)();
       paymentDb.prepare("SELECT 1").get();
     } catch {
       checks.payments = "error";
     }
 
     try {
-      const jobDb = (queueModule.getJobDb as Function)();
+      const jobDb = (queueModule.getJobDb)();
       jobDb.prepare("SELECT 1").get();
-    } catch (error) {
-      (checks as any).queue = "error";
+    } catch {
+      checks.queue = "error";
     }
   } catch (error) {
     res.status(500).json({ status: "error", checks, error: String(error) });
@@ -124,6 +197,29 @@ router.get("/ready", async (_req: Request, res: Response) => {
   res.status(ready ? 200 : 500).json({ status: ready ? "ok" : "error", checks });
 });
 
+/**
+ * @openapi
+ * /health/dashboard:
+ *   get:
+ *     summary: Operational metrics dashboard
+ *     operationId: getHealthDashboard
+ *     description: Aggregated operational snapshot (queue depth, latency, WebSocket connections). Pass `?refresh=true` to bypass the cache.
+ *     tags: [Health, Admin]
+ *     security:
+ *       - adminApiKey: []
+ *     parameters:
+ *       - in: query
+ *         name: refresh
+ *         schema: { type: string, enum: ["true", "false"] }
+ *         description: Set to `true` to bypass the cached snapshot
+ *     responses:
+ *       200:
+ *         description: Dashboard snapshot
+ *       401:
+ *         description: Missing or invalid admin API key
+ *       503:
+ *         description: ADMIN_API_KEY is not configured
+ */
 router.get("/dashboard", adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const dashboard = await metricsService.getDashboard(req.query.refresh === "true");
@@ -137,6 +233,32 @@ router.get("/dashboard", adminAuthMiddleware, async (req: Request, res: Response
   }
 });
 
+/**
+ * @openapi
+ * /health/traces/{traceId}:
+ *   get:
+ *     summary: Retrieve a distributed trace
+ *     operationId: getHealthTrace
+ *     description: Returns the correlated spans recorded for the given traceId.
+ *     tags: [Health, Admin]
+ *     security:
+ *       - adminApiKey: []
+ *     parameters:
+ *       - in: path
+ *         name: traceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Trace identifier (correlationId)
+ *     responses:
+ *       200:
+ *         description: Trace found
+ *       404:
+ *         description: Trace not found
+ *       401:
+ *         description: Missing or invalid admin API key
+ *       503:
+ *         description: ADMIN_API_KEY is not configured
+ */
 router.get("/traces/:traceId", adminAuthMiddleware, (req: Request, res: Response) => {
   const trace = tracingService.getTrace(req.params.traceId);
   if (!trace) {
@@ -177,5 +299,84 @@ async function checkHorizon(url: string, timeoutMs = 5000): Promise<"ok" | "unre
   }
 }
 
-export { router as healthRouter };
+/**
+ * @openapi
+ * /health/circuit-breakers:
+ *   get:
+ *     summary: Circuit breaker status for all external services
+ *     operationId: getCircuitBreakers
+ *     description: Returns the current state of every registered circuit breaker (Venice AI, Stellar Horizon).
+ *     tags: [Health]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Circuit breaker statuses
+ */
+router.get("/circuit-breakers", (_req: Request, res: Response) => {
+  const breakers = getAllCircuitBreakerStatuses();
+  const anyOpen = breakers.some((b) => b.state === 'OPEN');
+  res.status(anyOpen ? 503 : 200).json({
+    status: anyOpen ? 'degraded' : 'ok',
+    circuitBreakers: breakers,
+  });
+});
+
+/**
+ * `GET /migrations` — schema migration status (Issue #274).
+ *
+ * Reports the `schema_migrations` bookkeeping table joined against the migration
+ * files on disk: which versions are applied, which are pending, the current
+ * version, and any applied migration that has drifted. SQL bodies are never
+ * returned.
+ *
+ * Guarded by the admin key because it enumerates the deployment's schema files.
+ * Like every admin route it fails closed with 503 when `ADMIN_API_KEY` is unset.
+ */
+const migrationsRouter = Router();
+
+/**
+ * @openapi
+ * /migrations:
+ *   get:
+ *     summary: Database migration status
+ *     operationId: getMigrationStatus
+ *     description: >
+ *       Reports version tracking for the versioned SQLite migrations: every
+ *       migration file with its applied/pending state, the current and latest
+ *       version, and any applied migration that has drifted (edited after being
+ *       applied, or missing from disk). SQL bodies are not returned. Backed by
+ *       the `schema_migrations` bookkeeping table.
+ *     tags: [Health, Admin]
+ *     security:
+ *       - adminApiKey: []
+ *     responses:
+ *       200:
+ *         description: Migration status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MigrationStatus'
+ *       401:
+ *         description: Missing or invalid admin API key
+ *       500:
+ *         description: Migration status could not be read
+ *       503:
+ *         description: ADMIN_API_KEY is not configured
+ */
+migrationsRouter.get(
+  "/",
+  adminAuthMiddleware,
+  (_req: Request, res: Response) => {
+    try {
+      res.json(readMigrationStatus());
+    } catch (error) {
+      res.status(500).json({
+        error: "Failed to read migration status",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+);
+
+export { router as healthRouter, migrationsRouter };
 export default router;

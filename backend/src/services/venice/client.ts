@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '../../utils/logger.js';
 import { CircuitBreaker } from './circuitBreaker.js';
-import type { CircuitMetrics, CircuitState, CircuitTransition } from './circuitBreaker.js';
-import { CircuitOpenError, TokenBudgetExceededError } from './errors.js';
+import { CircuitOpenError, TokenBudgetExceededError, VeniceStatusError } from './errors.js';
 import { VeniceResponseCache, buildCacheKey } from './cache.js';
 import { RequestDeduplicator } from './dedup.js';
 import { getConfig } from '../../config/index.js';
@@ -14,6 +13,7 @@ import type {
   VeniceClientLike,
   VeniceMessage,
   VeniceProviderConfig,
+  VeniceUsage,
 } from './types.js';
 
 interface CacheEnvConfig {
@@ -81,6 +81,67 @@ const RETRYABLE_STATUS_CODES = new Set([429, 503, 500, 502, 504]);
 const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 422]);
 const DEFAULT_CHAT_MODEL = 'llama-3.3-70b';
 
+/**
+ * Whether a failure is worth retrying against a *different* provider.
+ *
+ * A 401 may succeed on a fallback provider that holds a different key, so it
+ * fails over. Any other 4xx means the provider rejected the request itself — a
+ * malformed body or an unprocessable prompt — and every other provider will
+ * reject it identically, so trying again only amplifies load during exactly the
+ * conditions where we are already being refused. 429 and 5xx, transport errors
+ * and timeouts stay failover-worthy because they are per-provider conditions.
+ */
+function shouldFailoverToNextProvider(err: Error): boolean {
+  if (!(err instanceof VeniceStatusError)) return true;
+  if (err.status === 401) return true;
+  if (err.status === 429) return true;
+  return err.status >= 500;
+}
+
+/** A completed upstream call: the text plus what it cost in tokens. */
+interface FetchOutcome {
+  content: string;
+  usage: VeniceUsage;
+}
+
+/**
+ * Estimate usage when the provider gives us none.
+ *
+ * Uses the same chars/4 approximation as `logRequest`, so the number is
+ * comparable with the rest of the observability surface even though it is an
+ * approximation. Deliberately re-derived here rather than imported from the
+ * budget service: the Venice client must not depend on the ledger, or every
+ * cache read would start allocating ledger state.
+ */
+function estimateUsage(prompt: string, completion: string): VeniceUsage {
+  const promptTokens = Math.ceil(prompt.length / 4);
+  const completionTokens = Math.ceil(completion.length / 4);
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+  };
+}
+
+/**
+ * Normalize whatever the provider reported into a {@link VeniceUsage}.
+ *
+ * Returns null when the payload has no usable `usage` object, which is the
+ * signal that we should fall back to estimating rather than reporting zeroes
+ * — reporting 0 tokens would silently under-count the burn.
+ */
+function parseUsage(data: unknown): VeniceUsage | null {
+  const usage = (data as any)?.usage;
+  if (!usage || typeof usage !== 'object') return null;
+  const prompt = Number(usage.prompt_tokens);
+  const completion = Number(usage.completion_tokens);
+  if (!Number.isFinite(prompt) || !Number.isFinite(completion)) return null;
+  const total = Number.isFinite(Number(usage.total_tokens))
+    ? Number(usage.total_tokens)
+    : prompt + completion;
+  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total };
+}
+
 export class VeniceClient implements VeniceClientLike {
   private readonly providers: VeniceProviderConfig[];
   private readonly breaker: CircuitBreaker;
@@ -102,7 +163,7 @@ export class VeniceClient implements VeniceClientLike {
   }
 
   constructor(config: VeniceClientConfig) {
-    this.breaker = config.circuitBreaker ?? this.createBreaker(config);
+    this.breaker = config.circuitBreaker ?? new CircuitBreaker({ name: 'venice' });
 
     const env = this.resolveConfig() as any;
     this.modelVersion = config.modelVersion ?? env.VENICE_MODEL_VERSION ?? CONFIG_FALLBACK.VENICE_MODEL_VERSION;
@@ -356,9 +417,17 @@ export class VeniceClient implements VeniceClientLike {
     promptForLogging: string;
     agentType: string;
   }): Promise<string> {
-    const maxTokens = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
+    // The budget ceiling is a cap, never a floor: an explicit per-call
+    // maxTokens still wins when it is the more restrictive of the two.
+    const requested = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const maxTokens = options?.budget?.maxTokens
+      ? Math.min(requested, options.budget.maxTokens)
+      : requested;
     if (maxTokens > HARD_TOKEN_CAP) {
       throw new TokenBudgetExceededError(maxTokens, HARD_TOKEN_CAP);
+    }
+    if (maxTokens <= 0) {
+      throw new TokenBudgetExceededError(requested, 0);
     }
 
     // Circuit breaker admission. In HALF_OPEN this reserves one of the probe
@@ -379,16 +448,16 @@ export class VeniceClient implements VeniceClientLike {
     };
 
     try {
-      try {
-        this.breaker.acquire();
-        probeHeld = this.breaker.getState() === 'HALF_OPEN';
-      } catch (e) {
-        if (this.enableCacheFallback && !options?.force) {
-          const stale = this.cache.getStale(promptForLogging, agentType, this.modelVersion);
-          if (stale !== null) {
-            log.warn({ agentType, model, circuitState: this.breaker.getState() }, 'venice circuit open — serving stale cache');
-            return stale;
-          }
+      this.breaker.assertClosed();
+    } catch (e) {
+      if (this.enableCacheFallback && !options?.force) {
+        const stale = this.cache.getStale(promptForLogging, agentType, this.modelVersion);
+        if (stale !== null) {
+          log.warn({ agentType, model, circuitState: this.breaker.getState() }, 'venice circuit open — serving stale cache');
+          // A cache read costs no upstream tokens; report zero so the ledger
+          // does not charge the task for a lookup.
+          this.reportUsage(options, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+          return stale;
         }
         throw e;
       }
@@ -396,48 +465,61 @@ export class VeniceClient implements VeniceClientLike {
       const force = options?.force === true;
       const cacheKey = buildCacheKey(promptForLogging, agentType, this.modelVersion);
 
-      if (!force) {
-        const cached = this.cache.get(promptForLogging, agentType, this.modelVersion);
-        if (cached !== null) {
-          log.info(
-            { agentType, model, modelVersion: this.modelVersion, hitRate: this.cache.getHitRate() },
-            'venice cache hit',
-          );
-          return cached;
-        }
+    if (!force) {
+      const cached = this.cache.get(promptForLogging, agentType, this.modelVersion);
+      if (cached !== null) {
+        log.info(
+          { agentType, model, modelVersion: this.modelVersion, hitRate: this.cache.getHitRate() },
+          'venice cache hit',
+        );
+        this.reportUsage(options, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+        return cached;
       }
 
-      const runFetch = (): Promise<string> =>
-        this.runVeniceFetch({ messages, model, options, promptForLogging, agentType, settleSuccess, settleFailure });
+    const runFetch = (): Promise<FetchOutcome> =>
+      this.runVeniceFetch({ messages, model, options, maxTokens, promptForLogging, agentType });
 
-      let result: string;
-      try {
-        result = force ? await runFetch() : await this.deduplicator.dedup(cacheKey, runFetch);
-      } catch (err) {
-        // Graceful degradation: if all providers failed and we have stale cache, return it
-        if (this.enableCacheFallback && !force) {
-          const stale = this.cache.getStale(promptForLogging, agentType, this.modelVersion);
-          if (stale !== null) {
-            log.warn(
-              { agentType, model, error: err instanceof Error ? err.message : String(err) },
-              'venice all providers failed — serving stale cache (graceful degradation)',
-            );
-            return stale;
-          }
+    let outcome: FetchOutcome;
+    try {
+      outcome = force ? await runFetch() : await this.deduplicator.dedup(cacheKey, runFetch);
+    } catch (err) {
+      // Graceful degradation: if all providers failed and we have stale cache, return it
+      if (this.enableCacheFallback && !force) {
+        const stale = this.cache.getStale(promptForLogging, agentType, this.modelVersion);
+        if (stale !== null) {
+          log.warn(
+            { agentType, model, error: err instanceof Error ? err.message : String(err) },
+            'venice all providers failed — serving stale cache (graceful degradation)',
+          );
+          // We *tried* to spend here, so estimate rather than reporting zero:
+          // the failed attempt did consume provider compute.
+          this.reportUsage(options, estimateUsage(promptForLogging, ''));
+          return stale;
         }
         throw err;
       }
 
-      if (!force) {
-        this.cache.set(promptForLogging, agentType, this.modelVersion, result);
-      }
-      return result;
-    } finally {
-      // Give back a HALF_OPEN probe slot the call never used. Harmless when the
-      // slot was already settled — the breaker floors the counter at zero.
-      if (probeHeld && !settled) {
-        this.breaker.release();
-      }
+    // Report here rather than inside runVeniceFetch: the deduplicator shares
+    // one promise across concurrent identical requests, and each caller passed
+    // its own onUsage callback and budget context.
+    this.reportUsage(options, outcome.usage);
+
+    if (!force) {
+      this.cache.set(promptForLogging, agentType, this.modelVersion, outcome.content);
+    }
+    return outcome.content;
+  }
+
+  /** Fire the caller's usage callback, if any. Never throws into the caller. */
+  private reportUsage(options: CompleteOptions | undefined, usage: VeniceUsage): void {
+    if (!options?.onUsage) return;
+    try {
+      options.onUsage(usage);
+    } catch (err) {
+      log.warn(
+        { error: err instanceof Error ? err.message : String(err) },
+        'onUsage callback threw — usage already recorded upstream'
+      );
     }
   }
 
@@ -445,6 +527,7 @@ export class VeniceClient implements VeniceClientLike {
     messages,
     model,
     options,
+    maxTokens,
     promptForLogging,
     agentType,
     settleSuccess,
@@ -453,13 +536,10 @@ export class VeniceClient implements VeniceClientLike {
     messages: VeniceMessage[];
     model: string;
     options?: CompleteOptions;
+    maxTokens: number;
     promptForLogging: string;
     agentType: string;
-    /** Records a success with the breaker (idempotent per call). */
-    settleSuccess: () => void;
-    /** Records a failure with the breaker (idempotent per call). */
-    settleFailure: () => void;
-  }): Promise<string> {
+  }): Promise<FetchOutcome> {
     const requestId = randomUUID();
     const start = Date.now();
     let retries = 0;
@@ -468,7 +548,7 @@ export class VeniceClient implements VeniceClientLike {
       model,
       messages,
       temperature: options?.temperature ?? 0.2,
-      max_tokens: options?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      max_tokens: maxTokens,
     });
 
     let lastError: Error | undefined;
@@ -476,7 +556,6 @@ export class VeniceClient implements VeniceClientLike {
     // Try providers in order (fallback chain)
     for (let pIndex = 0; pIndex < this.providers.length; pIndex++) {
       const provider = this.providers[pIndex]!;
-      const isLastProvider = pIndex === this.providers.length - 1;
 
       try {
         const response = await this.fetchWithRetryForProvider(
@@ -490,18 +569,25 @@ export class VeniceClient implements VeniceClientLike {
           throw new Error('Venice response missing expected content field');
         }
 
-        settleSuccess();
-        this.logRequest(requestId, agentType, model, promptForLogging, Date.now() - start, 'ok', retries, provider.name);
-        return content;
+        // Prefer the provider's own counts. If the payload has no usage block
+        // (some deployments omit it), fall back to estimating rather than
+        // reporting zero — under-counting is how a budget stops meaning
+        // anything.
+        const usage = parseUsage(data) ?? estimateUsage(promptForLogging, content);
+
+        this.breaker.recordSuccess();
+        this.logRequest(requestId, agentType, model, promptForLogging, Date.now() - start, 'ok', retries, provider.name, usage);
+        return { content, usage };
       } catch (err) {
         if (err instanceof CircuitOpenError || err instanceof TokenBudgetExceededError) {
           throw err;
         }
         lastError = err instanceof Error ? err : new Error(String(err));
-        // Non-retryable 400/422 on last provider should not failover further — but we still try next if available
-        const isNonRetryable = lastError.message.includes('non-retryable');
-        // For 401, trying next provider with different key may succeed, so we do failover
-        if (pIndex < this.providers.length - 1) {
+        // A 401 may still succeed on a fallback holding a different key, so it
+        // fails over; other 4xx statuses will be rejected by every provider and
+        // only serve to amplify load, so they fail fast.
+        const mayFailover = shouldFailoverToNextProvider(lastError);
+        if (mayFailover && pIndex < this.providers.length - 1) {
           const nextProvider = this.providers[pIndex + 1]!.name ?? `fallback-${pIndex + 1}`;
           log.warn(
             { agentType, model, failedProvider: provider.name, nextProvider, error: lastError.message, retries },
@@ -530,9 +616,16 @@ export class VeniceClient implements VeniceClientLike {
     onChunk: (chunk: string) => void,
     options?: CompleteOptions
   ): Promise<void> {
-    const maxTokens = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
+    // Same ceiling rule as complete(): the budget caps, it never raises.
+    const requested = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const maxTokens = options?.budget?.maxTokens
+      ? Math.min(requested, options.budget.maxTokens)
+      : requested;
     if (maxTokens > HARD_TOKEN_CAP) {
       throw new TokenBudgetExceededError(maxTokens, HARD_TOKEN_CAP);
+    }
+    if (maxTokens <= 0) {
+      throw new TokenBudgetExceededError(requested, 0);
     }
 
     // Streams have no cache to fall back on, so an open circuit is shed with
@@ -567,66 +660,142 @@ export class VeniceClient implements VeniceClientLike {
       stream: true,
     });
 
-    let accumulated = '';
+    // Deltas are buffered per provider attempt and only handed to the caller
+    // once an attempt completes. Emitting eagerly meant that a mid-stream
+    // failure left the caller's first provider's partial output already
+    // delivered, and the failover then appended a second provider's output on
+    // top of it — the caller received two responses concatenated with nothing
+    // marking the boundary (issue #661).
+    let delivered = 0;
     let lastError: Error | undefined;
 
-    try {
-      for (let pIndex = 0; pIndex < this.providers.length; pIndex++) {
-        const provider = this.providers[pIndex]!;
-        try {
-          const response = await this.fetchWithRetryForProvider(body, provider, () => { retries++; });
+    for (let pIndex = 0; pIndex < this.providers.length; pIndex++) {
+      const provider = this.providers[pIndex]!;
+      // Per-attempt buffer. Reset up front so no state leaks between providers.
+      let accumulated = '';
+      const deltas: string[] = [];
+      try {
+        const response = await this.fetchWithRetryForProvider(body, provider, () => { retries++; });
 
           if (!response.body) {
             throw new Error('Venice stream response has no body');
           }
 
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let done = false;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let done = false;
+        // Chunk boundaries land wherever the network puts them, so a `data:`
+        // line can be split across two reads. Carry the trailing partial line
+        // between iterations instead of parsing each chunk in isolation —
+        // otherwise both halves fail to parse and the content is dropped with
+        // no error, which is silent output corruption (issue #660).
+        let buffer = '';
+        let parseFailures = 0;
 
-          while (!done) {
-            const result = await reader.read();
-            done = result.done;
-            if (result.value) {
-              const text = decoder.decode(result.value, { stream: !done });
-              const lines = text.split('\n');
-              for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                const payload = line.slice(6).trim();
-                if (payload === '[DONE]') continue;
-                try {
-                  const parsed = JSON.parse(payload);
-                  const delta = parsed?.choices?.[0]?.delta?.content;
-                  if (typeof delta === 'string' && delta.length > 0) {
-                    accumulated += delta;
-                    onChunk(delta);
-                  }
-                } catch {
-                  // skip malformed SSE chunks
+        const handleLine = (line: string): void => {
+          if (!line.startsWith('data: ')) return;
+          const payload = line.slice(6).trim();
+          if (payload === '[DONE]') return;
+          try {
+            const parsed = JSON.parse(payload);
+            const delta = parsed?.choices?.[0]?.delta?.content;
+            if (typeof delta === 'string' && delta.length > 0) {
+              accumulated += delta;
+              onChunk(delta);
+            }
+          } catch (err) {
+            // A complete-but-unparseable frame is counted and surfaced rather
+            // than swallowed, so a provider regression is visible in the logs
+            // instead of showing up only as shorter output.
+            parseFailures += 1;
+            log.warn(
+              {
+                error: err instanceof Error ? err.message : String(err),
+                agentType,
+                model,
+                payloadPreview: payload.slice(0, 200),
+              },
+              'venice SSE frame failed to parse — frame dropped'
+            );
+          }
+        };
+
+        while (!done) {
+          const result = await reader.read();
+          done = result.done;
+          if (result.value) {
+            const text = decoder.decode(result.value, { stream: !done });
+            const lines = text.split('\n');
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const payload = line.slice(6).trim();
+              if (payload === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(payload);
+                const delta = parsed?.choices?.[0]?.delta?.content;
+                if (typeof delta === 'string' && delta.length > 0) {
+                  accumulated += delta;
+                  deltas.push(delta);
                 }
               }
             }
           }
 
-          settleSuccess();
-          this.logRequest(requestId, agentType, model, prompt, Date.now() - start, 'ok', retries, provider.name);
-          return;
-        } catch (err) {
-          if (err instanceof CircuitOpenError || err instanceof TokenBudgetExceededError) {
-            throw err;
+          // Everything up to the last newline is a complete line; the remainder
+          // is a partial line that must survive until the next chunk.
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            handleLine(line);
           }
-          lastError = err instanceof Error ? err : new Error(String(err));
-          if (pIndex < this.providers.length - 1) {
-            log.warn({ agentType, model, failedProvider: provider.name, error: lastError.message }, 'venice stream provider failed — failover');
-            await this.sleep(100);
-            continue;
-          }
-          settleFailure();
-          this.logRequest(requestId, agentType, model, prompt, Date.now() - start, 'error', retries, provider.name);
-          throw new Error(
-            `Venice stream error after ${accumulated.length} characters accumulated: ${lastError.message}`,
+        }
+
+        // The stream ended without a trailing newline, so the retained partial
+        // line is a complete frame after all.
+        if (buffer.length > 0) {
+          handleLine(buffer);
+        }
+
+        if (parseFailures > 0) {
+          log.warn(
+            { agentType, model, parseFailures, provider: provider.name },
+            'venice SSE stream completed with unparseable frames'
           );
         }
+
+        // The attempt completed, so this output is authoritative. Only now is
+        // it safe to hand to the caller.
+        for (const delta of deltas) onChunk(delta);
+        delivered = accumulated.length;
+
+        this.breaker.recordSuccess();
+        // SSE frames only carry deltas, so there is no provider usage block to
+        // read. Estimate from the prompt and everything we actually received;
+        // the completion side is exact because we buffered it.
+        const streamUsage = estimateUsage(prompt, accumulated);
+        this.reportUsage(options, streamUsage);
+        this.logRequest(requestId, agentType, model, prompt, Date.now() - start, 'ok', retries, provider.name, streamUsage);
+        return;
+      } catch (err) {
+        if (err instanceof CircuitOpenError || err instanceof TokenBudgetExceededError) {
+          throw err;
+        }
+        // Discard the failed provider's partial output: it was never delivered,
+        // so counting it would misreport both usage and progress.
+        const droppedChars = accumulated.length;
+        accumulated = '';
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const mayFailover = shouldFailoverToNextProvider(lastError);
+        if (mayFailover && pIndex < this.providers.length - 1) {
+          log.warn({ agentType, model, failedProvider: provider.name, error: lastError.message, droppedChars }, 'venice stream provider failed — failover');
+          await this.sleep(100);
+          continue;
+        }
+        this.breaker.recordFailure();
+        this.logRequest(requestId, agentType, model, prompt, Date.now() - start, 'error', retries, provider.name);
+        throw new Error(
+          `Venice stream error after ${delivered} characters delivered: ${lastError.message}`
+        );
       }
 
       settleFailure();
@@ -675,12 +844,12 @@ export class VeniceClient implements VeniceClientLike {
 
         if (NON_RETRYABLE_STATUS_CODES.has(response.status) && response.status !== 401) {
           // 401 may succeed on fallback with different key, so we treat it as retriable for failover
-          throw new Error(`Venice returned non-retryable status: ${response.status}`);
+          throw new VeniceStatusError(response.status, `Venice returned non-retryable status: ${response.status}`);
         }
 
         // 401 is special: allow failover to next provider, not retry same provider
         if (response.status === 401) {
-          throw new Error(`Venice returned non-retryable status: ${response.status}`);
+          throw new VeniceStatusError(response.status, `Venice returned non-retryable status: ${response.status}`);
         }
 
         if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < maxAttempts - 1) {
@@ -689,7 +858,7 @@ export class VeniceClient implements VeniceClientLike {
           continue;
         }
 
-        throw new Error(`Venice returned status: ${response.status}`);
+        throw new VeniceStatusError(response.status, `Venice returned status: ${response.status}`);
       } catch (err) {
         if (timeoutId) clearTimeout(timeoutId);
         // AbortError from timeout
@@ -702,8 +871,10 @@ export class VeniceClient implements VeniceClientLike {
           }
           throw lastError;
         }
-        if (err instanceof Error && err.message.startsWith('Venice returned')) {
-          // For non-retryable, don't retry same provider — throw to allow failover to next provider
+        if (err instanceof VeniceStatusError) {
+          // A status response is final for this provider: do not retry it here.
+          // Whether the *next* provider is worth trying is decided by
+          // shouldFailoverToNextProvider in the caller.
           throw err;
         }
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -725,16 +896,6 @@ export class VeniceClient implements VeniceClientLike {
     return Math.max(50, Math.round(base + jitter));
   }
 
-  // Legacy fetchWithRetry kept for backward compat (delegates to primary provider)
-  private async fetchWithRetry(
-    body: string,
-    onRetry: () => void
-  ): Promise<Response> {
-    const primary = this.providers[0];
-    if (!primary) throw new Error('No Venice providers configured');
-    return this.fetchWithRetryForProvider(body, primary, onRetry);
-  }
-
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
@@ -747,7 +908,8 @@ export class VeniceClient implements VeniceClientLike {
     durationMs: number,
     status: 'ok' | 'error',
     retries: number,
-    providerName?: string
+    providerName?: string,
+    usage?: VeniceUsage
   ): void {
     const promptTokenEstimate = Math.ceil(prompt.length / 4);
     log.info({
@@ -755,6 +917,9 @@ export class VeniceClient implements VeniceClientLike {
       agentType,
       model,
       promptTokenEstimate,
+      promptTokens: usage?.prompt_tokens,
+      completionTokens: usage?.completion_tokens,
+      totalTokens: usage?.total_tokens,
       durationMs,
       status,
       retries,

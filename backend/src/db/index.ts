@@ -49,10 +49,12 @@ export function isInMemoryPath(dbPath: string): boolean {
   return value === ":memory:" || value.startsWith("file::memory:") || /mode=memory/.test(value);
 }
 
+import { getConfig } from "../config";
+
 /**
  * Resolve the SQLite file path for the consolidated database.
  *
- * Precedence: explicit argument → `DB_PATH` → `DATABASE_URL` → default. A
+ * Precedence: explicit argument → config.DATABASE_URL → default. A
  * `file:` prefix is stripped and relative paths are resolved against the
  * current working directory so `./data/ai-net.db` in `.env` means the same
  * thing regardless of where the process was started.
@@ -61,7 +63,7 @@ export function isInMemoryPath(dbPath: string): boolean {
  *   (e.g. `postgresql://…`), which would otherwise create a bogus file name.
  */
 export function resolveDatabasePath(override?: string): string {
-  const raw = (override ?? process.env.DB_PATH ?? process.env.DATABASE_URL ?? DEFAULT_DB_PATH).trim();
+  const raw = (override ?? getConfig().DATABASE_URL ?? DEFAULT_DB_PATH).trim();
 
   if (raw === "") {
     throw new Error("Database path is empty — set DB_PATH or DATABASE_URL.");
@@ -100,23 +102,17 @@ export function openDatabase(dbPath: string): Database.Database {
 }
 
 let _pool: SqlitePool | null = null;
+let _poolClosing: Promise<void> | null = null;
 
 /**
- * Bootstrap the *base* `payments` table.
+ * Create the payments schema. Runs once, on the pool's writer connection.
  *
- * This is deliberately the pre-`003` shape: `migrateToLatest` runs immediately
- * afterwards and is the single source of truth for the full schema, including
- * the `createdAt` / `updatedAt` columns added by `003_add_payments_timestamps`.
- * Creating them here as well would make that migration's `ALTER TABLE` fail with
- * "duplicate column name" on a fresh database.
+ * DDL only: the connection's error subscription lives in `getPaymentPool`'s
+ * `onCreate`, where the writer handle is first opened. Keeping a second copy
+ * here meant the very first schema application tried to subscribe to an event
+ * surface the driver may not expose.
  */
 function applyPaymentSchema(db: Database.Database): void {
-  (db as unknown as { on: (event: string, fn: (error: Error) => void) => void }).on(
-    "error",
-    (error: Error) => {
-      logger.error({ err: error }, "payment database error");
-    },
-  );
   db.exec(`
     CREATE TABLE IF NOT EXISTS payments (
       taskId       TEXT NOT NULL,
@@ -132,6 +128,7 @@ function applyPaymentSchema(db: Database.Database): void {
 
 /** The payment database's connection pool. */
 export function getPaymentPool(dbPath?: string): SqlitePool {
+  if (_poolClosing) throw new Error("Payment database is closing");
   if (!_pool || _pool.closed) {
     const filePath = dbPath ?? path.join(process.cwd(), "payments.db");
     _pool = createPool({
@@ -140,12 +137,19 @@ export function getPaymentPool(dbPath?: string): SqlitePool {
       max: 4,
       acquireTimeoutMs: 5_000,
       onCreate: (db) => {
-        (db as unknown as { on: (event: string, fn: (error: Error) => void) => void }).on(
-          "error",
-          (error: Error) => {
-            logger.error({ err: error }, "payment database error");
-          },
-        );
+        try {
+          // `on` is only present when the driver exposes node's EventEmitter
+          // surface; without it errors surface as thrown exceptions instead, so
+          // the subscription stays best-effort (same guard as db/tasks.ts).
+          (db as unknown as { on: (event: string, fn: (error: Error) => void) => void }).on(
+            "error",
+            (error: Error) => {
+              logger.error({ err: error }, "payment database error");
+            },
+          );
+        } catch {
+          // driver has no error-event support — nothing to subscribe to
+        }
         applyPaymentSchema(db);
         migrateToLatest(db, MIGRATIONS_DIR);
       },
@@ -164,9 +168,15 @@ export function getDb(dbPath?: string): Database.Database {
   return getPaymentPool(dbPath).writer;
 }
 
-export function closeDb(): void {
-  void _pool?.close();
-  _pool = null;
+export function closeDb(): Promise<void> {
+  if (_poolClosing) return _poolClosing;
+  const pool = _pool;
+  if (!pool) return Promise.resolve();
+  _poolClosing = pool.close().finally(() => {
+    if (_pool === pool) _pool = null;
+    _poolClosing = null;
+  });
+  return _poolClosing;
 }
 
 /** The payments pool if one is open, else null. Used by the metrics endpoint. */

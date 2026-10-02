@@ -6,7 +6,7 @@
  */
 
 import Database from "better-sqlite3";
-import { createAgentDb, type AgentRecord } from "../db/agents";
+import { createAgentDb, ensureAgentTable, type AgentRecord } from "../db/agents";
 import { createTaskDb } from "../db/tasks";
 import type { Task } from "../types/task";
 import type { VeniceClientLike, AgentType } from "../services/venice/types";
@@ -15,21 +15,15 @@ import type { VeniceClientLike, AgentType } from "../services/venice/types";
 //  In-memory SQLite factories
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Creates an in-memory SQLite database with the agents schema pre-applied. */
+/**
+ * Creates an in-memory SQLite database with the agents schema pre-applied.
+ *
+ * Uses the production DDL so the fixture cannot drift from what the connection
+ * pool creates at initialisation — `createAgentDb` itself no longer runs DDL.
+ */
 export function makeAgentRawDb(): Database.Database {
   const db = new Database(":memory:");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id               TEXT PRIMARY KEY,
-      capabilities     TEXT NOT NULL,
-      pricingXLM       REAL NOT NULL,
-      endpoint         TEXT NOT NULL,
-      stellarPublicKey TEXT NOT NULL,
-      reputationScore  REAL NOT NULL DEFAULT 0,
-      lastSeenAt       TEXT NOT NULL,
-      status           TEXT NOT NULL DEFAULT 'online'
-    )
-  `);
+  ensureAgentTable(db);
   return db;
 }
 

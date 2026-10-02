@@ -26,12 +26,42 @@ ai-net uses header-based cryptographic authentication schemes:
 - Used for creating tasks, retrieving task state, and managing owned resources.
 - Example: \`walletpublickey: GBZXN7PIRZGNMHGA728XZVOG2GUFIDLAZ6AF2I2MD2OCYTAF2K1K4AAA\`
 
-### 2. Agent Cryptographic Signature Authentication (\`AgentSignatureAuth\`)
+### 2. Agent Cryptographic Signature Authentication (\`AgentSignatureAuth\` + \`AgentChallengeAuth\`)
+- **Applies to:** \`POST /api/agents/register\`, \`POST /api/agents/:id/heartbeat\`, \`DELETE /api/agents/:id\`
 - **Headers:**
-  - \`x-signature: <Base64-or-Hex-Ed25519-Signature>\`
-  - \`x-challenge: <Signed-Challenge-String>\`
-- Used for agent de-registration and privileged agent operations.
-- The challenge string must match the challenge issued by the server within the replay window.
+  - \`x-challenge: <nonce>\` — the single-use, expiring nonce issued by the server
+  - \`x-signature: <Base64-or-Hex-Ed25519-Signature>\` — signature of the canonical message
+
+Obtain a challenge first:
+
+\`\`\`
+POST /api/agents/challenge
+{ "purpose": "register" | "heartbeat" | "delete",
+  "publicKey": "<agent Stellar public key>",
+  "agentId": "<required for heartbeat and delete>",
+  "payload": { ...the exact body you will send to the protected route } }
+
+→ 200 { "challenge": "...", "message": "ai-net:agent-auth:v1\\n<purpose>\\n<publicKey>\\n<challenge>\\n<sha256(payload)>", "expiresAt": "..." }
+\`\`\`
+
+Sign \`message\` with the agent's Stellar secret key and send both headers. The signature is
+verified against the registered \`stellarPublicKey\`, and the challenge is bound to the route
+purpose, the claimed key and a SHA-256 hash of the payload — so a signature is valid for exactly
+one request and cannot be replayed against another route, another payload, or another agent.
+
+| Failure | \`error.code\` | Meaning |
+|---|---|---|
+| No, unknown, expired, replayed or mismatched challenge | \`AGENT_CHALLENGE_INVALID\` | Request a new challenge and retry |
+| Missing, malformed or non-matching signature | \`AGENT_SIGNATURE_INVALID\` | The key does not control this agent |
+
+Both return HTTP 401. Failed *unsigned* attempts are throttled separately from the success path
+(\`AGENT_AUTH_FAILURE_LIMIT_MAX\` per IP per \`AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS\`) so agent ids
+cannot be enumerated cheaply.
+
+**Migration:** while the \`agent_ownership_proof\` feature flag is disabled, unsigned
+\`register\` and \`heartbeat\` calls are still accepted and answered with \`Deprecation\`,
+\`Sunset\` and \`Warning\` headers (see \`AGENT_AUTH_SUNSET_DATE\`). \`DELETE\` always requires a
+signature. Unsigned calls are refused once the flag is on, which is the default.
 
 ---
 
@@ -67,11 +97,11 @@ Optional query param: \`?lastEventId=<seq>\` to resume streaming from a specific
 4. **Heartbeat:** Server sends periodic pings every 30s. Client must respond with \`{ "type": "pong" }\` within 10s.
 
 ### WebSocket Close Codes:
-- \`4001\` / \`4400\` — Bad Request / Invalid Handshake
-- \`4003\` — Forbidden (Wallet does not own task)
-- \`4004\` — Task Not Found
-- \`4008\` — Auth Handshake Timeout
-- \`4408\` — Heartbeat Pong Timeout (Stale connection)
+- \`4400\` — Bad Request (malformed handshake, or first message was not \`{ "walletPublicKey" }\`)
+- \`4401\` — Auth Handshake Timeout
+- \`4403\` — Forbidden (Wallet does not own task)
+- \`4404\` — Task Not Found
+- \`4408\` — Heartbeat Pong Timeout / inactivity timeout (Stale connection)
 
 ---
 
@@ -115,6 +145,13 @@ List endpoints support standardized query parameters:
           scheme: "bearer",
           bearerFormat: "JWT",
           description: "JSON Web Token for authenticated user sessions",
+        },
+        adminApiKey: {
+          type: "apiKey",
+          in: "header",
+          name: "X-Admin-API-Key",
+          description:
+            "Shared operator secret guarding every `/api/admin/*`, `/api/ratelimit/*` and operational health route. `Authorization: Bearer <ADMIN_API_KEY>` is accepted as an alternative. When `ADMIN_API_KEY` is unset these routes fail closed with 503.",
         },
       },
       headers: {
@@ -330,6 +367,79 @@ List endpoints support standardized query parameters:
               properties: {
                 tasks: { type: "string", enum: ["ok", "error"], example: "ok" },
                 payments: { type: "string", enum: ["ok", "error"], example: "ok" },
+              },
+            },
+          },
+        },
+        MigrationStatus: {
+          type: "object",
+          required: [
+            "database",
+            "migrationsDir",
+            "migrations",
+            "currentVersion",
+            "latestVersion",
+            "appliedCount",
+            "pendingCount",
+            "upToDate",
+            "drift",
+          ],
+          properties: {
+            database: { type: "string", example: "/srv/ai-net/data/ai-net.db" },
+            migrationsDir: { type: "string", example: "/srv/ai-net/backend/src/db/migrations" },
+            migrationCount: { type: "integer", example: 2 },
+            currentVersion: {
+              type: "string",
+              nullable: true,
+              description: "Highest applied migration version, or null when nothing has been applied.",
+              example: "0002",
+            },
+            latestVersion: {
+              type: "string",
+              nullable: true,
+              description: "Highest version present on disk, or null when there are no migration files.",
+              example: "0002",
+            },
+            appliedCount: { type: "integer", example: 2 },
+            pendingCount: { type: "integer", example: 0 },
+            upToDate: {
+              type: "boolean",
+              description: "True when nothing is pending and no applied migration has drifted.",
+              example: true,
+            },
+            drift: {
+              type: "array",
+              description: "Applied migrations that were edited after being applied, or are missing from disk.",
+              items: { type: "string", example: "0001" },
+            },
+            migrations: {
+              type: "array",
+              items: {
+                type: "object",
+                required: ["id", "filename", "name", "state", "checksum", "reversible", "drifted"],
+                properties: {
+                  id: { type: "string", example: "0001" },
+                  filename: { type: "string", example: "0001_init.sql" },
+                  name: { type: "string", example: "init" },
+                  state: { type: "string", enum: ["applied", "pending"], example: "applied" },
+                  checksum: { type: "string", example: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" },
+                  appliedAt: {
+                    type: "string",
+                    format: "date-time",
+                    nullable: true,
+                    example: "2026-08-25T17:20:00.000Z",
+                  },
+                  reversible: {
+                    type: "boolean",
+                    description: "True when the file defines a down section.",
+                    example: true,
+                  },
+                  drifted: {
+                    type: "boolean",
+                    description: "True when the recorded checksum differs from the file on disk.",
+                    example: false,
+                  },
+                },
               },
             },
           },
@@ -572,190 +682,102 @@ List endpoints support standardized query parameters:
             tokenType: { type: "string", example: "Bearer" },
           },
         },
-        // ── Payment reconciliation (issue #496) ───────────────────────────────
-        ReconciliationDriftType: {
-          type: "string",
-          enum: [
-            "orphaned_locked",
-            "missing_release_tx",
-            "release_unconfirmed",
-            "expired_escrow",
-            "missing_local",
-            "amount_mismatch",
-          ],
-          example: "expired_escrow",
-          description:
-            "Category of on-chain/off-chain payment state drift. `orphaned_locked` = DB locked with no " +
-            "claimable balance; `missing_release_tx` = DB released but Horizon has no release " +
-            "transaction; `release_unconfirmed` = DB released but the balance is still claimable; " +
-            "`expired_escrow` = task terminal while the escrow is still locked.",
-        },
-        ReconciliationRemediation: {
-          type: "object",
-          required: ["action", "status", "at"],
-          properties: {
-            action: {
-              type: "string",
-              enum: [
-                "mark_orphaned",
-                "backfill_tx_hash",
-                "requeue_release",
-                "refund_escrow",
-                "manual_review",
-              ],
-              example: "refund_escrow",
-            },
-            status: {
-              type: "string",
-              enum: ["remediated", "skipped", "failed", "manual_review"],
-              example: "remediated",
-            },
-            txHash: { type: "string", nullable: true, example: "9f2c1d...b71" },
-            reason: { type: "string", nullable: true, example: "refund queued" },
-            at: { type: "string", format: "date-time" },
-          },
-        },
         ReconciliationDiscrepancy: {
           type: "object",
-          required: ["type", "driftType", "balanceId", "severity", "description"],
+          required: ["type", "balanceId", "severity", "description"],
           properties: {
             type: {
               type: "string",
-              enum: [
-                "missing_on_chain",
-                "missing_local",
-                "amount_mismatch",
-                "missing_release_tx",
-                "release_unconfirmed",
-              ],
-              example: "missing_on_chain",
+              enum: ["missing_on_chain", "missing_local", "amount_mismatch"],
+              example: "amount_mismatch",
             },
-            driftType: { $ref: "#/components/schemas/ReconciliationDriftType" },
             balanceId: { type: "string", example: "00000000abc123..." },
-            taskId: { type: "string", nullable: true, example: "task_ab12cd34ef56" },
-            nodeId: { type: "string", nullable: true, example: "node_risk" },
-            severity: { type: "string", enum: ["info", "warning", "critical"], example: "critical" },
-            description: { type: "string" },
-            localAmountStroops: { type: "string", nullable: true, example: "10000000" },
-            onChainAmountStroops: { type: "string", nullable: true, example: "10000000" },
-            expectedAmountStroops: { type: "string", nullable: true, example: "10000000" },
-            recordedTxHash: { type: "string", nullable: true },
-            onChainTxHash: { type: "string", nullable: true },
-            taskStatus: { type: "string", nullable: true, example: "failed" },
-            remediation: { $ref: "#/components/schemas/ReconciliationRemediation" },
+            taskId: { type: "string", example: "task_ab12cd34ef56" },
+            nodeId: { type: "string", example: "node_research_1" },
+            severity: { type: "string", enum: ["info", "warning", "critical"], example: "warning" },
+            description: { type: "string", example: "Local record claims 5000000 stroops, chain shows 4000000" },
+            localAmountStroops: { type: "string", example: "5000000" },
+            onChainAmountStroops: { type: "string", example: "4000000" },
+            expectedAmountStroops: { type: "string", example: "5000000" },
+          },
+        },
+        ReconciliationSummary: {
+          type: "object",
+          required: [
+            "totalLocalRecords",
+            "totalOnChainBalances",
+            "matched",
+            "discrepancies",
+            "missingOnChain",
+            "missingLocal",
+            "amountMismatch",
+          ],
+          properties: {
+            totalLocalRecords: { type: "integer", example: 120 },
+            totalOnChainBalances: { type: "integer", example: 118 },
+            matched: { type: "integer", example: 117 },
+            discrepancies: { type: "integer", example: 3 },
+            missingOnChain: { type: "integer", example: 2 },
+            missingLocal: { type: "integer", example: 0 },
+            amountMismatch: { type: "integer", example: 1 },
           },
         },
         ReconciliationReport: {
           type: "object",
+          description: "Cross-reference of local payment records against Stellar claimable balances.",
           required: ["id", "runAt", "triggeredBy", "status", "summary", "discrepancies"],
           properties: {
-            id: { type: "string", example: "0f3c1c9e-2a51-4d1a-9f4e-0d2b1f2a3c4d" },
-            runAt: { type: "string", format: "date-time", example: "2026-09-01T12:00:00.000Z" },
-            triggeredBy: { type: "string", enum: ["manual", "scheduled", "release"], example: "scheduled" },
-            status: {
-              type: "string",
-              enum: ["consistent", "discrepancies_found"],
-              example: "discrepancies_found",
-            },
-            summary: {
-              type: "object",
-              properties: {
-                totalLocalRecords: { type: "integer", example: 128 },
-                totalOnChainBalances: { type: "integer", example: 96 },
-                matched: { type: "integer", example: 95 },
-                discrepancies: { type: "integer", example: 1 },
-                missingOnChain: { type: "integer", example: 1 },
-                missingLocal: { type: "integer", example: 0 },
-                amountMismatch: { type: "integer", example: 0 },
-                driftByType: {
-                  type: "object",
-                  description: "Drifts detected, broken down by ReconciliationDriftType.",
-                  example: {
-                    orphaned_locked: 1,
-                    missing_release_tx: 0,
-                    release_unconfirmed: 0,
-                    expired_escrow: 0,
-                    missing_local: 0,
-                    amount_mismatch: 0,
-                  },
-                },
-                remediatedByType: {
-                  type: "object",
-                  example: {
-                    orphaned_locked: 1,
-                    missing_release_tx: 0,
-                    release_unconfirmed: 0,
-                    expired_escrow: 0,
-                    missing_local: 0,
-                    amount_mismatch: 0,
-                  },
-                },
-                remediated: { type: "integer", example: 1 },
-                pendingRemediation: { type: "integer", example: 0 },
-                releaseVerified: { type: "integer", example: 42 },
-                releaseUnverified: { type: "integer", example: 0 },
-              },
-            },
+            id: { type: "string", example: "recon_7f21c0" },
+            runAt: { type: "string", format: "date-time", example: "2026-08-25T17:40:00.000Z" },
+            triggeredBy: { type: "string", enum: ["manual", "scheduled", "release"], example: "manual" },
+            status: { type: "string", enum: ["consistent", "discrepancies_found"], example: "discrepancies_found" },
+            summary: { $ref: "#/components/schemas/ReconciliationSummary" },
             discrepancies: {
               type: "array",
               items: { $ref: "#/components/schemas/ReconciliationDiscrepancy" },
             },
-            remediations: {
-              type: "array",
-              nullable: true,
-              items: { $ref: "#/components/schemas/ReconciliationRemediation" },
-            },
           },
         },
-        ReconciliationDrift: {
+        Error: {
           type: "object",
-          description:
-            "A drift awaiting a human decision. Persisted across restarts so an operator " +
-            "(or operator tooling) can drain the queue via POST /api/reconciliation/drift/:id/resolve.",
-          required: [
-            "id",
-            "driftType",
-            "balanceId",
-            "description",
-            "severity",
-            "recommendedAction",
-            "detectedAt",
-            "lastSeenAt",
-            "occurrences",
-            "acknowledged",
-          ],
+          description: "Generic error envelope used where a specific error schema does not apply.",
+          required: ["error"],
           properties: {
-            id: { type: "string", example: "task_ab12cd34ef56:node_risk" },
-            driftType: { $ref: "#/components/schemas/ReconciliationDriftType" },
-            balanceId: { type: "string", example: "00000000abc123..." },
-            taskId: { type: "string", nullable: true },
-            nodeId: { type: "string", nullable: true },
-            description: { type: "string" },
-            severity: { type: "string", enum: ["info", "warning", "critical"] },
-            recommendedAction: {
-              type: "string",
-              enum: [
-                "mark_orphaned",
-                "backfill_tx_hash",
-                "requeue_release",
-                "refund_escrow",
-                "manual_review",
-              ],
-            },
-            detectedAt: { type: "string", format: "date-time" },
-            lastSeenAt: { type: "string", format: "date-time" },
-            occurrences: { type: "integer", example: 3 },
-            acknowledged: { type: "boolean", example: false },
-            resolution: {
-              type: "object",
-              nullable: true,
-              properties: {
-                status: { type: "string", enum: ["released", "refunded", "orphaned"] },
-                txHash: { type: "string" },
-                at: { type: "string", format: "date-time" },
-                by: { type: "string", example: "ops" },
-              },
-            },
+            error: { type: "string", example: "Reconciliation run failed" },
+            message: { type: "string", example: "Stellar Horizon returned 503" },
+            statusCode: { type: "integer", example: 500 },
+            path: { type: "string", example: "/api/reconciliation/run" },
+            requestId: { type: "string", example: "req_c918a245" },
+          },
+        },
+        FeatureFlagState: {
+          type: "object",
+          required: ["flag", "enabled", "source"],
+          properties: {
+            flag: { type: "string", example: "streaming_responses" },
+            enabled: { type: "boolean", example: true },
+            source: { type: "string", enum: ["runtime", "env", "default"], example: "runtime" },
+            defaultValue: { type: "boolean", example: false },
+          },
+        },
+        MetricsScrapeHealth: {
+          type: "object",
+          required: ["healthy"],
+          properties: {
+            healthy: { type: "boolean", example: true },
+            registeredAt: { type: "string", format: "date-time", nullable: true },
+            lastScrapeAt: { type: "string", format: "date-time", nullable: true },
+            scrapeIntervalMs: { type: "integer", example: 15000 },
+          },
+        },
+        ReadOnlyState: {
+          type: "object",
+          required: ["enabled"],
+          properties: {
+            enabled: { type: "boolean", example: false },
+            reason: { type: "string", nullable: true, example: null },
+            actor: { type: "string", nullable: true, example: null },
+            since: { type: "string", format: "date-time", nullable: true, example: null },
           },
         },
       },

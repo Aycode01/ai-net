@@ -66,7 +66,7 @@ type RealDb = InstanceType<typeof RealDatabase>;
 function makeSchemaADb(): RealDb {
   const db = new RealDatabase(':memory:');
   db.exec(loadSql('002_create_task_events_table.up.sql'));
-  db.exec(loadSql('005_replace_task_events_schema.up.sql'));
+  db.exec(loadSql('006_replace_task_events_schema.up.sql'));
   return db;
 }
 
@@ -271,7 +271,7 @@ describe('migration 005 idempotency', () => {
     // In production the migrator always runs 002 before 005.
     const db = new RealDatabase(':memory:');
     db.exec(loadSql('002_create_task_events_table.up.sql'));
-    expect(() => db.exec(loadSql('005_replace_task_events_schema.up.sql'))).not.toThrow();
+    expect(() => db.exec(loadSql('006_replace_task_events_schema.up.sql'))).not.toThrow();
     const names = cols(db, 'task_events').map(c => c.name);
     expect(names).toContain('global_seq');
     expect(names).toContain('task_seq');
@@ -289,7 +289,7 @@ describe('migration 005 idempotency', () => {
     db.prepare(`INSERT INTO task_events (taskId, type, nodeId, payload, timestamp) VALUES (?,?,?,?,?)`)
       .run('task-1', 'node_completed', 'n1', null, '2026-01-01T00:00:01.000Z');
 
-    db.exec(loadSql('005_replace_task_events_schema.up.sql'));
+    db.exec(loadSql('006_replace_task_events_schema.up.sql'));
 
     const names = cols(db, 'task_events').map(c => c.name);
     expect(names).toContain('global_seq');
@@ -312,7 +312,7 @@ describe('migration 005 idempotency', () => {
     // a real runtime scenario.  This test verifies that the first run succeeds
     // and leaves data intact, and that subsequent schema A operations work.
     const db = new RealDatabase(':memory:');
-    const upSql = loadSql('005_replace_task_events_schema.up.sql');
+    const upSql = loadSql('006_replace_task_events_schema.up.sql');
     db.exec(loadSql('002_create_task_events_table.up.sql'));
     // First run: converts schema B → schema A
     expect(() => db.exec(upSql)).not.toThrow();
@@ -332,10 +332,10 @@ describe('migration 005 idempotency', () => {
   it('down migration restores schema B shape', () => {
     const db = new RealDatabase(':memory:');
     db.exec(loadSql('002_create_task_events_table.up.sql'));
-    db.exec(loadSql('005_replace_task_events_schema.up.sql'));
+    db.exec(loadSql('006_replace_task_events_schema.up.sql'));
     db.prepare(`INSERT INTO task_events (task_seq,version,type,task_id,node_id,occurred_at) VALUES (0,1,'NodeStarted','task-d','n1','2026-01-01T00:00:00.000Z')`).run();
 
-    db.exec(loadSql('005_replace_task_events_schema.down.sql'));
+    db.exec(loadSql('006_replace_task_events_schema.down.sql'));
 
     const names = cols(db, 'task_events').map(c => c.name);
     expect(names).toContain('taskId');
@@ -431,7 +431,7 @@ describe('schema conflict regression (#560)', () => {
   it('migration pair 002+005 produces schema A column set', () => {
     const db = new RealDatabase(':memory:');
     db.exec(loadSql('002_create_task_events_table.up.sql'));
-    db.exec(loadSql('005_replace_task_events_schema.up.sql'));
+    db.exec(loadSql('006_replace_task_events_schema.up.sql'));
     const columnNames = cols(db, 'task_events').map(c => c.name);
     db.close();
 

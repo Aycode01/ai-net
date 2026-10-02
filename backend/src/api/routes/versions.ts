@@ -10,6 +10,7 @@
  * information available as structured JSON.
  */
 import { Router, Request, Response } from "express";
+import { config } from "../../config";
 
 export interface VersionEntry {
   version: string;
@@ -29,7 +30,7 @@ const VERSION_MANIFEST: VersionEntry[] = [
     version: "1.0",
     status: "deprecated",
     deprecatedAt: "2026-01-01",
-    sunsetAt: process.env.API_V1_SUNSET_DATE ?? "2027-01-01",
+    sunsetAt: config.API_V1_SUNSET_DATE ?? "2027-01-01",
     breakingChanges: [],
     migratesTo: "2.0",
   },
@@ -37,7 +38,7 @@ const VERSION_MANIFEST: VersionEntry[] = [
     version: "1.1",
     status: "deprecated",
     deprecatedAt: "2026-06-01",
-    sunsetAt: process.env.API_V1_SUNSET_DATE ?? "2027-01-01",
+    sunsetAt: config.API_V1_SUNSET_DATE ?? "2027-01-01",
     breakingChanges: [
       "Task response envelope changed: `result` moved to `data.result`.",
     ],
@@ -57,33 +58,18 @@ const VERSION_MANIFEST: VersionEntry[] = [
 export function createVersionsRouter(): Router {
   const router = Router();
 
-  /**
-   * @openapi
-   * /api/versions:
-   *   get:
-   *     summary: API versioning lifecycle manifest
-   *     description: >
-   *       Lists all API versions with their deprecation status, sunset dates,
-   *       and breaking-change summaries. Clients should poll this endpoint to
-   *       detect when an in-use version has been deprecated or is near its
-   *       sunset date.
-   *     tags: [Versioning]
-   *     security: []
-   *     responses:
-   *       200:
-   *         description: Version manifest
-   */
   router.get("/", (_req: Request, res: Response) => {
-    const current = VERSION_MANIFEST.find((v) => v.status === "current");
+    const manifest = VERSION_MANIFEST;
+    const current = manifest.find((v) => v.status === "current");
     res.json({
       latestVersion: current?.version ?? "2.0",
-      defaultVersion: process.env.API_DEFAULT_VERSION ?? "1.0",
+      defaultVersion: config.API_DEFAULT_VERSION,
       policy: {
         deprecationNoticeMonths: 6,
         sunsetGracePeriodMonths: 12,
         policyUrl: "/docs#api-versioning",
       },
-      versions: VERSION_MANIFEST,
+      versions: manifest,
     });
   });
 

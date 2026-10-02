@@ -17,12 +17,12 @@ import {
 import { tracingService } from "../services/tracing";
 import { currentTraceId } from "../services/traceContext";
 import { getConfig } from "../config";
+import { getCircuitBreaker } from "../services/circuitBreaker.js";
 
 const MAX_RETRIES = 5;
 
 function isRetryable(err: unknown): boolean {
   const message = (err as { message?: string })?.message ?? "";
-  // Horizon error codes for TIMEOUT and TOO_MANY_REQUESTS
   const extras = (
     err as {
       response?: { data?: { extras?: { result_codes?: { transaction?: string } } } };
@@ -39,7 +39,7 @@ function isRetryable(err: unknown): boolean {
 
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   let attempt = 0;
-  while (true) {
+  for (;;) {
     try {
       return await fn();
     } catch (err) {
@@ -64,6 +64,11 @@ export interface PaymentServiceHooks {
 export class PaymentService {
   private server: Server;
   private networkPassphrase: string;
+  private readonly horizonBreaker = getCircuitBreaker({
+    name: 'stellar-horizon',
+    failureThreshold: 3,
+    recoveryTimeoutMs: 60_000,
+  });
 
   constructor(
     private db: PaymentDb,
@@ -74,9 +79,7 @@ export class PaymentService {
     this.networkPassphrase = config.STELLAR_NETWORK_PASSPHRASE;
   }
 
-  /**
-   * Enumerate all local payment records — the reconciliation source of truth.
-   */
+  /** Enumerate all local payment records — the reconciliation source of truth. */
   listLocalRecords(): PaymentRecord[] {
     return this.db.listAll();
   }
@@ -98,8 +101,8 @@ export class PaymentService {
       const amountStroops = xlmToStroops(amountXLM);
       const amountStr = stroopsToXlm(amountStroops);
 
-      const account = await withRetry(() =>
-        this.server.loadAccount(coordinatorKeypair.publicKey())
+      const account = await this.horizonBreaker.execute(() =>
+        withRetry(() => this.server.loadAccount(coordinatorKeypair.publicKey()))
       );
 
       const tx = new TransactionBuilder(account, {
@@ -119,12 +122,12 @@ export class PaymentService {
         .setTimeout(30)
         .build();
 
-      // Derive balance ID before signing — deterministic from the operation
       const balanceId = tx.getClaimableBalanceId(0);
-
       tx.sign(coordinatorKeypair);
 
-      await withRetry(() => this.server.submitTransaction(tx));
+      await this.horizonBreaker.execute(() =>
+        withRetry(() => this.server.submitTransaction(tx))
+      );
 
       const now = new Date().toISOString();
       this.db.insert({
@@ -157,7 +160,6 @@ export class PaymentService {
     const record = this.db.findByKey(taskId, nodeId);
     if (!record) throw new Error(`No payment record for task=${taskId} node=${nodeId}`);
 
-    // Idempotency: return existing hash without a second Stellar tx
     if (record.status === "released" && record.txHash) {
       return record.txHash;
     }
@@ -168,8 +170,8 @@ export class PaymentService {
       : null;
 
     try {
-      const account = await withRetry(() =>
-        this.server.loadAccount(coordinatorKeypair.publicKey())
+      const account = await this.horizonBreaker.execute(() =>
+        withRetry(() => this.server.loadAccount(coordinatorKeypair.publicKey()))
       );
 
       const tx = new TransactionBuilder(account, {
@@ -184,7 +186,9 @@ export class PaymentService {
 
       tx.sign(coordinatorKeypair);
 
-      const result = await withRetry(() => this.server.submitTransaction(tx));
+      const result = await this.horizonBreaker.execute(() =>
+        withRetry(() => this.server.submitTransaction(tx))
+      );
       const txHash = (result as unknown as { hash: string }).hash;
 
       this.db.updateStatus(taskId, nodeId, "released", txHash);
@@ -215,8 +219,8 @@ export class PaymentService {
       throw new PaymentAlreadyReleasedError(taskId, nodeId);
     }
 
-    const account = await withRetry(() =>
-      this.server.loadAccount(coordinatorKeypair.publicKey())
+    const account = await this.horizonBreaker.execute(() =>
+      withRetry(() => this.server.loadAccount(coordinatorKeypair.publicKey()))
     );
 
     const tx = new TransactionBuilder(account, {
@@ -231,7 +235,9 @@ export class PaymentService {
 
     tx.sign(coordinatorKeypair);
 
-    const result = await withRetry(() => this.server.submitTransaction(tx));
+    const result = await this.horizonBreaker.execute(() =>
+      withRetry(() => this.server.submitTransaction(tx))
+    );
     const txHash = (result as unknown as { hash: string }).hash;
 
     this.db.updateStatus(taskId, nodeId, "refunded", txHash);

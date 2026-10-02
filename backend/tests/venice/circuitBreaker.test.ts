@@ -7,7 +7,7 @@ describe('CircuitBreaker', () => {
 
   beforeEach(() => {
     now = 1000000;
-    breaker = new CircuitBreaker(() => now);
+    breaker = new CircuitBreaker({ nowFn: () => now });
   });
 
   it('starts in CLOSED state', () => {

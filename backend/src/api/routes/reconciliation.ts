@@ -48,6 +48,8 @@ const resolveSchema = z.object({
  *       Remediation is idempotent: re-running never double-refunds or double-releases.
  *     operationId: runReconciliation
  *     tags: [Reconciliation]
+ *     security:
+ *       - adminApiKey: []
  *     requestBody:
  *       content:
  *         application/json:
@@ -83,6 +85,8 @@ const resolveSchema = z.object({
  *     summary: Get the latest reconciliation report
  *     operationId: getLatestReconciliationReport
  *     tags: [Reconciliation]
+ *     security:
+ *       - adminApiKey: []
  *     responses:
  *       200:
  *         description: Latest reconciliation report

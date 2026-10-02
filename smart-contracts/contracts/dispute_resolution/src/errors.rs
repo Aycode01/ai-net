@@ -21,6 +21,12 @@ pub enum Error {
     InvalidAmount = 13,
     InvalidVoterPool = 14,
     EvidenceLimitReached = 15,
+    AppealExpired = 16,
+    AppealAlreadyFiled = 17,
+    /// `resolve` was called while the voting window is still open.
+    VotingStillOpen = 18,
+    /// `appeal_dispute` was called on a dispute that has no ruling to appeal.
+    NotResolved = 19,
 }
 
 impl Error {
@@ -41,6 +47,10 @@ impl Error {
             13 => Some(Self::InvalidAmount),
             14 => Some(Self::InvalidVoterPool),
             15 => Some(Self::EvidenceLimitReached),
+            16 => Some(Self::AppealExpired),
+            17 => Some(Self::AppealAlreadyFiled),
+            18 => Some(Self::VotingStillOpen),
+            19 => Some(Self::NotResolved),
             _ => None,
         }
     }

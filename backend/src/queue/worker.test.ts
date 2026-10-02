@@ -1,17 +1,22 @@
-import Database from "better-sqlite3";
 import fs from "fs";
 import os from "os";
 import path from "path";
+// Real SQLite via the built-in `node:sqlite` driver: the default Jest project
+// maps the native `better-sqlite3` addon to an inert stub (see
+// backend/__mocks__/better-sqlite3.js), which cannot execute a claim, a
+// conditional UPDATE or a transaction, so this suite could never assert
+// anything. tests/support/betterSqlite3Shim.ts explains the trade-off.
+import { openSqliteDatabase } from "../../tests/support/betterSqlite3Shim";
 import { createJobStore, type JobStore, type Job } from "./jobStore";
 import { JobWorker } from "./worker";
 import { JobQueue } from "./index";
 
 describe("Background Job Queue & Worker", () => {
-  let db: Database.Database;
+  let db: ReturnType<typeof openSqliteDatabase>;
   let store: JobStore;
 
   beforeEach(() => {
-    db = new Database(":memory:");
+    db = openSqliteDatabase(":memory:");
     store = createJobStore(db);
   });
 
@@ -196,6 +201,66 @@ describe("Background Job Queue & Worker", () => {
       expect(jobAfterRecovery?.status).toBe("pending");
     });
 
+    it("rejects status transition from stale prior status (#649)", () => {
+      const now = new Date().toISOString();
+      store.insert({
+        id: "job_stale_1",
+        taskId: "t_stale_1",
+        type: "execute_task",
+        payload: {},
+        status: "completed",
+        priority: "normal",
+        progress: 100,
+        attempts: 1,
+        maxAttempts: 3,
+        nextRunAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Try transitioning from expected status "active" when status is already "completed"
+      const result = store.updateStatus("job_stale_1", "active", { expectedStatus: "active" });
+      expect(result).toBe(false);
+
+      const current = store.findById("job_stale_1");
+      expect(current?.status).toBe("completed");
+    });
+
+    it("50 concurrent updateStatus calls converge on exactly one terminal state without clobbering fields (#649)", () => {
+      const now = new Date().toISOString();
+      store.insert({
+        id: "job_concurrent_1",
+        taskId: "t_conc_1",
+        type: "execute_task",
+        payload: {},
+        status: "active",
+        priority: "normal",
+        progress: 50,
+        attempts: 1,
+        maxAttempts: 3,
+        nextRunAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Perform progress updates and completion updates in rapid sequence
+      for (let i = 0; i < 50; i++) {
+        store.updateProgress("job_concurrent_1", Math.min(100, 50 + i));
+        store.updateStatus("job_concurrent_1", "completed", {
+          completedAt: now,
+          expectedStatus: "active",
+        });
+      }
+
+      const finalJob = store.findById("job_concurrent_1");
+      expect(finalJob?.status).toBe("completed");
+      expect(finalJob?.progress).toBeGreaterThanOrEqual(50);
+
+      // Verify job_history has records
+      const historyCount = (db.prepare("SELECT COUNT(*) as c FROM job_history WHERE jobId = ?").get("job_concurrent_1") as any).c;
+      expect(historyCount).toBe(1);
+    });
+
     it("claimNextPendingJob marks the returned job active and never returns it twice", () => {
       const now = new Date().toISOString();
       const job = makeJob({ id: "claim_1", createdAt: now, nextRunAt: now });
@@ -242,8 +307,8 @@ describe("Background Job Queue & Worker", () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-claim-"));
       const dbPath = path.join(dir, "jobs.sqlite");
 
-      const dbA = new Database(dbPath);
-      const dbB = new Database(dbPath);
+      const dbA = openSqliteDatabase(dbPath);
+      const dbB = openSqliteDatabase(dbPath);
       dbA.pragma("busy_timeout = 5000");
       dbB.pragma("busy_timeout = 5000");
 
@@ -274,8 +339,8 @@ describe("Background Job Queue & Worker", () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-claim-"));
       const dbPath = path.join(dir, "jobs.sqlite");
 
-      const dbA = new Database(dbPath);
-      const dbB = new Database(dbPath);
+      const dbA = openSqliteDatabase(dbPath);
+      const dbB = openSqliteDatabase(dbPath);
       dbA.pragma("busy_timeout = 5000");
       dbB.pragma("busy_timeout = 5000");
 
@@ -504,7 +569,7 @@ describe("Background Job Queue & Worker", () => {
         // handled exactly once: no job left behind, none run twice.
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-net-workers-"));
         const dbPath = path.join(dir, "jobs.sqlite");
-        const connections: Database.Database[] = [];
+        const connections: Array<ReturnType<typeof openSqliteDatabase>> = [];
         const workers: JobWorker[] = [];
         const handled = new Set<string>();
         let duplicateRuns = 0;
@@ -514,7 +579,7 @@ describe("Background Job Queue & Worker", () => {
 
         try {
           const now = new Date().toISOString();
-          const seeder = new Database(dbPath);
+          const seeder = openSqliteDatabase(dbPath);
           connections.push(seeder);
           const seedStore = createJobStore(seeder);
           for (let i = 0; i < TOTAL_JOBS; i++) {
@@ -524,7 +589,7 @@ describe("Background Job Queue & Worker", () => {
           }
 
           for (let w = 0; w < WORKER_COUNT; w++) {
-            const conn = new Database(dbPath);
+            const conn = openSqliteDatabase(dbPath);
             conn.pragma("busy_timeout = 5000");
             connections.push(conn);
 
@@ -720,6 +785,85 @@ describe("Background Job Queue & Worker", () => {
       expect(stats.completed).toBe(1);
       expect(stats.deadLetter).toBe(1);
       expect(stats.total).toBe(4);
+    });
+  });
+
+  describe("Job Deduplication (enqueueUnique)", () => {
+    it("hasPendingJobForTask returns false when no job exists for the taskId", () => {
+      expect(store.hasPendingJobForTask("task_nonexistent")).toBe(false);
+    });
+
+    it("hasPendingJobForTask returns true for a pending job", () => {
+      const job = makeJob({ taskId: "task_dedup_1" });
+      store.insert(job);
+      expect(store.hasPendingJobForTask("task_dedup_1")).toBe(true);
+    });
+
+    it("hasPendingJobForTask returns true for an active job", () => {
+      const job = makeJob({ taskId: "task_dedup_2", status: "active" });
+      store.insert(job);
+      expect(store.hasPendingJobForTask("task_dedup_2")).toBe(true);
+    });
+
+    it("hasPendingJobForTask returns true for a failed-but-retriable job", () => {
+      const job = makeJob({ taskId: "task_dedup_3", status: "failed", attempts: 1, maxAttempts: 3 });
+      store.insert(job);
+      expect(store.hasPendingJobForTask("task_dedup_3")).toBe(true);
+    });
+
+    it("hasPendingJobForTask returns false for a completed job (terminal)", () => {
+      const job = makeJob({ taskId: "task_dedup_4", status: "completed" });
+      store.insert(job);
+      expect(store.hasPendingJobForTask("task_dedup_4")).toBe(false);
+    });
+
+    it("hasPendingJobForTask returns false for a dead-letter job (terminal)", () => {
+      const job = makeJob({ taskId: "task_dedup_5", status: "dead-letter" });
+      store.insert(job);
+      expect(store.hasPendingJobForTask("task_dedup_5")).toBe(false);
+    });
+
+    it("enqueueUnique succeeds when no existing job for taskId", () => {
+      const queue = new JobQueue(store);
+      expect(() => queue.enqueueUnique({ taskId: "task_unique_1" })).not.toThrow();
+      const job = store.findByTaskId("task_unique_1");
+      expect(job).toBeDefined();
+      expect(job?.status).toBe("pending");
+    });
+
+    it("enqueueUnique throws DuplicateJobError when a pending job already exists", async () => {
+      const { DuplicateJobError } = await import("./index");
+      const queue = new JobQueue(store);
+      queue.enqueueUnique({ taskId: "task_unique_2" });
+
+      expect(() => queue.enqueueUnique({ taskId: "task_unique_2" })).toThrow(DuplicateJobError);
+    });
+
+    it("enqueueUnique succeeds after the prior job completes (terminal state allows re-submission)", async () => {
+      const { DuplicateJobError } = await import("./index");
+      const queue = new JobQueue(store);
+      const job = queue.enqueueUnique({ taskId: "task_unique_3" });
+
+      // Simulate job completion
+      store.updateStatus(job.id, "completed", { completedAt: new Date().toISOString() });
+
+      // Re-submission should succeed after completion
+      expect(() => queue.enqueueUnique({ taskId: "task_unique_3" })).not.toThrow(DuplicateJobError);
+    });
+
+    it("DuplicateJobError carries the offending taskId", async () => {
+      const { DuplicateJobError } = await import("./index");
+      const queue = new JobQueue(store);
+      queue.enqueueUnique({ taskId: "task_unique_4" });
+
+      let caught: unknown;
+      try {
+        queue.enqueueUnique({ taskId: "task_unique_4" });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(DuplicateJobError);
+      expect((caught as InstanceType<typeof DuplicateJobError>).taskId).toBe("task_unique_4");
     });
   });
 });
